@@ -18,9 +18,88 @@ from wcwidth import wcswidth
 from responses import done
 
 
+# An explicit octant choice overrides tmux's default, while an omitted choice stays half there.
+for setting, want in (('', False), ('[ui]\nblocks = "octant"', True)):
+    with flow([], config=setting, env={'TMUX': 'flow'}) as f:
+        with Terminal(f, columns=160) as t:
+            t.shown('Message the agent')
+            t.until(lambda t: any(0x1cd00 <= ord(c) <= 0x1cdef for c in t.text()) == want)
+
+
+# A new drag can start on the quote chip left by a previous selection. A tap still quotes.
+with flow([claude.reply(text='alpha beta gamma delta epsilon zeta')], env={'SSH_CONNECTION': 'flow'}) as f:
+    with Terminal(f) as t:
+        t.shown('Message the agent')
+        t.send('hello\r')
+        t.shown('alpha beta gamma delta epsilon zeta', '▶')
+        y, x = next((y, wcswidth(line[:line.index('alpha')])) for y, line in enumerate(t.screen.display) if 'alpha beta' in line)
+        t.send(f'\x1b[<0;{x+1};{y+1}M\x1b[<32;{x+5};{y+1}M\x1b[<0;{x+5};{y+1}m')
+        t.shown('❝ quote')
+        cy, cx = next((y, wcswidth(line[:line.index('❝ quote')])) for y, line in enumerate(t.screen.display) if '❝ quote' in line)
+        t.send(f'\x1b[<0;{cx+1};{cy+1}M\x1b[<32;{x+10};{y+1}M\x1b[<0;{x+10};{y+1}m')
+        t.until(lambda t: t.output.count(b'\x1b]52;c;') >= 2)
+        assert '> alpha' not in t.text(), t.text()
+        t.click('❝ quote')
+        t.shown('> ')
+
+
+# A failed map mark beside the newest reply's play button keeps its own click.
+with flow([claude.reply(text=' '.join('word' for _ in range(600))),
+           claude.reply((None, 'Bash', {'command': 'exit 1'})),
+           claude.reply(text='latest reply')], env={'SSH_CONNECTION': 'flow'}) as f:
+    with Terminal(f, columns=120) as t:
+        t.shown('Message the agent')
+        t.send('hello\r')
+        t.shown('word word')
+        t.send('next\r')
+        t.shown('latest reply', '▶')
+        for rows in range(16, 81):
+            t.resize(rows, 120)
+            t.pump(.15)
+            found = next(((y, wcswidth(line[:line.rindex('✗')])) for y, line in enumerate(t.screen.display)
+                          if '▶' in line and '✗' in line and line.index('✗') > line.index('▶')), None)
+            if found:
+                y, x = found
+                t.send(f'\x1b[<0;{x+1};{y+1}M\x1b[<0;{x+1};{y+1}m')
+                t.shown('JUMPED IN TRANSCRIPT', timeout=3)
+                break
+        else:
+            raise AssertionError('failed mark never shared the reply cap row')
+
+
 def opened(f, session, want):
     """Waits until the session's status row says whether a terminal app has it open."""
     server.wait(lambda: server.agents(f)[session]["terminal"] is want, 10, f"terminal open never became {want}")
+
+
+# A skill is available on the very first input, before a session has been made.
+with flow([claude.reply(text="first skill received")]) as f:
+    f.cwd /= "project & skills"
+    f.cwd.mkdir()
+    local = f.cwd / ".agents/skills/local-first"
+    local.mkdir(parents=True)
+    (local / "SKILL.md").write_text("---\ndescription: A project skill.\n---\n")
+    server.start(f)
+    with Terminal(f) as t:
+        t.shown("Message the agent")
+        t.send("/local-first")
+        t.shown("▸ /local-first", timeout=5)
+        t.send("\x7f" * len("/local-first"))
+        t.send("/new-steward")
+        t.shown("▸ /new-steward", timeout=5)
+        assert not server.agents(f), "completion created a session"
+        t.send("\r")
+        t.shown("first skill received")
+        session = next((f.home / ".razor/sessions").iterdir()).name
+        inputs = [e for e in f.record(session) if e["kind"] == "input"]
+        assert any('<skill name="new-steward">' in e["text"] for e in inputs), inputs
+    late = f.cwd / ".agents/skills/added-later"
+    late.mkdir()
+    (late / "SKILL.md").write_text("---\ndescription: Added after the session started.\n---\n")
+    with Terminal(f, "--resume", session) as t:
+        t.shown("first skill received")
+        t.send("/added-later")
+        t.shown("▸ /added-later", timeout=5)
 
 
 ROOT, CHILD = "TERMINAL_RENDER_ROOT", "You are oak,"
@@ -46,7 +125,7 @@ replies = [agent(ROOT, "start", name="oak", brief="Read the brief and reply."),
            reply("FAIL_ROOT", "mcp__razor__status", {}), reply("FAIL_ROOT", "Bash", {"command": "sleep 600"})]
 # One stdio server, which the /mcp panel lists and disables.
 local = f"[mcp.local]\ncommand = {json.dumps(sys.executable)}\nargs = [{json.dumps(str(Path(mcp.__file__).resolve()))}]\n"
-with flow(replies, config=local + '[ui.keys.global]\nprefix = ["Ctrl-Y"]\n[server]\nname="box"\nrealm="work"\n') as f:
+with flow(replies, config=local + '[server]\nname="box"\nrealm="work"\n') as f:
     f.base()
     server.start(f)
     with Terminal(f, "--agents") as t:
@@ -64,7 +143,8 @@ with flow(replies, config=local + '[ui.keys.global]\nprefix = ["Ctrl-Y"]\n[serve
         t.send(f"\x1b[<0;{wide};6M\x1b[<32;{wide + 6};6M\x1b[<0;{wide + 6};6m")
         wide += 6
         t.until(lambda t: edge(t) == wide and (f.home / ".razor/list-width").read_text() == str(wide))
-        # A click opens a root; prefix n/p opens its project's neighbour across state headings.
+        # A click opens a root; prefix (backtick or Ctrl-B) n/p opens its project's neighbour
+        # across state headings, j/k the next and previous project's first, 2 its second.
         (f.cwd / "h").mkdir()  # its own folder, so the roots below keep their names
         def root(name, words, folder="h"):
             made = server.post(f, "/sessions", {"cwd": str(f.cwd / folder)})["session"]
@@ -72,16 +152,28 @@ with flow(replies, config=local + '[ui.keys.global]\nprefix = ["Ctrl-Y"]\n[serve
             server.post(f, f"/sessions/{made}/input", {"text": words})
             return made
         made = [root("p26", "ROOT_P26"), root("q26", "ROOT_Q26"), root("v26", "ROOT_V26", f.home), root("w26", "ROOT_W26", f.home)]
-        t.until(lambda t: -1 < (x := t.text()).find("p26") < x.find("IDLE") < x.find("○ q26") and "○ v26" in x and "○ w26" in x)  # n/p read the list's order, which can trail the cards' ○
+        # The prefix keys read the list's order, which can trail the cards' ○.
+        settled = lambda t: -1 < (x := t.text()).find("p26") < x.find("IDLE") < min(x.find(f"○ {n}26") for n in "qvw")
+        t.until(settled)
         conversation = lambda: "\n".join(line[wide:] for line in t.screen.display)
         t.click("○ q26")
         t.until(lambda _: "q26-visible" in conversation())  # opened before p reads which is open
-        t.send("\x19p")
+        t.send("`p")
         t.until(lambda _: "sleep 600" in conversation() and "q26-visible" not in conversation())
-        t.send("\x19n")
+        t.send("\x02n")
         t.until(lambda _: "q26-visible" in conversation() and "sleep 600" not in conversation())
         t.send("SENT_Q26\r")
         server.until(f, made[1], lambda es: any(e.get("text") == "sent-q26-visible" for e in es))
+        t.until(settled)
+        t.send("`j")
+        t.until(lambda _: re.search("[vw]26-visible", conversation()) and "q26-visible" not in conversation())
+        t.send("`k`2")
+        t.until(lambda _: "q26-visible" in conversation())
+        t.send("``x`")  # the prefix twice types it, and with words in the draft it types at once
+        t.until(lambda _: "`x`" in conversation())
+        t.send("\x15`\x1b[200~P26\x1b[201~T")  # a paste disarms it: T types, never runs rename
+        t.until(lambda _: "P26T" in conversation())
+        t.send("\x15")
         # v26 and w26, in a project of their own, are alike but for ﾞ (a column wider to ratatui than to
         # Razor) or a before a link: going from one to the other, both read, rewrites the link's
         # first cell, which is painted again.
@@ -103,7 +195,15 @@ with flow(replies, config=local + '[ui.keys.global]\nprefix = ["Ctrl-Y"]\n[serve
     # oak ends in prose with nothing pending, so it finishes and its report wakes the root.
     server.until(f, session, lambda es: es[-1]["kind"] == "turn_end"
                  and any(e.get("text") == "root-report-visible" for e in es))
-    with Terminal(f, "--resume", session, status=True, rows=50) as t:
+    # A stand-in vim in a folder with a space, which records how a reply reached it.
+    vim = f.home / "bin 26/vim"
+    vim.parent.mkdir()
+    vim.write_text(f"#!{sys.executable}\nimport json, os, sys, termios\np = sys.argv[-1]\n"
+                   "seen = {'args': sys.argv[1:], 'mode': os.stat(p).st_mode & 0o777, 'text': open(p).read(),"
+                   " 'cooked': bool(termios.tcgetattr(0)[3] & termios.ICANON)}\n"
+                   "json.dump(seen, open(os.environ['RAZOR_HOME'] + '/read-26.json', 'w'))\n")
+    vim.chmod(0o755)
+    with Terminal(replace(f, env={**f.env, "VISUAL": f"'{vim}' --flow"}), "--resume", session, status=True, rows=50) as t:
         t.shown("root-transcript-visible", "child-card-visible", "YOUR CALL",
                 "Which review should ship?", "careful", "quick", "YOU", "Message the agent")
         # A terminal that answers the OSC 7501 query keeps a record of the session and of its
@@ -133,6 +233,43 @@ with flow(replies, config=local + '[ui.keys.global]\nprefix = ["Ctrl-Y"]\n[serve
         t.shown("┌─ status", "state", "context", "last turn", "Esc back")
         t.send("\x1b")
         t.shown("root-transcript-visible", "YOUR CALL", "Message the agent")
+        # Prefix ? lists the keys; / keeps the rows holding every typed word; Esc ends the
+        # search, then closes the list.
+        t.send("`?/close split")
+        t.until(lambda t: "prefix.close_split" in t.text() and "list.close" not in t.text())
+        t.send("\x1b")
+        t.shown("attached_images.focus")
+        t.send("\x1b")
+        t.until(lambda t: "┌─ keys" not in t.text())
+        # With words in the draft, Ctrl-C empties it and Ctrl-Z brings them back. Ctrl-S sets the
+        # draft aside and, with the box empty, brings it back; a second is refused, never lost.
+        t.send("CLEAR_26\x03")
+        t.until(lambda t: "CLEAR_26" not in t.text())
+        assert "PRESS CTRL-C" not in t.text(), t.text()
+        t.send("\x1a")
+        t.shown("CLEAR_26")
+        t.send("\x13")
+        t.until(lambda t: "CLEAR_26" not in t.text())
+        t.send("OTHER_26\x13")
+        t.shown("ALREADY STASHED", "OTHER_26")
+        t.send("\x03\x13")
+        t.until(lambda t: "CLEAR_26" in t.text() and "OTHER_26" not in t.text())
+        t.send("\x03")
+        t.until(lambda t: "CLEAR_26" not in t.text())
+        # Prefix Up selects the reply above; Enter reads it in the person's own editor, read-only,
+        # in cooked mode, from a file only they can read and removed after; " quotes it.
+        t.send("`\x1b[A")
+        t.send("\r")
+        read = f.home / ".razor/read-26.json"
+        t.until(lambda _: read.exists())
+        seen = json.loads(read.read_text())
+        assert seen["args"][:2] == ["--flow", "-R"] and seen["mode"] == 0o600 and seen["cooked"], seen
+        assert seen["text"] in ("root-transcript-visible", "root-report-visible"), seen
+        t.until(lambda _: not Path(seen["args"][-1]).exists())
+        t.send('"j')  # the quote leaves browsing, so j is the draft's
+        t.until(lambda t: re.search(rf"❯ > {seen['text']} +│ *\n[^\n]*│ +j +│", t.text()))
+        t.send("\x03")
+        t.until(lambda t: "> root-" not in t.text())
         t.send("/mcp\r")
         t.shown("┌─ mcp", "● local", "connected · 2 tools")
         t.send("\r")
@@ -184,7 +321,7 @@ with flow(replies, config=local + '[ui.keys.global]\nprefix = ["Ctrl-Y"]\n[serve
         assert "  - NESTED_26" in t.screen.display[at + 1], t.text()
         t.until(lambda t: t.screen.title == f"✓ {f.cwd.name} · done")
         t.until(lambda t: t.records().get("", {}).get("state") == "done")
-        t.send(" ")
+        t.send("\x1b[C")  # a key that leaves the draft empty, so the quit's Ctrl-C needs no clearing
         t.until(lambda t: t.screen.title == f.cwd.name)
         t.until(lambda t: t.records()[""]["state"] == "idle")
     with Terminal(replace(f, cwd=f.home), "--agents") as t:
@@ -234,6 +371,11 @@ with flow(replies, config=local + '[ui.keys.global]\nprefix = ["Ctrl-Y"]\n[serve
             server.until(f, long, lambda es: es[-1]["kind"] == "turn_end"
                          and any(e.get("text", "").startswith(reply) for e in es))
         turn("PROSE_ROOT", "W0000")
+        t.shown("W2999")
+        # With an empty draft, Ctrl-U and Ctrl-D scroll half a page.
+        t.send("\x15")
+        t.until(lambda t: "W2999" not in t.text())
+        t.send("\x04")
         t.shown("W2999")
         t.send("\x1b[5~\x1b[5~")
         t.pump(1)
@@ -442,11 +584,11 @@ replies = [start("KIDS", ["kid2"]), reply("KIDS", "Bash", {"command": "sleep 1.1
            start("KIDS", kids), reply("KIDS", "Bash", {"command": poll}), agent("KIDS", "stop", child="kid1"), agent("KIDS", "settle", child="kid1", decision="discard"),
            reply("KIDS", text="kids-visible"), reply("KIDS"), reply("OTHER"), reply("NAP", "Bash", {"command": "sleep 60"}), reply("NAP"),
            start("You are kid1,", ["leaf"]), reply("You are kid1,", "Bash", {"command": "until grep -q 'sleep 6[1]' \"$RAZOR_HOME\"/sessions/*/record.jsonl; do sleep .1; done"}),
-           reply("You are leaf,", "Bash", {"command": "sleep 61"}), start("You are kid2,", grand),
+           reply("You are leaf,", "Bash", {"command": "sleep 61"}), start("You are kid2,", grand), agent("You are g1,", "headline", text="pinecone audit"),
            reply("You are kid2,", "Bash", {"command": "until grep -q 'sleep 6[0]' \"$RAZOR_HOME\"/sessions/*/record.jsonl; do sleep .1; done"}), message("ASK26", "question", text="Choose 26", options=["one", "two"]), reply("ASK26"), reply("ASK26", text="answered26"),
            *[r for k in ["kid2", *kids, *grand] for r in (
                reply(f"You are {k},", "Bash", {"command": "echo work > work; git add work && git -c user.name=Flow -c user.email=flow@example.invalid commit -m Work"}), agent(f"You are {k},", "finish", status="finished", report="ok"))]]
-with flow(replies) as f:
+with flow(replies, config='[ui.keys.goto]\nsearch = ["s"]\n[ui.keys.prefix]\n"attached_images.focus" = ["i"]\n') as f:
     f.base()
     root = json.loads(f.run("--print=json", "KIDS", timeout=120).stdout)["session"]
     server.until(f, root, lambda es: sum(e["kind"] == "turn_end" for e in es) == 2)  # and the reports'
@@ -466,7 +608,7 @@ with flow(replies) as f:
         t.send(f"\x1b[<0;6;{y + 1}M\x1b[<0;6;{y + 1}m")
         t.shown("Enter queues it · Esc stops it", "kids-headline", "cwd · main")
         assert t.screen.buffer[y][1].data == "▌" and t.screen.buffer[y][30].bg == "123440", "the addressed row is unmarked"
-        t.send("\x1b[D ")
+        t.send("`h ")  # the prefix and h give the list the keys; Left now opens the overview
         t.until(lambda t: not kid(t))
         x = t.screen.display[y].index("▸") + 1  # the folded parent's own mark, not the header's
         t.send(f"\x1b[<0;{x};{y + 1}M\x1b[<0;{x};{y + 1}m")
@@ -484,3 +626,19 @@ with flow(replies) as f:
         t.pump(0.7)  # past the 600 ms a new question refuses digits for
         t.send("2")
         server.until(f, other, lambda es: any(e.get("text") == "answered26" for e in es))
+
+        # Go to finds a grandchild by its headline and opens the real session stream.
+        t.send("/goto\r/pinecone")
+        t.pump(.2)
+        assert "/ pinecone" not in t.text(), t.text()  # the old, unbound slash cannot search
+        t.send("spinecone")
+        t.until(lambda t: "/ pinecone" in t.text() and "1 of" in t.text() and any("└" in line and " g1 " in line and "pinecone audit" in line for line in t.screen.display))
+        t.send("\r")
+        g1 = next(id for id, a in server.agents(f).items() if a["name"] == "g1")
+        opened(f, g1, True)
+        t.until(lambda t: "┌─ Go to" not in t.text() and "pinecone audit" in "".join(t.screen.display[:4]))
+        t.send("`i")  # an action named under the prefix keeps its own context's conditions
+        t.shown("PREFIX ACTION IS UNBOUND OR UNAVAILABLE")
+        t.send("\x1b[D")  # From a helper, Left addresses its parent before changing views.
+        opened(f, g1, False)
+        opened(f, server.agents(f)[g1]["parent"], True)

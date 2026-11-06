@@ -218,7 +218,11 @@ async fn seed(
             Ok(Body::Input(i)) if matches!(i.from, Origin::Person | Origin::Answer { .. }) => {
                 Some(("user", "input_text", i.text))
             }
-            Ok(Body::Text { text }) => Some(("assistant", "output_text", text)),
+            Ok(Body::Text { text }) => Some((
+                "assistant",
+                "output_text",
+                crate::record::reply(&text).text.to_owned(),
+            )),
             Ok(Body::Call { name, input, .. }) => crate::record::ask(&name, &input).map(|ask| {
                 (
                     "assistant",
@@ -514,7 +518,7 @@ impl Call {
         match entry.body {
             Body::Text { text } => {
                 self.set_working(true).await;
-                self.say(&text).await
+                self.say(crate::record::reply(&text).text).await
             }
             Body::Call { name, input, .. } => {
                 self.set_working(true).await;

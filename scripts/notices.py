@@ -23,7 +23,8 @@ for p in sorted(packages, key=lambda p: (p['name'], p['version'])):
     for file in files:
         text = file.read_text(encoding='utf-8', errors='replace').strip()
         notices.setdefault(text, set()).add(name)
-for url, name in [('vercel-labs/agent-browser/v0.41.1/LICENSE', 'agent-browser 0.41.1 (Apache-2.0)'),
+for url, name in [('vercel-labs/agent-browser/v0.41.2/LICENSE', 'agent-browser 0.41.2 (Apache-2.0)'),
+                  ('vercel-labs/agent-desktop/v1.2.0/LICENSE', 'agent-desktop 1.2.0 (Apache-2.0)'),
                   ('BurntSushi/ripgrep/15.2.0/LICENSE-MIT', 'ripgrep 15.2.0 (MIT or Unlicense)'),
                   ('PCRE2Project/pcre2/pcre2-10.45/LICENCE.md', 'PCRE2 10.45, built into ripgrep 15.2.0 (BSD-3-Clause)'),
                   ('jemalloc/jemalloc/81034ce1f1373e37dc865038e1bc8eeecf559ce8/COPYING', 'jemalloc 5.3.1, built into ripgrep 15.2.0 on Linux (BSD-2-Clause)'),

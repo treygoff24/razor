@@ -219,7 +219,7 @@ fn resident(app: &App, id: &SessionId, r: &ResidentDay, room: usize, now: u64) -
 }
 
 /// `14:00` in the terminal's zone; empty without one.
-fn hhmm(app: &App, at: u64) -> String {
+pub(super) fn hhmm(app: &App, at: u64) -> String {
     zoned(at, app.zone.as_ref()).map_or_else(String::new, |t| t.strftime("%H:%M").to_string())
 }
 

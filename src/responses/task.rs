@@ -188,10 +188,7 @@ impl Task {
                     }
                     match response {
                         Ok(response) => self.response(response).await?,
-                        Err(error) => {
-                            let reason = matches!(error, Error::ContextOverflow(_)).then_some("prompt_too_long");
-                            self.end(Some(End::Error(error.to_string())), reason).await?;
-                        }
+                        Err(error) => self.failed(error).await?,
                     }
                 }
                 Some((call, result)) = async { cells?.next().await } => {
@@ -222,7 +219,11 @@ impl Task {
                         let _ = run.reply.send(Err(code_mode::Error::Refused("The turn ended before this call was admitted.".into())));
                     }
                 },
-                () = std::future::ready(()), if ready => self.request().await?,
+                () = std::future::ready(()), if ready => {
+                    if let Err(error) = self.request().await {
+                        self.failed(error).await?;
+                    }
+                }
             }
         }
     }
@@ -268,11 +269,11 @@ impl Task {
         for image in self.images.drain(..) {
             let path = image.path.to_string_lossy().into_owned();
             content.push(json!({"type": "input_text", "text": path}));
-            content.push(part(&image, &self.dir, &mut size).await?);
+            content.push(part(&image, &self.dir, &mut size, self.conversation.is_chat()).await?);
         }
         for input in &self.inputs {
             for image in &input.images {
-                content.push(part(image, &self.dir, &mut size).await?);
+                content.push(part(image, &self.dir, &mut size, self.conversation.is_chat()).await?);
             }
             let path = input.video.as_ref().filter(|_| video);
             content.extend(
@@ -576,6 +577,13 @@ impl Task {
         self.emit(FromBridge::Entry { body, native: None }).await
     }
 
+    /// Local size limits and host context refusals share the controller's one-rebuild path.
+    async fn failed(&mut self, error: Error) -> Result<(), Error> {
+        let reason =
+            matches!(error, Error::ContextOverflow(_) | Error::Size).then_some("prompt_too_long");
+        self.end(Some(End::Error(error.to_string())), reason).await
+    }
+
     /// Ends the turn and stops its cells; `None` settles the conversation instead.
     async fn end(&mut self, end: Option<End>, reason: Option<&str>) -> Result<(), Error> {
         let Some(turn) = self.turn.take() else {
@@ -695,14 +703,15 @@ fn read(items: &[Value]) -> (Vec<Body>, Vec<Call>) {
 }
 
 /// An image file as a `razor_image` part naming it relative to the session directory, which
-/// `Conversation::body` reads; refused past `IMAGE` or the request cap that `size` counts its
-/// encoding toward, before the request is built. A file already gone counts nothing.
-async fn part(image: &Image, dir: &Path, size: &mut usize) -> Result<Value, Error> {
+/// `Conversation::body` reads; refused past `IMAGE`, or on chat when the batch's encoded size
+/// exceeds the request cap. Responses bounds the whole history while rendering it. A file
+/// already gone counts nothing.
+async fn part(image: &Image, dir: &Path, size: &mut usize, chat: bool) -> Result<Value, Error> {
     let bytes = tokio::fs::metadata(&image.path)
         .await
         .map_or(0, |m| m.len());
     *size += (bytes as usize).div_ceil(3) * 4;
-    if bytes > IMAGE || *size > CAP {
+    if bytes > IMAGE || (chat && *size > CAP) {
         return Err(Error::Size);
     }
     let path = image.path.strip_prefix(dir).unwrap_or(&image.path);

@@ -70,6 +70,8 @@ impl Session {
             return invalid("Image and file paths must stay inside the session directory.");
         }
         self.choosable(input.model.as_deref(), input.speed)?;
+        input.suggestions = matches!(input.from, Origin::Person | Origin::Answer { .. })
+            && self.c.config().await.ui.suggestions;
         let person = input.from.is_person() && input.voice.is_none() && input.voice_call.is_none();
         let entry = self.append(Body::Input(input.clone()), None).await?;
         // A fresh run's thread closes with the turn that answers its schedule.
@@ -137,7 +139,22 @@ impl Session {
             (self.done, self.conversation) = (Some(EntryId(0)), None);
             return self.stop().await.map(|()| EntryId(0));
         }
-        let entry = self.admit(Command::Done.input(DONE.into())).await?;
+        let owner = self
+            .c
+            .memory()
+            .state_owner(&self.c, &self.record.summary().cwd, &self.id)
+            .await
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        let state = if let Some(owner) = owner {
+            format!(
+                "Send the home session `{owner}` one `message` note of what it should keep from this session, and write your facts and notes; the home session holds the folder's one state note."
+            )
+        } else {
+            "Then write the project's state note with `memory` (`write`, kind `state`): a few lines on the work in hand and the decisions behind it, not a summary of the past; it replaces the project's last state note and opens the next session's startup page.".into()
+        };
+        let entry = self
+            .admit(Command::Done.input(DONE.replace("{state}", &state)))
+            .await?;
         clear_draft(self.record.dir().to_path_buf()).await?;
         self.done = Some(entry);
         self.publish_row();
@@ -166,7 +183,25 @@ impl Session {
                 _ => Err(Error::Full(self.id.clone())),
             };
         }
-        let text = record::handover(trigger).into();
+        let mut text = record::handover(trigger).to_owned();
+        if trigger == Trigger::Idle {
+            let owner = self
+                .c
+                .memory()
+                .state_owner(&self.c, &self.record.summary().cwd, &self.id)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("razor: session {} state owner: {e}", self.id);
+                    None
+                });
+            let state = match owner {
+                Some(owner) => format!(
+                    "Send the home session `{owner}` one note of changes it should keep for the state note."
+                ),
+                None => "Update the project state note if it changed.".into(),
+            };
+            text = text.replace("{state}", &state);
+        }
         let asked = match trigger {
             Trigger::Handover => Command::Handover.input(text),
             _ => Input {

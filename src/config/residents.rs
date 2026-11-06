@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
 /// One resident: plain config a pack can hold.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Resident {
     /// Its home: its session's working directory, fixed when the session is made, as any
     /// session's is.
@@ -38,7 +39,8 @@ fn night() -> Time {
 
 /// The input that wakes a resident at set times. A heartbeat that finds its resident busy is
 /// skipped, and one missed while Razor was down is not made up.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Heartbeat {
     pub(crate) at: Vec<Time>,
     /// The weekdays it runs on; empty is every day.
@@ -53,7 +55,8 @@ pub(crate) struct Heartbeat {
 /// A named input that comes due at set times, a "named job". One that comes due while its
 /// resident is busy waits for the turn to end. One that came due while Razor was down runs once
 /// at the next start, if the record holds an earlier due time of the same name.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Schedule {
     pub(crate) at: Vec<Time>,
     #[serde(default)]

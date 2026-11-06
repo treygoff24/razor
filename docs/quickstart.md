@@ -26,7 +26,7 @@ Answer setup's questions:
 
 To repeat setup, run `razor setup`. It keeps existing settings and sign-ins.
 
-Setup downloads the browser agents use and runs `razor doctor`, which prints what it found and a command for each problem, then the models Razor can run on:
+Razor ships the browser and desktop-control programs; setup downloads Chrome and runs `razor doctor`, which prints what it found and a command for each problem, then the models Razor can run on:
 
 ```text
 Razor can run on Claude.
@@ -34,7 +34,7 @@ Razor can run on Claude.
 
 If doctor finds no model Razor can run on, setup stops there; fix what doctor names and run `razor setup` again.
 
-On minimal Linux systems, Chrome also needs system libraries. Install them with `~/.local/share/razor/current/agent-browser install --with-deps`; this uses sudo. Doctor checks model sign-ins, keys, the browser program, the server and the service file. It does not check whether Chrome can launch; `~/.local/share/razor/current/agent-browser doctor --offline` does.
+On minimal Linux systems, Chrome also needs system libraries. Install them with `~/.local/share/razor/current/agent-browser install --with-deps`; this uses sudo. Doctor checks model sign-ins, keys, the browser and desktop-control programs, the server and the service file. It does not check whether Chrome can launch; `~/.local/share/razor/current/agent-browser doctor --offline` does.
 
 Say yes to the last question to open the terminal app, or open it yourself in the next step. Optional web-search keys (Exa, Firecrawl and Parallel) and voice keys (ElevenLabs) come later:
 
@@ -43,7 +43,7 @@ razor keys
 razor restart
 ```
 
-Key entry is hidden; Enter keeps a saved value. Without these keys, Claude and GPT agents still have their model's own web tools, and nothing is read aloud. To have every conversation start knowing your name or preferences, ask an agent to put them in your about file, `~/.razor/about.md`.
+Key entry is hidden; Enter keeps a saved value. When you create the ElevenLabs key, give it the Text to Speech and Voices (read) permissions (or leave it unrestricted): speech lists voices and turns text into speech. Without these keys, Claude and GPT agents still have their model's own web tools, and nothing is read aloud. To have every conversation start knowing your name or preferences, ask an agent to put them in your about file, `~/.razor/about.md`.
 
 ## 3. Send your first message
 
@@ -60,7 +60,7 @@ Type a message and press Enter:
 What does this repository do? Answer in five lines.
 ```
 
-The reply streams into the transcript. Escape stops the agent mid-turn, along with the command it is running. `/help` lists every key and command.
+The reply streams into the transcript. Escape stops the agent mid-turn, along with the command it is running. `/help` lists every key and command. Pictures appear in the transcript too: the ones you attach, and the ones Razor's own tools return to an agent, such as a generated image or an MCP server's screenshot.
 
 ## 4. Ask for a helper
 
@@ -88,13 +88,13 @@ The helper's commit is now in your branch's history.
 
 ## 6. Quit the terminal app, come back, or work without it
 
-Press Ctrl-C twice to quit the terminal app. The session keeps running on the server, and its helpers with it. To reopen the newest session in a folder:
+Press Ctrl-C twice to quit the terminal app; with words in the draft, the first Ctrl-C empties it. The session keeps running on the server, and its helpers with it. To reopen the newest session in a folder:
 
 ```sh
 razor --continue
 ```
 
-To start with the agents list open beside your most recently active conversation (or a fresh conversation if there is none), run `razor --agents`. F2, `/agents`, or Left at the empty composer opens the same list after startup.
+To start with the agents list open beside your most recently active conversation (or a fresh conversation if there is none), run `razor --agents`. Left at the empty composer opens the same list after startup, as F2 and `/agents` do, and Left there again opens the overview: every agent on the whole screen, with what it is for, what it is doing now and its helpers. There Up and Down choose an agent, and Right, Enter or a click opens it beside the list; Right at the empty composer then closes the list and leaves the session on the whole screen, as F2, `/agents` or a click on the ‹ at the list's top right does. In a helper's conversation, Left goes back to its parent. F3, or the ⤢ at the list's top right, also opens the overview, and F3 or Esc goes back. Many actions also sit behind a prefix, as in tmux: with an empty draft, press backtick or Ctrl-B, then a key; the prefix and `?` list every key ([Terminal keys](configuration.md#terminal-keys)). To jump to any agent instead, `/goto` (or the prefix, then `g`) opens Go to: every agent on every connected machine by project, children under their parents. Press `/` and type part of a name, a topic or a state such as `working`; the same words also search your past conversations, listed underneath. Arrows or j/k choose, Enter opens it, Esc closes.
 
 To ask one question without opening the terminal app, use `razor --print`: it sends the message, prints the answer and exits, which also suits scripts:
 
@@ -104,4 +104,12 @@ razor --print "List the TODO comments in this repository."
 
 [Using Razor from scripts](scripting.md) covers its JSON and streamed output, carrying a conversation across calls, and the API behind it.
 
+To connect another machine, put both on the same Tailscale network and run `razor setup` on each. Setup prints this server's hostname and reachable address without replacing values you set. `razor devices find` finds the other servers and prints the command to pair one; run the confirmation command on the other machine too. [More machines](machines.md) covers pairing, manual addresses and what access a paired server gets.
+
 Next: [Concepts](concepts.md) explains sessions, helpers and memory; [Configuration](configuration.md) lists every setting.
+
+## Update Razor
+
+Run `razor update` to install the latest release, then `razor restart` when you want the server to use it. A release install also checks at server startup and about once a day. It downloads a newer release while your sessions keep running, and the terminal shows a one-line notice when it is ready. Restarting is your choice.
+
+Run `razor config set release_updates false` to stop future background checks; `razor update` still works. Source builds update from their checkout. On v0.1.0, run the [install command](#1-install) once more and restart to get these update commands.

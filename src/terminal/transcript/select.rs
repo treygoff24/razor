@@ -184,6 +184,10 @@ fn read<'a>(kind: &Kind, cells: impl Iterator<Item = (u16, &'a str)>) -> String 
 /// quote chip's drops the selection shown.
 pub(in crate::terminal) fn press(app: &mut App, at: (u16, u16), click: Option<Action>) -> bool {
     if matches!(click, Some(Action::Quote)) {
+        if let Some(s) = &mut app.selection {
+            (s.anchor, s.at, s.dragged, s.click) = (at, at, false, click);
+            return true;
+        }
         return false;
     }
     app.selection = None;
@@ -214,6 +218,9 @@ pub(in crate::terminal) fn press(app: &mut App, at: (u16, u16), click: Option<Ac
 pub(in crate::terminal) fn drag(app: &mut App, at: (u16, u16)) {
     if let Some(s) = app.selection.as_mut() {
         s.dragged |= s.anchor != at;
+        if s.dragged {
+            s.copied = None;
+        }
         s.at = at;
     }
 }
@@ -231,6 +238,10 @@ pub(in crate::terminal) fn release(app: &mut App, at: (u16, u16), now: u64) -> O
     app.clicks = (now, at, clicks);
     let t = app.transcript()?;
     if !s.dragged {
+        if matches!(s.click, Some(Action::Quote)) {
+            app.selection = Some(s);
+            return Some(Action::Quote);
+        }
         let span = match (&s.click, clicks) {
             (Some(_), _) | (None, 1) => return s.click,
             (None, 2) => t.word(at),
@@ -290,12 +301,18 @@ pub(in crate::terminal) fn paint(app: &mut App, b: &mut Buffer, now: u64) {
 /// The quote chip: the copied words into the editor, each line after `> `, the cursor on the
 /// line below them, after a blank line when the editor has words.
 pub(in crate::terminal) fn quote(app: &mut App) {
-    let Some((_, words)) = app.selection.take().and_then(|s| s.copied) else {
-        return;
-    };
+    if let Some((_, words)) = app.selection.take().and_then(|s| s.copied) {
+        quoted(app, &words);
+    }
+}
+
+/// Appends `words` to the draft as a quote, a paragraph after any words already there, and leaves
+/// browsing, so the next keys write after it.
+pub(in crate::terminal) fn quoted(app: &mut App, words: &str) {
     let lead = ["\n\n", ""][usize::from(app.composer.text.is_empty())];
     let quoted: String = words.lines().map(|l| format!("> {l}\n")).collect();
     if app.composer.append(&format!("{lead}{quoted}")) {
+        app.unselect();
         app.edited();
     }
 }

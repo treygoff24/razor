@@ -14,12 +14,17 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+try:
+    import ssl
+except ImportError:
+    sys.exit(f'speech: Python ({sys.executable}) has no working SSL support; set speech = ["/path/to/python3", {json.dumps(str(Path(__file__).absolute()))}] in config.toml to use a Python with SSL.')
+
 BASE = os.environ.get("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io")
 # George, an ElevenLabs premade voice, which every account has.
 VOICE = os.environ.get("RAZOR_VOICE") or "JBFqnCBsd6RMkjVDRZzb"
 MODEL = os.environ.get("ELEVENLABS_MODEL") or "eleven_v4_turbo"
 # RAZOR_TEMPO: a voice's speed, made in the recording (eleven_v3 ignores ElevenLabs'); the phone's applies on top.
-MOST, RESERVE, TEMPO = 5000, 30000, float(os.environ.get("RAZOR_TEMPO") or 1)
+MOST, TEMPO = 5000, float(os.environ.get("RAZOR_TEMPO") or 1)
 TABLE = "There's a table in the reply."
 FFMPEG = shutil.which("ffmpeg")
 
@@ -60,8 +65,14 @@ def call(path, body=None):
     key = os.environ.get("ELEVENLABS_API_KEY") or sys.exit("speech: there is no ElevenLabs key; run razor keys to add one.")
     headers = {"xi-api-key": key, "Content-Type": "application/json"}
     data = None if body is None else json.dumps(body).encode()
-    with urllib.request.urlopen(urllib.request.Request(BASE + path, data, headers), timeout=60) as answer:
-        return json.load(answer)
+    try:
+        with urllib.request.urlopen(urllib.request.Request(BASE + path, data, headers), timeout=60) as answer:
+            return json.load(answer)
+    except urllib.request.HTTPError as e:
+        detail = json.loads(text).get("detail") if (text := e.read()).startswith(b"{") else None  # only JSON names a permission
+        if isinstance(detail, dict) and detail.get("status") == "missing_permissions":
+            sys.exit(f"speech: {detail.get('message', 'the ElevenLabs key lacks a permission.')} The key needs Text to Speech and Voices (read).")
+        raise
 
 
 def voices():
@@ -125,10 +136,6 @@ def main():
     text = ear(sys.stdin.read())
     if not text:
         sys.exit("speech: the reply has no words to read.")
-    plan = call("/v1/user")["subscription"]
-    left = plan["character_limit"] - plan["character_count"]
-    if left-len(text) < RESERVE:
-        sys.exit(f"speech: {left:,} credits cannot cover this reply and the {RESERVE:,} reserve; nothing spoken.")
     settings = {"stability":1-float(os.environ.get("RAZOR_EXPRESSIVENESS","0.5")),"similarity_boost":0.75}
     body = {"text":text,"model_id":MODEL,"voice_settings":settings}
     result = call(f"/v1/text-to-speech/{urllib.parse.quote(VOICE,safe='')}/with-timestamps?output_format=mp3_44100_64",body)
@@ -138,7 +145,7 @@ def main():
         Path(path).parent.mkdir(parents=True,exist_ok=True)
         Path(path).write_text(json.dumps({**meta,"levels":levels}))
     sys.stdout.buffer.write(mp3)
-    print(f"speech: {sys.argv[-1] if sys.argv[1:] else 'a session'}: {len(text):,} characters spoken, {left:,} credits left before",file=sys.stderr)
+    print(f"speech: {sys.argv[-1] if sys.argv[1:] else 'a session'}: {len(text):,} characters spoken",file=sys.stderr)
 
 
 if __name__ == "__main__":

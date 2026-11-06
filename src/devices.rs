@@ -37,9 +37,21 @@ pub(crate) struct Devices {
     /// Each open session stream's device (None for the local key) and session; the stream holds
     /// the strong half. One entry per open stream at most: ended ones go at the next open.
     streams: Mutex<Vec<Stream>>,
+    /// Untrusted pairing requests, newest 16 sender IPs, one each, expiring after ten minutes.
+    requests: Mutex<Vec<(std::time::Instant, std::net::SocketAddr, String)>>,
 }
 
 type Stream = (Option<String>, SessionId, Weak<()>);
+
+fn public(device: &Device) -> Device {
+    Device {
+        key: None,
+        push: None,
+        follows: Vec::new(),
+        notifications: None,
+        ..device.clone()
+    }
+}
 
 impl Devices {
     /// Read `device.key`, making it at the first start, and `devices.json`.
@@ -71,6 +83,7 @@ impl Devices {
             forever: watch::channel(()).0,
             enrolled: RwLock::new(enrolled),
             streams: Mutex::default(),
+            requests: Mutex::default(),
         })
     }
 
@@ -164,16 +177,82 @@ impl Devices {
     /// The enrolled devices without private keys or notification tokens.
     pub(crate) async fn list(&self) -> Vec<Device> {
         let enrolled = self.enrolled.read().await;
-        enrolled
+        enrolled.iter().map(|(d, _)| public(d)).collect()
+    }
+
+    /// The caller's enrollment without private fields.
+    pub(crate) async fn identity(&self, name: &str) -> Option<Device> {
+        self.enrolled
+            .read()
+            .await
             .iter()
-            .map(|(d, _)| Device {
-                key: None,
-                push: None,
-                follows: Vec::new(),
-                notifications: None,
-                ..d.clone()
-            })
-            .collect()
+            .find(|(d, _)| d.name == name)
+            .map(|(d, _)| public(d))
+    }
+
+    /// Keeps an untrusted request for ten minutes; only `answered` can verify it.
+    pub(crate) fn hold(&self, address: std::net::SocketAddr, key: String) {
+        let mut requests = self.requests.lock().unwrap_or_else(|e| e.into_inner());
+        requests
+            .retain(|(at, a, _)| at.elapsed() < Duration::from_secs(600) && a.ip() != address.ip());
+        if requests.len() == 16 {
+            requests.remove(0);
+        }
+        requests.push((std::time::Instant::now(), address, key));
+    }
+
+    /// Finds a held key only when the address the person chose resolves to its sender and that
+    /// server identifies the key as an enrollment for our bound address.
+    pub(crate) async fn answered(
+        &self,
+        address: &str,
+        own: std::net::SocketAddr,
+    ) -> Option<String> {
+        let resolved =
+            tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host(address))
+                .await
+                .ok()?
+                .ok()?
+                .take(32)
+                .collect::<Vec<_>>();
+        let (addr, key) = {
+            let mut requests = self.requests.lock().unwrap_or_else(|e| e.into_inner());
+            requests.retain(|(at, ..)| at.elapsed() < Duration::from_secs(600));
+            requests
+                .iter()
+                .find(|(_, addr, _)| resolved.contains(addr))
+                .map(|(_, addr, key)| (*addr, key.clone()))?
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let reply = self
+                .http
+                .get(format!("http://{addr}/v1/device"))
+                .bearer_auth(&key)
+                .send()
+                .await
+                .ok()?
+                .error_for_status()
+                .ok()?;
+            let body = axum::body::Body::from_stream(reply.bytes_stream());
+            let body = axum::body::to_bytes(body, 4096).await.ok()?;
+            let device = serde_json::from_slice::<Device>(&body).ok()?;
+            let mut resolved = tokio::net::lookup_host(device.address?).await.ok()?;
+            resolved.any(|addr| addr == own).then_some(key)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Sends an untrusted request once; failure keeps the printed-key pairing path available.
+    pub(crate) async fn ask(&self, address: &str, own: &str, key: &str) -> bool {
+        self.http
+            .post(format!("http://{address}/v1/pair"))
+            .json(&serde_json::json!({"address": own, "key": key}))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success())
     }
 
     /// The authenticated device and its revocation receiver; None for an unknown key.
@@ -196,22 +275,12 @@ impl Devices {
         key: Option<String>,
     ) -> Result<Device, Error> {
         let refuse = |status, sentence| Err(Error::Enrollment(status, sentence));
-        if name.is_empty()
-            || name.len() > 32
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        {
+        if !valid_name(&name) {
             let sentence =
                 format!("A device name is 1 to 32 lowercase letters, digits and -, not {name:?}.");
             return refuse(StatusCode::BAD_REQUEST, sentence);
         }
-        let hex = |k: &String| {
-            k.len() == 64
-                && k.bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        };
-        if key.as_ref().is_some_and(|k| !hex(k)) {
+        if key.as_ref().is_some_and(|k| !valid_key(k)) {
             let sentence = "A pairing key is the 64 hex digits the other server printed.".into();
             return refuse(StatusCode::BAD_REQUEST, sentence);
         }
@@ -242,6 +311,10 @@ impl Devices {
         let mut all: Vec<&Device> = enrolled.iter().map(|(d, _)| d).collect();
         all.push(&device);
         self.save(&all).await?;
+        self.requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, _, key)| Some(key) != device.key.as_ref());
         enrolled.push((device.clone(), watch::channel(()).0));
         Ok(device)
     }
@@ -461,6 +534,7 @@ fn request(
 
 fn client(seconds: u64, idle: usize) -> Result<reqwest::Client, Error> {
     reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(seconds))
         .pool_max_idle_per_host(idle)
@@ -496,4 +570,20 @@ pub(crate) fn other<E: std::error::Error + Send + Sync + 'static>(
 }
 fn refuse<T>(sentence: String) -> Result<T, Error> {
     Err(Error::Refused(sentence))
+}
+
+/// Shared device and discovered-server name rule.
+pub(crate) fn valid_name(name: &str) -> bool {
+    (1..=32).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Pairing keys are 32 bytes encoded as lowercase hex.
+pub(crate) fn valid_key(key: &str) -> bool {
+    key.len() == 64
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }

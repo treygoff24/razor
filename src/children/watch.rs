@@ -90,7 +90,7 @@ impl Children {
                 if let Ok(Body::Text { text }) =
                     serde_json::from_str::<Entry>(&line).map(|e| e.body)
                 {
-                    last = text;
+                    last = crate::record::reply(&text).text.to_owned();
                 }
             }
             let skip = last.chars().count().saturating_sub(LAST);

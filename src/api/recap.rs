@@ -3,10 +3,10 @@
 use super::{App, Page, Refusal};
 use crate::profiles::{self, Transport};
 use crate::protocol::{Body, Entry, EntryId, SessionId};
-use crate::record::Summary;
+use crate::record::{Summary, target};
 use axum::extract::{Json, Path, Query, State};
 use axum::http::StatusCode;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::time::Duration;
 
 const PROMPT: &str = include_str!("recap.md");
@@ -99,7 +99,7 @@ async fn evidence(app: &App, s: &Summary, after: EntryId) -> Option<String> {
     let (mut said, mut steps) = (Vec::new(), Vec::new());
     while let Some(line) = page.next_line().await {
         match serde_json::from_str::<Entry>(&line.ok()?).ok()?.body {
-            Body::Text { text } => said.push(text + "\n"),
+            Body::Text { text } => said.push(crate::record::reply(&text).text.to_owned() + "\n"),
             Body::Call { call, name, input } => steps.push((
                 call,
                 format!("- {name} {}", target(&input)),
@@ -138,16 +138,6 @@ async fn evidence(app: &App, s: &Summary, after: EntryId) -> Option<String> {
         .map(|s| format!("{}: {}\n", s.1, s.2))
         .collect());
     Some(format!("{head}{said}{known}{steps}"))
-}
-
-/// What a call acted on: its command, file, pattern, path, address or query, else its first text,
-/// on one line of at most 120 bytes.
-fn target(input: &Value) -> String {
-    let named = ["command", "file_path", "pattern", "path", "url", "query"];
-    let text = named.iter().find_map(|k| input[k].as_str());
-    let text = text.or_else(|| input.as_object()?.values().find_map(Value::as_str));
-    let words = text.unwrap_or_default().split_whitespace();
-    cut(&words.collect::<Vec<_>>().join(" "), 120).to_owned()
 }
 
 fn unavailable() -> Refusal {

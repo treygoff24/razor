@@ -1,6 +1,8 @@
-//! The agents view: the list beside the cockpit, its keys and its commands; `sections` renders
-//! the server-resolved sessions it shares with the status pane.
+//! The agents view: the list beside the cockpit and the full-screen overview, their keys and
+//! commands; `sections` renders the server-resolved sessions the list shares with the status
+//! pane, and `overview` draws the same layout over the whole screen.
 mod groups;
+mod overview;
 mod sections;
 use super::view::{self, Action, Hit, Question};
 use super::{App, keys, status, text::*};
@@ -8,6 +10,7 @@ use crate::protocol::views::{Layout, SectionKind, ViewsStatus};
 use crate::protocol::{SessionId, now};
 use crossterm::event::{KeyCode as K, KeyEvent};
 pub(super) use groups::edit;
+pub(super) use overview::{covers, draw as overlay};
 use ratatui::{buffer::Buffer, layout::Rect};
 pub(super) use sections::{GUTTER, addressed, gutter, mark, rows, section_rows};
 use std::collections::BTreeSet;
@@ -17,13 +20,16 @@ pub(super) struct List {
     pub open: bool,
     pub keys: bool,
     pub area: Option<Rect>,
-    pub editor: bool,
     changed: u64,
     pub selected: Option<Action>,
     pub view: Option<String>,
     status: Option<ViewsStatus>,
     pub scroll: usize,
     reveal: bool,
+    /// The overview while it is shown, with its rows' scroll; it owns the keys meanwhile.
+    pub overview: Option<usize>,
+    /// The screen the overview last drew on; a new size brings the selection back into view.
+    pub sized: Rect,
     /// Headings and children folded from their default (open), and Earlier, finished children's
     /// lines and the servers and residents lines opened (closed); held while their layout holds
     /// them, the servers and residents lines always.
@@ -72,7 +78,7 @@ pub(super) fn toggle(app: &mut App) {
     if app.list.open && (app.sending.is_some() || super::audio::unsent(app)) {
         return app.say("A note or input is pending; wait before entering a session.");
     }
-    app.list.open = !app.list.open;
+    (app.list.open, app.list.overview) = (!app.list.open, None);
     app.list.changed = now();
     app.list.reveal = true;
     app.list.keys = app.list.open;
@@ -81,7 +87,24 @@ pub(super) fn toggle(app: &mut App) {
         full(app);
     }
 }
-fn full(app: &mut App) {
+/// Left at the composer's line start: a helper's parent in the same view; else one view out,
+/// the session alone to the list beside it, the composer keeping the keys, and that to the
+/// overview, where the list cannot sit beside the session below 80 columns at once.
+pub(super) fn outward(app: &mut App) {
+    if let Some(parent) = app.row().and_then(|a| a.parent.clone()) {
+        keys::focus(app, Some(parent));
+        if !app.list.open {
+            full(app);
+        }
+    } else if app.list.open || app.columns < 80 {
+        overview(app);
+    } else {
+        toggle(app);
+        app.list.keys = false;
+    }
+}
+/// Shows the addressed session as the main one, as closing the list does.
+pub(super) fn full(app: &mut App) {
     if app.sending.is_some() || super::audio::unsent(app) {
         return;
     }
@@ -96,72 +119,66 @@ fn full(app: &mut App) {
 /// Clicks share the renderer's actions; a list click addresses the right-hand composer.
 pub(super) fn press(app: &mut App, action: Action) {
     match action {
-        Action::Section(id) => {
-            if !app.list.toggled.remove(&id) {
-                app.list.toggled.insert(id);
-            }
-        }
+        // A heading's fold toggles.
+        Action::Section(id) => _ = app.list.toggled.remove(&id) || app.list.toggled.insert(id),
         Action::New => super::start::open(app),
         Action::Thread(home) => thread(app, &home),
         Action::Agent(id) => {
             app.list.selected = Some(Action::Agent(id.clone()));
-            keys::focus(app, Some(id));
-            app.list.keys = false;
+            keys::focus(app, Some(id.clone()));
+            // From the overview, a refused switch keeps it; an opened agent lands in the list.
+            let opened = app.focus == Some(id);
+            app.list.keys = app.list.overview.is_some() && !opened;
+            if opened && app.list.overview.take().is_some() {
+                (app.list.open, app.list.reveal) = (true, true);
+                overview::fold(app);
+            }
         }
         _ => {}
     }
 }
-/// List movement moves only the highlight; opening is always an explicit act.
+/// List movement moves only the highlight; opening is always an explicit act. Each key arrives
+/// as its action's first default key.
 pub(super) fn key(app: &mut App, k: KeyEvent) {
-    if k.code == K::F(2) {
-        return toggle(app);
-    }
-    let action = app.list.selected.clone();
+    let (action, shown) = (app.list.selected.clone(), app.list.overview.is_some());
     match k.code {
+        K::F(2) => toggle(app),
+        K::Esc if shown => overview(app),
         K::Esc => app.ask_open = None,
-        K::Up | K::Down | K::Char('j' | 'k') => {
-            let list = &mut app.list;
-            let at = list.rows.iter().position(|a| Some(a) == action.as_ref());
-            let down = matches!(k.code, K::Down | K::Char('j'));
-            let at = at
-                .unwrap_or(0)
-                .saturating_add_signed(if down { 1 } else { -1 });
-            list.selected = list
-                .rows
-                .get(at.min(list.rows.len().saturating_sub(1)))
-                .cloned();
-            list.reveal = true;
+        K::Up | K::Down => {
+            let rows = &app.list.rows;
+            let at = rows.iter().position(|a| Some(a) == action.as_ref());
+            let step = [-1, 1][usize::from(k.code == K::Down)];
+            let at = at.unwrap_or(0).saturating_add_signed(step);
+            app.list.selected = rows.get(at.min(rows.len().saturating_sub(1))).cloned();
+            app.list.reveal = true;
         }
-        K::Left | K::Char('h') => {
-            app.list.selected = action.as_ref().and_then(|a| parent(app, a)).or(action)
+        // The overview is the outermost view; Right there opens an agent, or unfolds a folded
+        // group, as Enter does.
+        K::Left if shown => {}
+        K::Left => app.list.selected = action.as_ref().and_then(|a| parent(app, a)).or(action),
+        K::Right | K::Enter if shown => action.into_iter().for_each(|a| press(app, a)),
+        K::Right => {
+            let id = match &action {
+                Some(Action::Section(id)) => id.clone(),
+                Some(Action::Agent(id)) => id.to_string(),
+                _ => return,
+            };
+            // Earlier and the servers and residents lines open, the rest unfold.
+            match matches!(id.as_str(), "residents" | "servers" | "earlier") {
+                true => app.list.toggled.insert(id),
+                false => app.list.toggled.remove(&id),
+            };
+            app.list.selected = action.as_ref().and_then(|a| into(app, a)).or(action);
         }
-        K::Right | K::Char('l') => {
-            if let Some(ref action) = action {
-                let id = match action {
-                    Action::Section(id) => Some(id.clone()),
-                    Action::Agent(id) => Some(id.to_string()),
-                    _ => None,
-                };
-                if let Some(id) = id {
-                    if matches!(id.as_str(), "residents" | "servers" | "earlier") {
-                        app.list.toggled.insert(id);
-                    } else {
-                        app.list.toggled.remove(&id);
-                    }
-                }
-                app.list.selected = into(app, action).or(Some(action.clone()));
-            }
-        }
-        K::Char('<' | '>') => {
-            let now = app.list.area.map_or(32, |a| a.width);
-            let step = if k.code == K::Char('>') { 4 } else { -4 };
-            resize(app, now.saturating_add_signed(step), true);
-        }
+        K::Char('<' | '>') => widen(app, k.code == K::Char('>')),
         K::Char('n') => match aimed(app) {
             Some(home) => thread(app, &home),
             None => app.say(NOT_RESIDENT),
         },
         K::Char(' ') => match action {
+            // In the overview it folds the selected agent's group.
+            Some(Action::Agent(id)) if shown => overview::group(app, &id),
             Some(Action::Agent(id)) => press(app, Action::Section(id.to_string())),
             Some(a) => press(app, a),
             None => {}
@@ -178,6 +195,29 @@ pub(super) fn key(app: &mut App, k: KeyEvent) {
         },
         _ => {}
     }
+}
+/// Widens or narrows the list by four columns, kept for the next start.
+pub(super) fn widen(app: &mut App, wider: bool) {
+    let step = [-4, 4][usize::from(wider)];
+    let now = app.list.area.map_or(32, |a| a.width);
+    resize(app, now.saturating_add_signed(step), true);
+}
+/// F3 or the list's ⤢: shows the overview with the addressed agent selected, or leaves it for
+/// the addressed session, unswitched, in the view beneath; with nothing addressed it stays.
+pub(super) fn overview(app: &mut App) {
+    let shown = app.list.overview.is_some();
+    if shown && app.focus.is_none() {
+        return;
+    }
+    (app.list.overview, app.list.keys) = ((!shown).then_some(0), !shown);
+    // The overview selects a helper's root, which it lists.
+    let id = app
+        .focus
+        .clone()
+        .map(|id| if shown { id } else { root(app, id) });
+    app.list.selected = id.map(Action::Agent);
+    app.list.reveal = true;
+    overview::fold(app);
 }
 /// Takes `columns` as the list's width from here on, at least 32; `keep` saves it for the next
 /// start, once a drag lets go.
@@ -258,38 +298,54 @@ fn into(app: &App, action: &Action) -> Option<Action> {
         _ => None,
     }
 }
-/// One prefix action, already resolved by the configurable key table.
-pub(super) fn prefixed(app: &mut App, k: KeyEvent) {
-    if matches!(k.code, K::Char('n' | 'p')) {
-        let here = app.focus.clone().map(|id| root(app, id));
-        let project = |id: &SessionId| app.agents.get(id).map(|a| &a.project);
-        let mine = here.as_ref().and_then(project);
-        // The project's roots in list order, whatever heading holds them, less NEEDS YOU, which
-        // repeats rows listed below it, and Earlier, whose closed roots n/p never reopens.
-        let roots: Vec<_> = (app.list.layout().into_iter())
-            .flat_map(|l| &l.sections)
-            .filter(|s| !matches!(s.kind, SectionKind::NeedsYou | SectionKind::Earlier))
-            .flat_map(|s| &s.sessions)
-            .filter(|r| r.depth == 0 && mine.is_some() && project(&r.session) == mine)
-            .map(|r| r.session.clone())
-            .collect();
-        let at = roots.iter().position(|id| Some(id) == here.as_ref());
-        if let Some(at) =
-            at.and_then(|i| i.checked_add_signed(if k.code == K::Char('n') { 1 } else { -1 }))
-            && let Some(id) = roots.get(at).cloned()
-        {
-            if !app.list.open {
-                toggle(app);
-            }
-            press(app, Action::Agent(id));
-        }
-    } else if matches!(k.code, K::Char('h' | 'j' | 'k' | 'l')) {
-        if !app.list.open {
-            toggle(app);
-        }
-        app.list.keys = true;
-        key(app, k);
+/// Opens a top-level agent by a prefix action's name: the next or previous agent in the addressed
+/// one's project or project in the list, or the numbered one; the ends stop.
+pub(super) fn jump(app: &mut App, action: &str) {
+    let here = app.focus.clone().map(|id| root(app, id));
+    let projects = projects(app);
+    let at = (projects.iter()).position(|p| here.as_ref().is_some_and(|h| p.contains(h)));
+    let mine = at.map_or(&[][..], |at| &projects[at]);
+    let me = mine.iter().position(|id| Some(id) == here.as_ref());
+    let near = |at: Option<usize>, way| at?.checked_add_signed(if way == "next" { 1 } else { -1 });
+    let to = match action.rsplit_once('_') {
+        Some((way, "project")) => near(at, way).and_then(|i| projects.get(i)?.first()),
+        Some((way, "agent")) => near(me, way).and_then(|i| mine.get(i)),
+        Some((list, n)) => n.parse::<usize>().ok().and_then(|n| match list {
+            "project" => projects.get(n.checked_sub(1)?)?.first(),
+            _ => mine.get(n.checked_sub(1)?),
+        }),
+        None => None,
+    };
+    if let Some(id) = to.cloned() {
+        open(app, id);
     }
+}
+/// Addresses `id` through the list's switch, as a click on its row does, opening the list; the
+/// addressed session is left as it is.
+pub(super) fn open(app: &mut App, id: SessionId) {
+    if app.focus.as_ref() == Some(&id) {
+        return;
+    }
+    if !app.list.open {
+        toggle(app);
+    }
+    press(app, Action::Agent(id));
+}
+// The list's top-level agents in its order, whatever heading holds them, by project in the order
+// each first shows; less NEEDS YOU, which repeats rows listed below it, and Earlier, whose closed
+// roots stay closed.
+fn projects(app: &App) -> Vec<Vec<SessionId>> {
+    let mut projects: Vec<(&str, Vec<SessionId>)> = Vec::new();
+    let sections = (app.list.layout().into_iter()).flat_map(|l| &l.sections);
+    let open = sections.filter(|s| !matches!(s.kind, SectionKind::NeedsYou | SectionKind::Earlier));
+    let roots = open.flat_map(|s| &s.sessions).filter(|r| r.depth == 0);
+    for (row, a) in roots.filter_map(|r| Some((r, app.agents.get(&r.session)?))) {
+        match projects.iter_mut().find(|(p, _)| *p == a.project) {
+            Some((_, roots)) => roots.push(row.session.clone()),
+            None => projects.push((&a.project, vec![row.session.clone()])),
+        }
+    }
+    projects.into_iter().map(|(_, roots)| roots).collect()
 }
 const NOT_RESIDENT: &str =
     "Select a resident or one of its threads, or name one: /thread <resident>.";
@@ -325,7 +381,7 @@ pub(super) fn recent(app: &mut App) {
 }
 /// Aims the composer at a fresh thread with the resident whose home session is `home`.
 fn thread(app: &mut App, home: &SessionId) {
-    app.list.keys = false;
+    (app.list.keys, app.list.overview) = (false, None);
     let (name, server) = home.address().unwrap_or((home.clone(), ""));
     super::start::aim(app, server.into(), Default::default(), Some(name));
 }
@@ -360,7 +416,7 @@ pub(super) fn command(app: &mut App, word: &str, args: &str) -> bool {
             app.list.view = Some(args.into())
         }
         "/view" => app.say("That view is unknown; use a name from /views."),
-        "/views" => app.list.editor = true,
+        "/views" => app.editing = Some(super::editor::Editing::Views),
         _ => return false,
     }
     true
@@ -389,11 +445,7 @@ pub(super) fn frame(
     };
     let list = Rect { width, ..area };
     app.list.area = (width > 0).then_some(list);
-    let right = Rect {
-        x: area.x + width,
-        width: area.width - width,
-        ..area
-    };
+    let right = Rect::new(area.x + width, area.y, area.width - width, area.height);
     // Beside the list the pane is closed until asked for.
     let pane = app.pane_open.replace(app.pane_open == Some(true));
     let cursor = (right.width > 0).then(|| view::normal(app, b, right, question, now, hits));
@@ -412,13 +464,18 @@ fn draw(app: &mut App, b: &mut Buffer, list: Rect, wide: bool, now: u64, hits: &
     let title = format!("AGENTS · {}", app.list.view.as_deref().unwrap_or("…"));
     let edge = if app.list.dragging { WHITE } else { CYAN };
     let inner = super::panel::frame_colour(b, list, &title, edge);
+    // At the top right, ‹ closes the list and ⤢ opens the overview, each with its key.
+    let mut x = list.right().saturating_sub(2);
+    let marks = [("⤢", "global.overview"), ("‹", "list.open")];
+    for ((mark, key), action) in marks.into_iter().zip([Action::Overview, Action::Close]) {
+        let words = format!(" {mark} {} ", super::bindings::hint(app, key));
+        let w = width(&words) as u16;
+        x = x.saturating_sub(w);
+        put(b, x, list.y, &words, w, style(GRAY, GLASS));
+        hits.push((Rect::new(x, list.y, w, 1), action));
+    }
     if wide {
-        let column = Rect::new(
-            list.right() - 1,
-            list.y + 1,
-            1,
-            list.height.saturating_sub(2),
-        );
+        let column = Rect::new(list.right() - 1, inner.y, 1, inner.height);
         hits.push((column, Action::Edge));
     }
     let rows = rows(app, inner.width, now);
@@ -438,7 +495,9 @@ fn draw(app: &mut App, b: &mut Buffer, list: Rect, wide: bool, now: u64, hits: &
         .iter()
         .position(|status::Row(_, a, _)| a.is_some() && a == &app.list.selected);
     let height = inner.height as usize;
-    if std::mem::take(&mut app.list.reveal)
+    // Under the overview, the reveal is the overview's.
+    if app.list.overview.is_none()
+        && std::mem::take(&mut app.list.reveal)
         && let Some(at) = selected
     {
         app.list.scroll = app.list.scroll.min(at).max(at.saturating_sub(height - 1));

@@ -19,7 +19,7 @@ Service: installed.
 Razor can run on Claude.
 ```
 
-It exits 0 when your settings load and Claude or GPT can run. A missing ChatGPT sign-in or API key does not matter if you use Claude, and the reverse; missing web keys only mean agents use their model's own web tools, and a missing voice key that nothing is read aloud. The OpenAI API key line matters only if you bill GPT through an API key instead of a ChatGPT plan. `Server: stopped; your next razor command starts it.` means no server is running for this home, which is normal before your first `razor` command; if a command then fails to start one, see [the server and settings](#the-server-and-settings) below. On a Mac with the server running, a `Mac permissions` line also says whether agents can see the screen and use the keyboard and mouse ([Security](security.md#screen-and-control-on-macos)).
+It exits 0 when your settings load and Claude or GPT can run. A missing ChatGPT sign-in or API key does not matter if you use Claude, and the reverse; missing web keys only mean agents use their model's own web tools, and a missing voice key that nothing is read aloud. The OpenAI API key line matters only if you bill GPT through an API key instead of a ChatGPT plan. `Server: stopped; your next razor command starts it.` means no server is running for this home, which is normal before your first `razor` command; if a command then fails to start one, see [the server and settings](#the-server-and-settings) below. On a Mac with the server running, a `Mac permissions` line also says whether agents can see the screen and use the keyboard and mouse; when the service runs the server and either is missing, doctor asks whether to request them from macOS, and yes puts Razor in both lists in System Settings ([Security](security.md#screen-and-control-on-macos)).
 
 Two places hold more detail. The server writes its errors to `~/.razor/server.log`; when it runs as the service that `razor install` sets up (the same server, started by systemd or launchd), read them on Linux with `journalctl --user -u razor`. The service is named after its home's folder without the leading dot, so a `RAZOR_HOME` of `~/.razor-work` has `razor-work`. Each session's folder, `~/.razor/sessions/<id>/`, holds its record and `startup.md`, which shows exactly what the conversation was sent at its start (`/startup` shows it in the terminal app).
 
@@ -42,6 +42,10 @@ Stop succeeds if no server is running. A later `razor` command, `razor --print` 
 Sessions that were working when the server stopped resume by themselves if their last entry is less than an hour old. Older ones show as interrupted; send them a message, or type `/continue all` to continue every interrupted top-level session.
 
 ## Installing
+
+**The workshop scene or the clock looks blocky inside tmux.** Razor draws them with half blocks there by default because some tmux width tables cannot handle octant glyphs. If your terminal, font and tmux support them, run `razor config set ui.blocks octant`. Narrow screens still use half blocks. If the glyphs look broken, use `razor config set ui.blocks half` or restore the default with `razor config unset ui.blocks`.
+
+**Pictures in the transcript are coloured blocks, not sharp.** The terminal app draws a picture's own pixels only in a terminal that answers the Kitty graphics protocol, such as Kitty, Ghostty or a recent iTerm2. Other terminals, and every terminal reached through tmux or mosh, get coloured half blocks. A picture stays a one-line chip when it cannot be read, is too large, is in a format the terminal app does not draw (such as an animated or lossless WebP), or has too little room on screen.
 
 **`razor: command not found` after installing.** The installer links `razor` into `~/.local/bin` and, when that folder is not on your `PATH`, prints the command that adds it. For sh, bash and zsh, add this to your shell's profile; for fish, run `fish_add_path "$HOME/.local/bin"`:
 
@@ -99,8 +103,30 @@ export PATH="$HOME/.local/bin:$PATH"
 
 **`speech: there is no ElevenLabs key; run razor keys to add one.`** Reading aloud and agents' spoken notes need `ELEVENLABS_API_KEY`. Run `razor keys` (Enter keeps the keys you already saved), then `razor restart`.
 
+**`speech: Python (…) has no working SSL support`** (or `unknown url type: https` from an older speech program). The Python named in the error cannot load its SSL module. The server's `PATH` may select a version-manager Python whose OpenSSL library was removed. Find a working interpreter with `/path/to/python3 -c 'import ssl'`, then set these absolute paths at the top level of `~/.razor/config.toml`, before any `[section]`:
+
+```toml
+speech = ["/path/to/python3", "/absolute/path/to/scripts/speech.py"]
+```
+
+For an installed copy, the script is `~/.local/share/razor/current/scripts/speech.py`; expand `~` to your home directory in the setting. The setting is live, so try ▶ again after saving it.
+
+**`speech: The API key you used is missing the permission … The key needs Text to Speech and Voices (read).`** Your ElevenLabs key is restricted and lacks a permission speech uses. In ElevenLabs' API key settings, give it Text to Speech and Voices (read), or make it unrestricted; no restart is needed.
+
+**`Over SSH, audio would play on <machine>, not your machine; pair Razor on yours.`** The terminal app plays audio on its own machine, which over SSH is the remote one, so nothing plays; recording over SSH is refused for the same reason. Install Razor on the machine you sit at and [connect its terminal to the other server](machines.md#use-a-terminal-without-a-local-server); audio then uses your own speakers and microphone ([Replies read aloud](browser-voice-search.md#replies-read-aloud)).
+
 **No desktop notifications.** On macOS, allow notifications for Script Editor in System Settings, under Notifications. On Linux, the starter pack (the default settings Razor ships) uses `notify-send`; on a machine with no desktop there is nowhere to show them, so send them to your phone with ntfy ([Configuration](configuration.md#notifications)).
 
 **`Browser: missing or unresponsive. Reinstall the agent-browser executable, then run agent-browser install.`** from `razor doctor`. The agent-browser program beside Razor, `~/.local/share/razor/current/agent-browser`, is missing or does not run. When it is missing, Razor uses the `agent-browser` on your `PATH`, so `npm install --global agent-browser`, then `agent-browser install` to download its Chrome, brings it back ([Browser, voice and search](browser-voice-search.md#the-browser)).
 
 **The browser will not start (Linux).** Chrome lacks system libraries. Run `~/.local/share/razor/current/agent-browser install --with-deps`, which uses `sudo`. `~/.local/share/razor/current/agent-browser doctor --offline` says what else is wrong, with a test launch.
+
+## Updating
+
+Run `razor update`, then `razor restart` to use the downloaded version. Background updates leave the running server on its existing version. The terminal's restart notice appears once per launch; closing and reopening the terminal does not restart the server. Old bundles stay available while a process runs from them.
+
+If an update fails, the installer reports the cause and keeps the selected version. Check your connection and run `razor update` again. Background failures go to the [server log](#restarting-the-server). To stop future automatic checks, run `razor config set release_updates false`; an update already running finishes.
+
+**`This is a source installation`.** Builds run from a checkout, and bundles installed with `scripts/install.sh`, update from that checkout. They never download releases automatically. To switch to a published release, run the install command in the [Quickstart](quickstart.md).
+
+**`Razor has no command update`.** v0.1.0 predates this command. Run the release install command once more, then `razor restart`. Future releases can update themselves.

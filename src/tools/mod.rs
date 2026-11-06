@@ -7,6 +7,8 @@ mod mcp;
 pub(crate) use files::{find_skill, list_skills};
 pub(crate) use mcp::{Auth, Questions, callback, idle};
 mod patch;
+mod updates;
+pub(crate) use updates::update_skills;
 pub mod web;
 
 use crate::config::Script;
@@ -107,7 +109,7 @@ pub(crate) struct Config {
     /// The directories searched, in order, for `<name>/SKILL.md`.
     pub(crate) skills: Vec<PathBuf>,
     /// How many of `skills`, from the first, list each skill with its description at a
-    /// conversation's start; the rest list names only.
+    /// conversation's start; the rest are found by name only.
     pub(crate) described: usize,
     /// Scripted tools by name (`[tools.<name>]`).
     pub(crate) scripts: BTreeMap<String, Script>,
@@ -160,8 +162,10 @@ impl Tools {
         mcp: (Auth, Questions),
         post: crate::children::Post,
     ) -> Tools {
+        // The session's id, and the name of its own agent-browser browser, so no two agents share one.
         if let Some(id) = dir.file_name().and_then(|s| s.to_str()) {
             env.insert("RAZOR_SESSION".into(), id.into());
+            env.insert("AGENT_BROWSER_SESSION".into(), id.into());
         }
         let list = [
             ("read", true, Kind::Read),

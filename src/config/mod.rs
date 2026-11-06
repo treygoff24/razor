@@ -1,5 +1,6 @@
 //! The live configuration; parsing is bounded and a bad edit never replaces the last good value.
 
+pub mod cli;
 pub(crate) mod manage;
 mod mcp;
 mod pack;
@@ -54,8 +55,8 @@ pub fn make_home(home: &Path) -> Result<(), Error> {
 }
 
 /// One struct per TOML table; every field has a reader at the next turn or server start.
-#[derive(Clone, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub(crate) model: String,
     pub(crate) effort: Effort,
@@ -67,6 +68,8 @@ pub struct Config {
     pub(crate) rebuild: Rebuild,
     pub(crate) sessions: Sessions,
     pub server: Server,
+    /// `[remote]`: another machine's server this one's session commands use instead of its own.
+    pub remote: Option<Remote>,
     guards: Guards,
     tools: BTreeMap<String, Script>,
     pub(crate) web: tools::web::Config,
@@ -94,6 +97,10 @@ pub struct Config {
     /// More skill folders, searched after the pack's and the project's; a conversation's opening
     /// list omits their skills; `skill` still loads them by name.
     pub(crate) skills: Vec<PathBuf>,
+    /// Update installed machine skills daily; project settings cannot change it.
+    pub(crate) skill_updates: bool,
+    /// Install newer releases daily; source installations never update automatically.
+    pub(crate) release_updates: bool,
     /// The system prompt's entries in order: `razor`, `project`, files and folders, absolute once
     /// parsed (docs/design/profiles.md). Only the person's file and the pack may set it.
     startup: Vec<String>,
@@ -122,7 +129,8 @@ pub struct Config {
 }
 
 /// One plugin file; handlers run in configuration order. Relative paths start at Razor's home.
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Plugin {
     pub(crate) file: PathBuf,
     /// Command hooks handle these events; JavaScript files register their own.
@@ -147,7 +155,8 @@ pub(crate) enum Event {
 /// session's `cwd`, with the call's input as JSON on its standard input; the script checks that
 /// input itself, as an MCP server does. `input`'s root must be `{"type": "object"}`, or tools
 /// leaves the tool out.
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Script {
     pub(crate) command: String,
     pub(crate) description: String,
@@ -157,7 +166,7 @@ pub(crate) struct Script {
 }
 
 /// How a project's tasks are kept.
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Tasks {
     /// A remote of the project's checkout; its tasks are shared through `refs/razor/tasks` there.
@@ -167,19 +176,19 @@ pub(crate) struct Tasks {
 
 /// A machine key: calls go to OpenAI, or to `url`, which speaks GPT-Live's protocol (a stand-in, or
 /// the person's own relay); either gets the home's `key` file when it has one.
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct LiveSettings {
     pub(crate) url: Option<String>,
     pub(crate) names: Vec<String>,
 }
-#[derive(Clone, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub(crate) struct Rebuild {
     pub(crate) threshold: f64,
 }
-#[derive(Clone, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub(crate) struct Sessions {
     pub(crate) idle: usize,
     pub(crate) handover_minutes: u64,
@@ -187,14 +196,14 @@ pub(crate) struct Sessions {
     /// Zero leaves conversations open until the person closes them.
     pub(crate) close_minutes: u64,
 }
-#[derive(Clone, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Server {
     pub address: Option<String>,
     pub(crate) https_url: Option<String>,
     /// The machine's shorthand the other servers pair this one under (`desk`, `laptop`): the
     /// first word of every root's name, read at each root's start. Empty: its project's.
-    pub(crate) name: String,
+    pub name: String,
     /// How a phone names this home. Empty: `name`, else the machine's name.
     pub(crate) label: String,
     pub(crate) realm: String,
@@ -204,9 +213,18 @@ pub struct Server {
     /// as its last arguments; read only by `razor install`.
     pub(crate) wrapper: Vec<String>,
 }
+/// The other server's `server.address`, the file holding the key it enrolled this machine with,
+/// and the folder there that new sessions start in, else the launch folder's path.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Remote {
+    pub address: String,
+    pub key: PathBuf,
+    pub folder: Option<PathBuf>,
+}
 /// The Apple developer team and the app's bundle id, and a token signing key for each
 /// environment this server sends to; nothing goes to a device whose environment has none.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Push {
     pub(crate) team: String,
@@ -218,24 +236,24 @@ pub(crate) struct Push {
 }
 /// A key's id and the path of its `.p8` file outside any repository; its bytes go nowhere but
 /// the signature.
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PushKey {
     pub(crate) key_id: String,
     pub(crate) key: PathBuf,
 }
-#[derive(Clone, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 struct Guards {
     delete: bool,
 }
-#[derive(Clone, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub(crate) struct Children {
     /// Startup instructions for every child, independent of its parent's list.
     pub(crate) startup: Vec<String>,
     pub(crate) max: usize,
-    #[serde(deserialize_with = "duration")]
+    #[serde(deserialize_with = "duration", serialize_with = "duration_text")]
     pub(crate) grace: Duration,
     /// Files whose text replaces Razor's reviewer or researcher text, read at each start.
     pub(crate) reviewer: Option<PathBuf>,
@@ -244,29 +262,29 @@ pub(crate) struct Children {
     /// (docs/design/video.md).
     pub(crate) watcher: String,
 }
-#[derive(Clone, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub(crate) struct Stuck {
-    #[serde(deserialize_with = "duration")]
+    #[serde(deserialize_with = "duration", serialize_with = "duration_text")]
     pub(crate) after: Duration,
 }
 
-#[derive(Clone, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 struct Profile {
     pub(crate) code_mode: Option<bool>,
     /// Codex's image generation, which only GPT on the sign-in has.
     image_gen: bool,
 }
-#[derive(Clone, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 struct Profiles {
     claude: Profile,
     codex: Profile,
 }
 /// One model's settings, each replacing its shipped row's (docs/design/generic.md); a
 /// machine key, refused in a project's file. `key` names a variable and never holds a key.
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Model {
     pub(crate) base_url: Option<String>,
@@ -284,7 +302,7 @@ pub(crate) struct Model {
 }
 /// How a chat message's reasoning goes back: as it streamed, moved to one of the two fields
 /// hosts read, or not at all.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Replay {
     #[default]
@@ -294,14 +312,14 @@ pub(crate) enum Replay {
     None,
 }
 
-#[derive(Clone, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub(crate) struct Responses {
     pub(crate) base_url: String,
 }
 /// `[claude]`, a machine key: a project's file cannot set it.
-#[derive(Clone, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Claude {
     /// A command printing a Claude sign-in token, run for each conversation Razor opens on
     /// Claude; empty: the server's own sign-in (docs/design/claude.md).
@@ -329,6 +347,7 @@ impl Default for Config {
             rebuild: Rebuild::default(),
             sessions: Sessions::default(),
             server: Server::default(),
+            remote: None,
             guards: Guards::default(),
             tools: BTreeMap::new(),
             web: Default::default(),
@@ -345,6 +364,8 @@ impl Default for Config {
             notify: Vec::new(),
             pack: None,
             skills: Vec::new(),
+            skill_updates: true,
+            release_updates: true,
             startup: vec!["razor".into(), "project".into()],
             brand: Default::default(),
             ui: Default::default(),
@@ -423,6 +444,10 @@ fn duration<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Duration, D::Error
     n.checked_mul(factor)
         .map(Duration::from_secs)
         .ok_or_else(|| serde::de::Error::custom("the duration is too large"))
+}
+
+fn duration_text<S: serde::Serializer>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&format!("{}s", value.as_secs()))
 }
 
 impl Config {
@@ -514,16 +539,33 @@ impl Config {
     }
 }
 
+/// The home skill folders imported from the other agent tools, in lookup order.
+pub(crate) fn home_skills() -> Vec<PathBuf> {
+    std::env::var_os("HOME")
+        .into_iter()
+        .flat_map(|home| {
+            [".agents", ".claude", ".codex"].map(|dir| Path::new(&home).join(dir).join("skills"))
+        })
+        .collect()
+}
+
 impl Settings {
-    /// The skill directories, in the `skill` tool's lookup order: the pack's `skills`, the
-    /// project's `.agents/skills` and `.claude/skills` (Codex's and Claude Code's), then the
-    /// `skills` key's folders, so a project's skill never replaces the pack's.
+    /// Skill lookup: machine overrides, pack, project, home, then configured libraries.
     pub(crate) fn skills(&self) -> Vec<PathBuf> {
-        let pack = self.config.pack.iter().map(|pack| pack.join("skills"));
-        let project = (self.project.iter())
+        let pack = self.pack_skills();
+        let project = self
+            .project
+            .iter()
             .flat_map(|root| [".agents", ".claude"].map(|dir| root.join(dir).join("skills")));
-        let more = self.config.skills.iter().cloned();
-        pack.chain(project).chain(more).collect()
+        self.config
+            .skill_updates
+            .then(|| self.skill_overrides())
+            .into_iter()
+            .chain(pack)
+            .chain(project)
+            .chain(home_skills())
+            .chain(self.config.skills.iter().cloned())
+            .collect()
     }
 
     /// Freezes session actions and their local MCP root from this settings snapshot; the caller

@@ -11,6 +11,7 @@ mod load;
 mod marks;
 pub mod mcp;
 mod meetings;
+mod pair;
 mod peers;
 mod project;
 mod push;
@@ -38,7 +39,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::serve::ListenerExt;
-pub use client::{DEVICES_USE, devices, enroll, login, revoke};
+pub use client::{Connection, DEVICES_USE, devices, enroll, find, login, revoke};
 use futures_util::{FutureExt, Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -78,6 +79,9 @@ struct App {
     meetings: Arc<meetings::Kept>,
     /// This home's id.
     id: Arc<str>,
+    /// Public identity fixed at startup; the listener's address once bound.
+    name: Arc<str>,
+    address: Arc<std::sync::OnceLock<std::net::SocketAddr>>,
     /// Serializes settings and the daily count on their owner through durable replacement.
     voice: Arc<Mutex<()>>,
     /// On the voice owner, the latest input of at most 64 terminals on any server naming it,
@@ -109,6 +113,17 @@ pub async fn serve(
     responses: Arc<Responses>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), Error> {
+    if let Some(address) = &address {
+        let port = address
+            .rsplit_once(':')
+            .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
+        if !port {
+            return Err(Error::Refused(
+                "server.address must be a host:port, for example desk:7433.".into(),
+            ));
+        }
+    }
+    let name = controller.config().await.server.name.into();
     let devices = controller.devices().clone();
     let id = crate::devices::kept(&home.join(ID), 16, "Reading or making server.id").await?;
     let socket = home.join(SOCKET);
@@ -117,17 +132,7 @@ pub async fn serve(
     let local = UnixListener::bind(&socket).map_err(|e| {
         Error::Refused(format!("Razor cannot listen on {}: {e}.", socket.display()))
     })?;
-    let remote = match address {
-        Some(address) => Some(TcpListener::bind(&address).await.map_err(|e| {
-            Error::Refused(format!(
-                "Razor cannot listen on server.address {address}: {e}. Set it to this machine's tailnet address, or remove it."
-            ))
-        })?),
-        None => None,
-    };
-    let bound = remote.as_ref().map(TcpListener::local_addr).transpose();
-    let bound = bound.map_err(other("Reading the bound address"))?;
-    let found = json!({ "pid": std::process::id(), "address": bound.map(|a| a.to_string()) });
+    let found = json!({ "pid": std::process::id(), "address": null });
     tokio::fs::write(home.join("server.json"), found.to_string())
         .await
         .map_err(other("Writing server.json"))?;
@@ -143,6 +148,8 @@ pub async fn serve(
         views: Arc::new(views::Kept::open(&home).await),
         meetings: Arc::new(meetings::Kept::open().await),
         id: id.into(),
+        name,
+        address: Arc::default(),
         creations: Arc::default(),
         voice: Arc::default(),
         activity: Arc::default(),
@@ -186,7 +193,11 @@ pub async fn serve(
         )
         .route(
             "/v1/permissions",
-            get(async || Json(crate::residents::permissions().await)),
+            get(async || Json(crate::residents::permissions(None).await)).post(
+                async |State(app): State<App>| {
+                    Json(crate::residents::permissions(Some(&app.home)).await)
+                },
+            ),
         )
         .route("/v1/emoji", get(emoji::history).post(emoji::used))
         .route("/v1/deliveries", get(delivery_list))
@@ -194,6 +205,14 @@ pub async fn serve(
         .route("/v1/voice/voices", get(voice::voices))
         .route("/v1/voice/reserve", post(voice::reserve))
         .route("/v1/devices", get(devices::list).post(devices::enroll))
+        .route("/v1/discover", get(pair::discover))
+        .route("/v1/device", get(devices::identity))
+        .route(
+            "/v1/pair",
+            get(pair::identity)
+                .post(pair::hold)
+                .layer(DefaultBodyLimit::max(1024)),
+        )
         .route("/v1/devices/{name}", delete(devices::revoke))
         .route(
             "/v1/devices/self/push",
@@ -218,17 +237,45 @@ pub async fn serve(
         .layer(DefaultBodyLimit::max(BODY_BYTES))
         .layer(middleware::from_fn(refusals))
         .layer(middleware::from_fn_with_state(devices, devices::authorize))
-        .with_state(app.clone())
-        .into_make_service();
+        .with_state(app.clone());
     let local = axum::serve(local, router.clone()).into_future();
     let served = async {
-        let Some(remote) = remote else {
-            return local.await;
+        let network = async {
+            let Some(address) = address else {
+                return std::future::pending().await;
+            };
+            let mut first = true;
+            let remote = loop {
+                match TcpListener::bind(&address).await {
+                    Ok(remote) => break remote,
+                    Err(e) => {
+                        if first {
+                            eprintln!(
+                                "Razor is not listening on server.address {address}: {e}; retrying every 5 seconds."
+                            );
+                            first = false;
+                        }
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
+            };
+            let bound = remote.local_addr()?;
+            let _ = app.address.set(bound);
+            if !first {
+                eprintln!("Razor is now listening on server.address {address} ({bound}).");
+            }
+            let found = json!({"pid": std::process::id(), "address": bound.to_string()});
+            tokio::fs::write(home.join("server.json"), found.to_string()).await?;
+            // Streaming small writes must not wait for a peer's delayed acknowledgment.
+            let remote = remote.tap_io(|tcp| drop(tcp.set_nodelay(true)));
+            axum::serve(
+                remote,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .into_future()
+            .await
         };
-        // Without TCP_NODELAY a streamed answer's last small write waits for the peer's delayed
-        // ACK, 40 ms or more per paged or streamed read a paired server forwards.
-        let remote = remote.tap_io(|tcp| drop(tcp.set_nodelay(true)));
-        tokio::try_join!(local, axum::serve(remote, router).into_future()).map(drop)
+        tokio::try_join!(local, network).map(drop)
     };
     tokio::select! {
         served = served => served.map_err(other("Serving the API")),
@@ -495,8 +542,10 @@ async fn server(app: &App) -> Server {
             || (tokio::fs::metadata(app.home.join("key")).await).is_ok_and(|key| key.len() > 0),
         shared: voice::owns(app, &config.server.shared),
         video: true,
+        suggestions: config.ui.suggestions,
         meetings: app.meetings.available,
         load: load::load().await,
+        release_ready: crate::residents::release_ready().await,
         residents: app.residents.days().await,
         views_version: Some(app.views.views.borrow().version),
         ..identity(app, &config)

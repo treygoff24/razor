@@ -22,6 +22,7 @@ pub(super) fn routes() -> Router<App> {
         .route("/v1/sessions/{id}/quit", post(quit))
         .route("/v1/sessions/{id}/handover", post(handover))
         .route("/v1/sessions/{id}/skills", get(skills))
+        .route("/v1/skills", get(project_skills))
         .route("/v1/sessions/{id}/asks/{entry}", post(answer))
         .route("/v1/sessions/{id}/events", get(events))
         .route("/v1/sessions/{id}/entries", get(entries))
@@ -258,6 +259,24 @@ async fn skills(State(app): State<App>, Path(id): Path<SessionId>) -> Reply<Vec<
     Ok(Json(crate::tools::list_skills(dirs, 1024).await))
 }
 
+async fn project_skills(State(app): State<App>, Query(q): Query<Page>) -> Reply<Vec<Skill>> {
+    let cwd = match q.resident {
+        Some(name) => app.residents.thread(&name, None, None).await?.0,
+        None => q
+            .cwd
+            .filter(|cwd| cwd.is_absolute())
+            .ok_or_else(|| bad("Name an absolute folder for the skill list."))?,
+    };
+    let machine = app.controller.machine_settings().await;
+    let settings = tokio::task::spawn_blocking(move || machine.project(&cwd))
+        .await
+        .map_err(other("Reading the project's settings"))?
+        .map_err(controller::Error::from)?;
+    Ok(Json(
+        crate::tools::list_skills(settings.skills(), 1024).await,
+    ))
+}
+
 async fn handover(State(app): State<App>, Path(id): Path<SessionId>) -> Reply {
     let entry = app.controller.handover(&id).await?;
     Ok(Json(entry.map_or_else(
@@ -314,9 +333,16 @@ async fn entries(
     Ok(([(header::CONTENT_TYPE, NDJSON)], Body::from_stream(lines)).into_response())
 }
 
-/// A stored or live line as a reader gets it: an entry's `native`, the model path's replay data
-/// that no client draws (about 100 KB on a GPT response), is left out unless `native`.
+/// A stored or live line as a reader gets it: unless `native`, a reply shows without its
+/// suggestion, and an entry's `native`, the model path's replay data that no client draws (about
+/// 100 KB on a GPT response), is left out.
 fn sent<T: AsRef<str> + From<String>>(line: T, native: bool) -> T {
+    if let Some(shown) = (!native)
+        .then(|| crate::record::shown(line.as_ref()))
+        .flatten()
+    {
+        return shown.into();
+    }
     #[derive(Deserialize)]
     struct Line<'a> {
         #[serde(borrow)]

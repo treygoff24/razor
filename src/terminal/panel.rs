@@ -2,7 +2,7 @@
 //! instructions, or `/mcp`.
 use super::{App, mcp, text::*, view};
 use crate::protocol::Login;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -29,9 +29,9 @@ pub enum Panel {
 /// another command.
 pub fn command(app: &mut App, word: &str) -> bool {
     match word {
-        "/status" => (app.panel, app.panel_scroll) = (Some(Panel::Status), 0),
-        "/help" => (app.panel, app.panel_scroll) = (Some(Panel::Help), 0),
-        "/keys" => (app.panel, app.panel_scroll) = (Some(Panel::Keys), 0),
+        "/status" => open(app, Panel::Status),
+        "/help" => open(app, Panel::Help),
+        "/keys" => open(app, Panel::Keys),
         "/tasks" => tasks(app),
         "/login" => start(app),
         _ => return false,
@@ -39,10 +39,19 @@ pub fn command(app: &mut App, word: &str) -> bool {
     true
 }
 
+/// Shows `panel` from its top, unsearched.
+pub fn open(app: &mut App, panel: Panel) {
+    (app.panel, app.panel_scroll, app.panel_search) = (Some(panel), 0, None);
+}
+
+fn searchable(app: &App) -> bool {
+    matches!(app.panel, Some(Panel::Keys | Panel::Help | Panel::Tasks(_)))
+}
+
 /// Starts the server's sign-in; Escape cancels it by dropping its stream.
 fn start(app: &mut App) {
     let (lines, running) = (VecDeque::new(), true);
-    (app.panel, app.panel_scroll) = (Some(Panel::Login { lines, running }), 0);
+    open(app, Panel::Login { lines, running });
     let (Some(api), Some(tx), Some(budget)) =
         (app.api.clone(), app.lines.clone(), app.budget.clone())
     else {
@@ -91,12 +100,31 @@ fn show(app: &mut App, text: &str, ended: bool) {
     }
 }
 
-/// One key: an open `/mcp` takes it first, and what it leaves scrolls or closes the panel.
+/// One key: an open `/mcp` takes it first, and what it leaves scrolls or closes the panel; while
+/// a search is typed, a character without Ctrl is its word.
 pub fn key(app: &mut App, key: KeyEvent) {
-    if matches!(app.panel, Some(Panel::Mcp(_))) && mcp::key(app, key) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if matches!(app.panel, Some(Panel::Mcp(_))) && !ctrl && mcp::key(app, key) {
         return;
     }
+    let searching = app.panel_search.is_some();
     app.panel_scroll = match key.code {
+        KeyCode::Char(c) if searching && !ctrl => {
+            app.panel_search.get_or_insert_default().push(c);
+            0
+        }
+        KeyCode::Backspace if searching => {
+            app.panel_search.get_or_insert_default().pop();
+            0
+        }
+        KeyCode::Char('/') if searchable(app) => {
+            app.panel_search = Some(String::new());
+            0
+        }
+        KeyCode::Esc if searching => {
+            app.panel_search = None;
+            0
+        }
         KeyCode::Esc => {
             if let (Some(Panel::Login { .. }), Some(task)) = (&app.panel, app.login.take()) {
                 task.abort();
@@ -106,8 +134,10 @@ pub fn key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Up => app.panel_scroll.saturating_sub(1),
         KeyCode::PageUp => app.panel_scroll.saturating_sub(20),
+        KeyCode::Char('u') => app.panel_scroll.saturating_sub(10),
         KeyCode::Down => app.panel_scroll.saturating_add(1),
         KeyCode::PageDown => app.panel_scroll.saturating_add(20),
+        KeyCode::Char('d') => app.panel_scroll.saturating_add(10),
         KeyCode::Home => 0,
         KeyCode::End => usize::MAX,
         _ => app.panel_scroll,
@@ -123,11 +153,12 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<vie
     let inset = if app.columns < view::PHONE { 0 } else { 2 };
     let r = Rect::new(r.x + inset, r.y, r.width - 2 * inset, r.height);
     let width = r.width.saturating_sub(4) as usize;
+    let found = |rows| found(rows, app.panel_search.as_deref(), width);
     let (title, rows) = match &app.panel {
         Some(Panel::Status) => ("status", super::status::rows(app, width, now)),
-        Some(Panel::Tasks(rows)) => ("tasks", rows.clone()),
-        Some(Panel::Help) => ("help", super::composer::completion::help(width)),
-        Some(Panel::Keys) => ("keys", super::bindings::rows(app, width)),
+        Some(Panel::Tasks(rows)) => ("tasks", found(rows.clone())),
+        Some(Panel::Help) => ("help", found(super::composer::completion::help(width))),
+        Some(Panel::Keys) => ("keys", found(super::bindings::rows(app))),
         Some(Panel::Login { lines, running, .. }) => {
             let rows = lines
                 .iter()
@@ -151,7 +182,13 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<vie
         ..words
     };
     scroll(app, b, body, &rows);
-    let keys = super::bindings::text(app, "<panel.up>/<panel.down> scroll · <panel.cancel> back");
+    let search = match (&app.panel_search, searchable(app)) {
+        (Some(words), _) => format!("/{words}▏ · "),
+        (None, true) => "<panel.search> search · ".into(),
+        (None, false) => String::new(),
+    };
+    let keys = format!("{search}<panel.up>/<panel.down> scroll · <panel.cancel> back");
+    let keys = super::bindings::text(app, &keys);
     put(
         b,
         words.x,
@@ -160,6 +197,17 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<vie
         words.width,
         style(GRAY, GLASS),
     );
+}
+
+// The rows holding every searched word in any case, each wrapped to `width`.
+fn found(rows: Vec<Line<'static>>, search: Option<&str>, width: usize) -> Vec<Line<'static>> {
+    let words = search.unwrap_or_default().to_lowercase();
+    let holds = |row: &Line| {
+        let row = row.to_string().to_lowercase();
+        words.split_whitespace().all(|word| row.contains(word))
+    };
+    let rows = rows.into_iter().filter(holds);
+    rows.flat_map(|row| wrap(row.spans, width)).collect()
 }
 
 /// Fills `r` and draws its rule box with `title` in the top edge; returns the area inside for
@@ -213,6 +261,6 @@ fn tasks(app: &mut App) {
             Ok(tasks) => tasks.iter().map(row).collect(),
             Err(e) => vec![Line::raw(e.to_string())],
         };
-        move |app: &mut App| (app.panel, app.panel_scroll) = (Some(Panel::Tasks(rows)), 0)
+        move |app: &mut App| open(app, Panel::Tasks(rows))
     });
 }

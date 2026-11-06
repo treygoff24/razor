@@ -14,6 +14,7 @@ use std::{cmp::Reverse, collections::BTreeMap, path::PathBuf};
 struct Place {
     path: PathBuf,
     repo: Option<String>,
+    identity: String,
     at: Option<u64>,
 }
 
@@ -28,7 +29,7 @@ pub struct Start {
 }
 
 /// A project and its places, one a server.
-type Project<'a> = (String, Vec<(&'a str, &'a Place)>);
+type Project<'a> = (String, String, Vec<(&'a str, &'a Place)>);
 
 impl Start {
     /// One row per repository, or folder name outside git, matching the filter: recently used
@@ -37,22 +38,45 @@ impl Start {
         let mut by = BTreeMap::<String, BTreeMap<&str, &Place>>::new();
         for (server, (_, places)) in &self.servers {
             for p in places.iter().flatten() {
-                let folder = p.path.file_name().map(|n| n.to_string_lossy().into_owned());
-                let name = p.repo.clone().or(folder).unwrap_or_default();
-                let newest = by.entry(name).or_default().entry(server).or_insert(p);
+                let newest = by
+                    .entry(p.identity.clone())
+                    .or_default()
+                    .entry(server)
+                    .or_insert(p);
                 *newest = if p.at > newest.at { p } else { newest };
             }
         }
-        let filter = self.filter.to_lowercase();
-        let mut all: Vec<_> = (by.into_iter())
-            .filter(|(name, _)| name.to_lowercase().contains(&filter))
-            .map(|(name, places)| {
+        let mut all: Vec<_> = by
+            .into_iter()
+            .map(|(identity, places)| {
                 let mut places: Vec<_> = places.into_iter().collect();
                 places.sort_by_key(|(_, p)| Reverse(p.at));
-                (name, places)
+                let p = places[0].1;
+                let name = p
+                    .repo
+                    .clone()
+                    .or_else(|| p.path.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .unwrap_or_default();
+                (identity, name, places)
             })
             .collect();
-        all.sort_by_key(|(_, places)| Reverse(places[0].1.at));
+        let mut names = BTreeMap::new();
+        for (_, name, _) in &all {
+            *names.entry(name.clone()).or_insert(0) += 1;
+        }
+        for (identity, name, _) in &mut all {
+            if names[name] > 1 {
+                *name = format!(
+                    "{name} · {}",
+                    identity
+                        .split_once(':')
+                        .map_or(identity.as_str(), |(_, id)| id)
+                );
+            }
+        }
+        let filter = self.filter.to_lowercase();
+        all.retain(|(_, name, _)| name.to_lowercase().contains(&filter));
+        all.sort_by_key(|(_, _, places)| Reverse(places[0].1.at));
         all
     }
 
@@ -62,7 +86,7 @@ impl Start {
             return (0, 0);
         };
         let row = projects.iter().position(|p| &p.0 == name).unwrap_or(0);
-        let places = projects.get(row).map_or(&[][..], |p| &p.1[..]);
+        let places = projects.get(row).map_or(&[][..], |p| &p.2[..]);
         (row, places.iter().position(|p| p.0 == server).unwrap_or(0))
     }
 
@@ -70,14 +94,14 @@ impl Start {
         self.chosen = self
             .projects()
             .get(row)
-            .and_then(|p| Some((p.0.clone(), p.1.get(place)?.0.into())));
+            .and_then(|p| Some((p.0.clone(), p.2.get(place)?.0.into())));
     }
 
     /// The chosen server and folder.
     fn target(&self) -> Option<(String, PathBuf)> {
         let projects = self.projects();
         let (row, place) = self.at(&projects);
-        let (server, p) = projects.get(row)?.1.get(place)?;
+        let (server, p) = projects.get(row)?.2.get(place)?;
         Some((server.to_string(), p.path.clone()))
     }
 }
@@ -95,7 +119,17 @@ pub fn open(app: &mut App) {
             .insert(s.name.clone(), (s.label.clone(), None));
     }
     for name in start.servers.keys() {
-        let (path, name) = (format!("v1/repos?server={name}"), name.clone());
+        let mut path = format!("v1/repos?server={name}");
+        if name.is_empty()
+            && let Ok(cwd) = std::env::current_dir()
+        {
+            let mut url = reqwest::Url::parse("http://localhost/").expect("valid static URL");
+            url.query_pairs_mut()
+                .append_pair("under", &cwd.to_string_lossy());
+            path.push('&');
+            path.push_str(url.query().unwrap_or_default());
+        }
+        let name = name.clone();
         app.spawn(|api| async move {
             let invalid = "A server's projects are invalid; reconnect to a matching server.";
             let read = api.json(Method::GET, &path, None).await;
@@ -124,7 +158,7 @@ pub fn key(app: &mut App, k: KeyEvent) {
     let Some(start) = &mut app.start else { return };
     let projects = start.projects();
     let ((row, place), rows) = (start.at(&projects), projects.len().saturating_sub(1));
-    let places = projects.get(row).map_or(0, |p| p.1.len().saturating_sub(1));
+    let places = projects.get(row).map_or(0, |p| p.2.len().saturating_sub(1));
     match k.code {
         K::Esc => app.start = None,
         K::Enter => choose(app, None),
@@ -173,6 +207,7 @@ pub fn aim(app: &mut App, server: String, cwd: PathBuf, resident: Option<Session
     (app.server, app.cwd, app.resident) = (server, cwd, resident);
     (app.start, app.initial, app.request) = (None, None, None);
     (app.composer, app.list.selected) = (Composer::default(), Some(selected));
+    super::composer::completion::reset(app);
     picker::request(app, true);
 }
 
@@ -198,10 +233,14 @@ pub fn draw(app: &App, b: &mut Buffer, area: Rect, hits: &mut Vec<Hit>) {
     let (row, place) = start.at(&projects);
     let first = row.saturating_sub((rows as usize).saturating_sub(3));
     let shown = projects.iter().enumerate().skip(first);
-    for ((i, (name, places)), y) in shown.zip(r.y + 2..r.bottom()) {
+    for ((i, (_, name, places)), y) in shown.zip(r.y + 2..r.bottom()) {
         let mine = i == row;
         let used = style([GRAY, WHITE][usize::from(places[0].1.at.is_some())], RECESS);
-        let name = format!("{} {:<24}", [" ", "›"][usize::from(mine)], clip(name, 24));
+        let name = format!(
+            "{} {:<24}",
+            [" ", "›"][usize::from(mine)],
+            clip(name, w.saturating_sub(14) as usize)
+        );
         let ink = if mine { bold(CYAN, RECESS) } else { used };
         let mut end = put(b, x, y, &name, w, ink);
         let aim = |(server, p): &(&str, &Place)| Action::Choose(server.to_string(), p.path.clone());

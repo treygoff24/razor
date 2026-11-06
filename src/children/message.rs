@@ -429,6 +429,11 @@ pub(crate) fn repo(s: &Summary) -> Option<String> {
 
 /// Resolves a folder's repository from git files without retaining it in the session cache.
 pub(crate) fn repo_at(folder: &Path) -> Option<String> {
+    repo_info(folder).map(|(name, _)| name)
+}
+
+/// A checkout's display name and cross-server identity, read from the same origin.
+pub(crate) fn repo_info(folder: &Path) -> Option<(String, String)> {
     let top = folder.ancestors().find(|d| d.join(".git").exists())?;
     let mut common = top.join(".git");
     if let Ok(link) = std::fs::read_to_string(&common) {
@@ -439,7 +444,7 @@ pub(crate) fn repo_at(folder: &Path) -> Option<String> {
     let config = std::fs::read_to_string(common.join("config")).unwrap_or_default();
     let origin = config
         .split("\n[")
-        .find(|s| s.starts_with("remote \"origin\"]"));
+        .find(|s| s.trim_start_matches('[').starts_with("remote \"origin\"]"));
     let url = origin.and_then(|s| s.lines().find_map(|l| l.trim().strip_prefix("url")));
     let url = url.map(|u| {
         u.trim_start_matches([' ', '='])
@@ -460,7 +465,36 @@ pub(crate) fn repo_at(folder: &Path) -> Option<String> {
             .to_str()?
             .to_owned(),
     };
-    (!name.is_empty()).then_some(name)
+    let identity = match url {
+        Some(url) => {
+            let (scheme, url) = url
+                .split_once("://")
+                .map_or((false, url), |(_, rest)| (true, rest));
+            let (authority, path) = url.split_once('/').unwrap_or((url, ""));
+            let authority = authority
+                .rsplit_once('@')
+                .map_or(authority, |(_, host)| host);
+            let url = if scheme {
+                format!("{authority}/{path}")
+            } else {
+                format!("{}/{}", authority.replacen(':', "/", 1), path)
+            }
+            .to_lowercase();
+            format!(
+                "remote:{}",
+                url.trim_end_matches('/').trim_end_matches(".git")
+            )
+        }
+        None => path_identity(top),
+    };
+    (!name.is_empty()).then_some((name, identity))
+}
+
+pub(crate) fn path_identity(path: &Path) -> String {
+    let relative = std::env::var_os("HOME")
+        .and_then(|home| path.strip_prefix(home).ok())
+        .unwrap_or(path);
+    format!("path:{}", relative.display())
 }
 
 /// One of `text/mail.toml`'s texts.

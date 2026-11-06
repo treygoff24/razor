@@ -46,3 +46,20 @@ as Codex's description.rs carries them.
 Copyright (c) 2024-2025 Model Context Protocol a Series of LF Projects, LLC.
 Licensed under the MIT License (its text is in LICENSE-MIT) or, for contributions since
 relicensed, the Apache License 2.0 (see LICENSE-APACHE).
+
+packs/starter/skills/impeccable/ is the impeccable skill from https://github.com/pbakaus/impeccable,
+folder .agents/skills/impeccable at the revision its UPSTREAM file names, copied unmodified.
+By Paul Bakaus and contributors, licensed under the Apache License 2.0 (its text is in that
+folder's LICENSE, beside impeccable's own NOTICE.md). It includes:
+- reference/ios.md and reference/android.md, distilled from
+  https://github.com/ehmo/platform-design-skills by ehmo, Copyright (c) 2026, licensed under the
+  MIT License (see LICENSE-MIT).
+- scripts/modern-screenshot.umd.js, from https://github.com/qq15725/modern-screenshot.
+  Copyright (c) 2021-present wxm, licensed under the MIT License (see LICENSE-MIT).
+
+packs/starter/skills/writing-for-agents/ and packs/starter/skills/grilling/ are adapted from
+https://github.com/mattpocock/skills (skills/productivity/writing-for-agents and
+skills/productivity/grilling), and the design vocabulary in packs/starter/skills/changing-code/
+follows its skills/engineering/codebase-design.
+Copyright (c) 2026 Matt Pocock, licensed under the MIT License (see LICENSE-MIT).
+  Modified: rewritten for Razor's tools, with sections specific to other setups removed.

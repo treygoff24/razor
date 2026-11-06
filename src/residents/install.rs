@@ -2,9 +2,8 @@
 
 use super::{Error, TEXT, other};
 use std::ffi::CStr;
-use std::fs::File;
+use std::fs::{File, TryLockError};
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -193,17 +192,14 @@ pub async fn start(home: &Path) -> Result<bool, Error> {
     Ok(true)
 }
 
-/// Try the whole-file flock; false means another open file description holds it.
-fn try_lock(file: &File, operation: libc::c_int) -> Result<bool, Error> {
-    // SAFETY: file stays open; flock touches no process memory.
-    if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0 {
-        return Ok(true);
+/// Whether a nonblocking whole-file flock was taken; false means another open file description
+/// holds it.
+fn taken(attempt: Result<(), TryLockError>) -> Result<bool, Error> {
+    match attempt {
+        Ok(()) => Ok(true),
+        Err(TryLockError::WouldBlock) => Ok(false),
+        Err(TryLockError::Error(e)) => Err(other("locking server.lock")(e)),
     }
-    let error = std::io::Error::last_os_error();
-    if error.kind() == std::io::ErrorKind::WouldBlock {
-        return Ok(false);
-    }
-    Err(other("locking server.lock")(error))
 }
 
 /// Whether this home's server holds its lock; a shared probe never excludes another probe.
@@ -213,7 +209,7 @@ pub fn server_running(home: &Path) -> Result<bool, Error> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(other("opening server.lock")(e)),
     };
-    Ok(!try_lock(&file, libc::LOCK_SH)?)
+    Ok(!taken(file.try_lock_shared())?)
 }
 
 /// Acquire the server's flock and write its PID; closing other descriptors cannot unlock it.
@@ -224,7 +220,7 @@ pub fn server_lock(home: &Path) -> Result<File, Error> {
         .write(true)
         .open(home.join("server.lock"))
         .map_err(other("opening server.lock"))?;
-    if !try_lock(&file, libc::LOCK_EX)? {
+    if !taken(file.try_lock())? {
         return Err(Error::Refused(format!(
             "A Razor server is already running for {}; run razor restart.",
             home.display()
@@ -246,7 +242,7 @@ pub async fn stop(home: &Path) -> Result<(), Error> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(other("opening server.lock")(e)),
     };
-    if try_lock(&file, libc::LOCK_SH)? {
+    if taken(file.try_lock_shared())? {
         return Ok(());
     }
     let mut text = String::new();
@@ -256,7 +252,7 @@ pub async fn stop(home: &Path) -> Result<(), Error> {
         .read_to_string(&mut text)
         .map_err(other("reading the server PID"))?;
     // The holder may have exited during the read; never signal from an unused lock file.
-    if try_lock(&file, libc::LOCK_SH)? {
+    if taken(file.try_lock_shared())? {
         return Ok(());
     }
     let pid = text
@@ -278,7 +274,7 @@ pub async fn stop(home: &Path) -> Result<(), Error> {
     }
     let released = async {
         loop {
-            if try_lock(&file, libc::LOCK_SH)? {
+            if taken(file.try_lock_shared())? {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -333,27 +329,54 @@ async fn app(root: &Path) -> Result<Option<String>, Error> {
 }
 
 /// Whether macOS lets this server control the computer (Accessibility) and record the screen,
-/// `[accessibility, screen recording]`, asked without prompting; None off macOS. Under the
-/// service the answer is Razor.app's. The first ask loads ApplicationServices, under 1 MiB kept,
-/// so it is asked only when a person wants to know.
-pub(crate) async fn permissions() -> Option<[bool; 2]> {
+/// `[accessibility, screen recording]`; None off macOS. Under the service the answer is
+/// Razor.app's. With `ask`, the server's home, it first asks macOS for both, which puts Razor in
+/// both lists in System Settings and opens macOS's prompts; only the service's own server asks,
+/// None from any other, since macOS charges a request to the program launchd started, which
+/// elsewhere is the person's terminal. The first call loads ApplicationServices, under 1 MiB
+/// kept, so it is made only when a person wants to know.
+pub(crate) async fn permissions(ask: Option<&Path>) -> Option<[bool; 2]> {
+    if ask.is_some_and(|home| std::env::var("XPC_SERVICE_NAME").ok() != Some(service_file(home).1))
+    {
+        return None;
+    }
+    let ask = ask.is_some();
     let path = c"/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices";
-    // SAFETY: the path and names are C strings, a framework is never unloaded, and both
-    // functions take nothing and return a C bool.
+    use std::mem::transmute;
+    type Ref = *const libc::c_void;
+    // SAFETY: the path and names are C strings, a framework is never unloaded, and each symbol
+    // is taken as its C type: the checks and the screen request take nothing and return a C
+    // bool; the prompt option and kCFBooleanTrue are CFTypeRef constants, passed by address as
+    // one-item arrays; the dictionary retains them with Core Foundation's callbacks and is
+    // released.
     let asked = move || unsafe {
         let library = libc::dlopen(path.as_ptr(), libc::RTLD_LAZY);
         if library.is_null() {
             return None;
         }
-        let ask = |name: &CStr| {
-            let function = libc::dlsym(library, name.as_ptr());
-            (!function.is_null()).then(|| {
-                std::mem::transmute::<*mut libc::c_void, extern "C" fn() -> bool>(function)()
-            })
+        let symbol = |name: &CStr| {
+            Some(libc::dlsym(library, name.as_ptr()).cast_const()).filter(|s| !s.is_null())
         };
+        let check = |name| Some(transmute::<Ref, extern "C" fn() -> bool>(symbol(name)?)());
+        if ask {
+            type Create = extern "C" fn(Ref, Ref, Ref, isize, Ref, Ref) -> Ref;
+            let create = transmute::<Ref, Create>(symbol(c"CFDictionaryCreate")?);
+            let options = create(
+                std::ptr::null(),
+                symbol(c"kAXTrustedCheckOptionPrompt")?,
+                symbol(c"kCFBooleanTrue")?,
+                1,
+                symbol(c"kCFTypeDictionaryKeyCallBacks")?,
+                symbol(c"kCFTypeDictionaryValueCallBacks")?,
+            );
+            let trusted = symbol(c"AXIsProcessTrustedWithOptions")?;
+            transmute::<Ref, extern "C" fn(Ref) -> bool>(trusted)(options);
+            transmute::<Ref, extern "C" fn(Ref)>(symbol(c"CFRelease")?)(options);
+            check(c"CGRequestScreenCaptureAccess")?;
+        }
         Some([
-            ask(c"AXIsProcessTrusted")?,
-            ask(c"CGPreflightScreenCaptureAccess")?,
+            check(c"AXIsProcessTrusted")?,
+            check(c"CGPreflightScreenCaptureAccess")?,
         ])
     };
     tokio::task::spawn_blocking(asked).await.ok().flatten()

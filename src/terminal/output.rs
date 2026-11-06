@@ -172,7 +172,9 @@ async fn scan(
             true => "startup.md".into(),
             false => format!("job-{}", window.job.0),
         };
-        let (bytes, size) = api.chunk(session, &file, window.offset).await?;
+        let (bytes, size) = api
+            .chunk(session, &file, window.offset, super::api::CHUNK)
+            .await?;
         let base = window.offset;
         for (i, byte) in bytes.iter().enumerate() {
             if window.skipping {

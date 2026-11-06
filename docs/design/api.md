@@ -1,5 +1,21 @@
 # The API server
 
+## Terminal and headless clients on another machine
+
+The person's `[remote]` settings select the server for session commands. `address` names its
+private HTTP listener, `key` names a local file containing an enrolled device key, and optional
+`folder` names the working folder on that server. The key path is resolved relative to the
+settings file; the remote folder is sent as written. With no folder, the launch directory's path
+is sent as written. The server checks it when creating a session. `--continue` searches that same
+folder, and `--resume` addresses the requested session. Without `[remote]`, these commands use
+the existing socket and may start this home's server. Other commands keep their local behavior.
+
+Main constructs one connection containing the HTTP client, URL, key and folder and passes it to
+the terminal or headless request path. Reusing the existing authenticated API keeps the session
+and its records on the server and the microphone and player on the terminal's machine. A separate
+local server and server-to-server pairing would add a second lifecycle for a client that does not
+need one. A settings or key error refuses the command rather than starting a different server.
+
 ## Paired sessions and the inbox
 
 ```rust

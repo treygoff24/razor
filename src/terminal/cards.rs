@@ -23,6 +23,8 @@ const SHORT: usize = 45;
 const KEEP_MS: u64 = 300_000;
 const QUIET_MS: u64 = 30_000;
 const STALE_MS: u64 = 300_000;
+/// What a stuck agent's card says.
+pub const STUCK: &str = "the supervisor marked it stuck";
 /// A working child's turning glyph, each frame held 180 ms.
 pub const PULSE: (u64, [&str; 4]) = (180, ["◐", "◓", "◑", "◒"]);
 
@@ -90,32 +92,33 @@ fn interrupted(a: &AgentView) -> Option<&str> {
         .filter(|_| a.interrupted && a.parent.is_none())
 }
 
+/// What every card says of `agent`: its glyph (a working one's at rest), its word and its tone.
+pub fn look(agent: &AgentView) -> (&'static str, &'static str, Color) {
+    match (agent.state, &agent.report) {
+        _ if !agent.asks.is_empty() => ("?", "asking", CYAN),
+        _ if interrupted(agent).is_some() => ("?", "interrupted", CYAN),
+        (State::Working, _) => ("●", "working", GREEN),
+        (State::NeedsYou, _) => ("○", "idle", GRAY),
+        (State::Stuck, _) => ("!", "stuck", RED),
+        (State::Done, Some(_)) if agent.branch.is_some() && agent.settled.is_none() => {
+            ("◆", "awaiting merge", CYAN)
+        }
+        (State::Done, Some(_)) => ("✓", "finished", GRAY),
+        (State::Done, None) if agent.parent.is_none() => ("⊘", "closed", GRAY),
+        (State::Done, None) => ("⊘", "stopped", GRAY),
+    }
+}
+
 impl<'a> Card<'a> {
     pub fn of(app: &App, agent: &'a AgentView, now: u64) -> Self {
         let silent = super::status::server(app, &agent.session).and_then(|s| s.silent);
+        let (mut glyph, word, tone) = look(agent);
         // With motion off a working card shows its phase glyph; else the pulse asks for its step.
-        let pulse = || {
-            if super::motion::on(app) && silent.is_none() {
-                app.next.every(now, PULSE.0);
-                PULSE.1[(now / PULSE.0 % 4) as usize]
-            } else {
-                "●"
-            }
-        };
+        if word == "working" && super::motion::on(app) && silent.is_none() {
+            app.next.every(now, PULSE.0);
+            glyph = PULSE.1[(now / PULSE.0 % 4) as usize];
+        }
         let interrupted = interrupted(agent);
-        let (glyph, word, tone) = match (agent.state, &agent.report) {
-            (_, _) if !agent.asks.is_empty() => ("?", "asking", CYAN),
-            (_, _) if interrupted.is_some() => ("?", "interrupted", CYAN),
-            (State::Working, _) => (pulse(), "working", GREEN),
-            (State::NeedsYou, _) => ("○", "idle", GRAY),
-            (State::Stuck, _) => ("!", "stuck", RED),
-            (State::Done, Some(_)) if agent.branch.is_some() && agent.settled.is_none() => {
-                ("◆", "awaiting merge", CYAN)
-            }
-            (State::Done, Some(_)) => ("✓", "finished", GRAY),
-            (State::Done, None) if agent.parent.is_none() => ("⊘", "closed", GRAY),
-            (State::Done, None) => ("⊘", "stopped", GRAY),
-        };
         let idle = now.saturating_sub(agent.last_activity);
         let prompt = agent.asks.first().map(|a| format!("? {}", a.text));
         let prompt = prompt.or_else(|| interrupted.map(str::to_owned));
@@ -130,7 +133,7 @@ impl<'a> Card<'a> {
                 .into(),
                 GRAY,
             ),
-            (State::Stuck, ..) => Doing::Words("the supervisor marked it stuck".into(), RED),
+            (State::Stuck, ..) => Doing::Words(STUCK.into(), RED),
             (State::Done, Some(report), _) => Doing::Done(report.status, report.text.clone()),
             (State::Done, ..) if agent.parent.is_none() => Doing::Words("closed".into(), GRAY),
             (State::Done, ..) => Doing::Words("stopped by its parent".into(), GRAY),
@@ -188,49 +191,44 @@ impl<'a> Card<'a> {
         format!("{word} {level}")
     }
 
-    /// The card's rows, each `width` columns with the selection mark's column first.
+    /// The card's rows, each `width` columns with the selection mark's column first, each laid out
+    /// as it is taken.
     pub fn rows(
         &self,
         size: Size,
         width: usize,
         detail: Detail,
-        look: (bool, bool),
-    ) -> Vec<Line<'static>> {
-        let (selected, open) = look;
-        // Under 12 columns a card is its name alone, clipped.
-        if width < 12 {
-            return vec![Line::styled(
-                clip(&self.agent.name, width),
-                style(WHITE, GLASS),
-            )];
-        }
+        (selected, open): (bool, bool),
+    ) -> impl Iterator<Item = Line<'static>> + '_ {
         let room = width.saturating_sub(LEAD);
         let rule = match self.over {
             true => GRAY_DIM,
             false => mix(GLASS, self.tone, 0.55),
         };
-        let count = size.rows();
-        (0..count)
-            .map(|i| {
-                let mark = if i == 0 && selected { "❯" } else { " " };
-                let edge = match i {
-                    0 => Span::styled(self.glyph, style(self.tone, GLASS)),
-                    _ if i + 1 == count => Span::styled("╰", style(rule, GLASS)),
-                    _ => Span::styled("│", style(rule, GLASS)),
-                };
-                let mut row = vec![bold(mark, CYAN), edge, span(" ", GRAY)];
-                row.extend(match i {
-                    0 => self.identity(size, room, (detail, width < SHORT), open),
-                    1 => self.doing(room),
-                    _ => self.vitals(room, detail, width < SHORT),
-                });
-                pad(&mut row, width);
-                if self.silent {
-                    dim(&mut row);
-                }
-                Line::from(row)
-            })
-            .collect()
+        // Under 12 columns a card is its name alone, clipped.
+        let count = [size.rows(), 1][usize::from(width < 12)];
+        (0..count).map(move |i| {
+            if width < 12 {
+                return Line::styled(clip(&self.agent.name, width), style(WHITE, GLASS));
+            }
+            let mark = if i == 0 && selected { "❯" } else { " " };
+            let edge = match i {
+                0 => Span::styled(self.glyph, style(self.tone, GLASS)),
+                _ if i + 1 == count => Span::styled("╰", style(rule, GLASS)),
+                _ => Span::styled("│", style(rule, GLASS)),
+            };
+            let mut row = vec![bold(mark, CYAN), edge, span(" ", GRAY)];
+            row.extend(match i {
+                0 => self.identity(size, room, (detail, width < SHORT), open),
+                1 => self.doing(room),
+                _ => self.vitals(room, detail, width < SHORT),
+            });
+            pad(&mut row, width);
+            if self.silent {
+                dim(&mut row);
+            }
+            Line::from(row)
+        })
     }
 
     // The name and clock stay; location takes the model/state's space on a root card.
@@ -315,11 +313,12 @@ impl<'a> Card<'a> {
                 };
                 let text = text.lines().next().unwrap_or_default();
                 let mut row = vec![span(lead, ink)];
-                if !text.is_empty() {
+                // The report's words follow only with room for two cells of them.
+                if !text.is_empty() && width(lead) + 5 <= room {
                     let text = clip(text, room.saturating_sub(width(lead) + 3));
                     row.extend([span(" · ", GRAY_DIM), span(text, GRAY)]);
                 }
-                row
+                clip_spans(row, room)
             }
         }
     }

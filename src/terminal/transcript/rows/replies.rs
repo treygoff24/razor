@@ -4,22 +4,39 @@ use crate::terminal::motion::FRAME;
 use std::f64::consts::TAU;
 use unicode_segmentation::UnicodeSegmentation;
 
-// `[Image #N]` in an input's words drawn as its chip, white on the chip ground.
+// Where an `[Image #N]` marker's characters stand while its words wrap: private-use plane 16,
+// clear of Nerd Font icons, where nothing breaks a line.
+const MARK: u32 = 0x100000;
+
+// An input's words with each `[Image #N]` marker moved to MARK, so wrapping never parts it.
+fn marks(text: &str) -> String {
+    let (mut out, mut rest) = (String::with_capacity(text.len()), text);
+    while let Some(at) = rest.find("[Image #")
+        && let Some(end) = rest[at..].find(']').map(|e| at + e + 1)
+    {
+        out.push_str(&rest[..at]);
+        out.extend(
+            rest[at..end]
+                .chars()
+                .map(|c| char::from_u32(MARK + c as u32).unwrap_or(c)),
+        );
+        rest = &rest[end..];
+    }
+    out + rest
+}
+
+// A wrapped row's marker characters moved back and drawn as their chip, white on the chip ground.
 fn chips(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
-    let mut out = Vec::new();
+    let mut out: Vec<Span<'static>> = Vec::new();
     for s in spans {
-        let mut rest: &str = &s.content;
-        while let Some(at) = rest.find("[Image #")
-            && let Some(end) = rest[at..].find(']').map(|e| at + e + 1)
-        {
-            out.push(Span::styled(rest[..at].to_owned(), s.style));
-            out.push(Span::styled(
-                rest[at..end].to_owned(),
-                s.style.fg(WHITE).bg(CHIP),
-            ));
-            rest = &rest[end..];
+        for c in s.content.chars() {
+            let back = char::from_u32((c as u32).wrapping_sub(MARK)).filter(char::is_ascii);
+            let style = back.map_or(s.style, |_| s.style.fg(WHITE).bg(CHIP));
+            match out.last_mut().filter(|last| last.style == style) {
+                Some(last) => last.content.to_mut().push(back.unwrap_or(c)),
+                None => out.push(Span::styled(back.unwrap_or(c).to_string(), style)),
+            }
         }
-        out.push(Span::styled(rest.to_owned(), s.style));
     }
     out
 }
@@ -92,6 +109,7 @@ pub(super) fn input_rows(
     model: &str,
     columns: usize,
     worn: Option<EntryId>,
+    room: pictures::Room<'_>,
     rows: &mut Rows,
 ) {
     let human = matches!(input.from, Origin::Person | Origin::Answer { .. });
@@ -129,7 +147,7 @@ pub(super) fn input_rows(
         }
     }
     let rendered = markdown::render(
-        &content,
+        &marks(&content),
         columns.saturating_sub(8),
         human,
         None,
@@ -157,6 +175,10 @@ pub(super) fn input_rows(
             )
         }
     });
+    // Each sent picture under the words, in the words' column.
+    for image in &input.images {
+        rows.extend(room.rows(&image.path, 8, columns.saturating_sub(10), bg));
+    }
 }
 
 // A thinking summary: the model's running account between its calls, an aside quieter than a

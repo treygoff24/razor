@@ -1,6 +1,32 @@
 # Configuration
 
-Razor's settings are TOML files that it rereads when you save them; a change applies at the next turn, with the few exceptions below. Most people only ever edit one file, `~/.razor/config.toml`. API keys go in a separate file, `keys.toml`, that only you can read, and sign-ins are kept by each provider's own login.
+Razor's settings are TOML files that it rereads when you save them; a change applies at the next turn, with the few exceptions below. Most people keep their settings in one file, `~/.razor/config.toml`, and can change them with `razor config`. API keys go in a separate file, `keys.toml`, that only you can read, and sign-ins are kept by each provider's own login.
+
+## Change a setting
+
+Use `razor config` from your project's folder:
+
+```sh
+razor config get ui.blocks
+razor config set ui.blocks half
+razor config set ui.motion false
+razor config set ui.keys.global.status '["Ctrl-Y"]'
+razor config unset ui.blocks
+razor config path
+```
+
+`get` prints the effective value as JSON, followed by its source file or `built-in default`. File paths in values are absolute. An optional setting with no value prints `null`; a named entry that has no override reports that no value is configured. For keyboard actions without an override, `/keys` in the terminal shows the inherited keys.
+
+`set` saves to your own file, creating it when needed. Values are TOML: booleans, numbers, quoted strings, arrays or inline tables. If a value does not parse as TOML, it becomes a string, so `half`, `high` and `15m` work without extra quotes. Shell quotes keep arrays and values with spaces together. A dotted key follows TOML syntax; quote a segment inside it if the name itself contains dots.
+
+`unset` removes an override from the selected file, allowing the value beneath it to apply; it does not hide entries inherited from a pack. `path` prints the selected file. Add `--project` to `set`, `unset` or `path` for the shared project file, or `--local` for the private project file:
+
+```sh
+razor config set children.max 8 --project
+razor config set tasks.remote origin --local
+```
+
+The same restrictions below apply to these commands. Unknown keys and invalid values are refused before saving. Comments and unrelated settings stay in the file. When changing a field inside an inherited named entry, the command may copy the entry from a lower file, preserving its written values. It never copies personal or pack settings into a shared project file, or project settings into your file. In those cases it writes only the requested field, which the loader may refuse if the entry needs other fields. These commands start no server; a running server rereads the saved file as usual.
 
 ## Where settings live
 
@@ -30,10 +56,10 @@ Commands are not rebased. An MCP server's `command` starts in the project's fold
 
 ## What only your own file may set
 
-Settings about you or the machine may be set only in your own file, `~/.razor/config.toml`, or in a pack, never in a project's files. A project file that sets one is ignored whole, and Razor keeps that file's last good settings, with a message naming the file and the keys, such as `/home/you/code/app/.razor/config.toml cannot set ui; move these keys to the person's file.` `razor mcp` and `/mcp` refuse to change such a file and show that message; nothing else shows it yet. These are the settings:
+Settings about you or the machine may be set only in your own file, `~/.razor/config.toml`, or in a pack, never in a project's files. A project file that sets one is ignored whole, and Razor keeps that file's last good settings, with a message naming the file and the keys, such as `/home/you/code/app/.razor/config.toml cannot set ui; move these keys to the person's file.` `razor config`, `razor mcp` and `/mcp` refuse to change such a file and show that message; nothing else shows it yet. These are the settings:
 
-- the server and models: `server`, `models`, `claude`, `responses.base_url`, the whole `[sessions]` table, `call_model`, `call_effort`;
-- what conversations start with: `startup`, `children.startup`, `skills`, `pack`;
+- the server and models: `server`, `release_updates`, `remote`, `models`, `claude`, `responses.base_url`, the whole `[sessions]` table, `call_model`, `call_effort`;
+- what conversations start with: `startup`, `children.startup`, `skills`, `skill_updates`, `pack`;
 - programs Razor runs for you: `ask`, `notify`, `speech`, `transcribe`, `capture`, `play`, `plugins`;
 - safety: `guards`;
 - always-on agents: `residents`;
@@ -47,7 +73,7 @@ Settings about you or the machine may be set only in your own file, `~/.razor/co
 - Most changes apply at the next turn.
 - `server.address` and `responses.base_url` apply when the server restarts, and Razor says so when you change them ([Troubleshooting](troubleshooting.md#restarting-the-server) says how to restart).
 - `keys.toml` is read when the server starts, so run `razor restart` after `razor keys`.
-- A file that does not parse, or holds a wrong value, is ignored, and Razor keeps that file's last good settings. For your file and the pack's, the terminal app's status pane and `server.log` name the file and the problem.
+- A file that does not parse, names an unknown key, or holds a wrong value, is ignored, and Razor keeps that file's last good settings. For your file and the pack's, the terminal app's status pane and `server.log` name the file and the problem.
 - A server whose own file or pack is broken does not start, and `server.log` says why.
 - A settings file is at most 1 MiB.
 
@@ -58,7 +84,7 @@ API keys are read from the server's environment. `razor keys` asks for the optio
 | Variable | Used for |
 | --- | --- |
 | `EXA_API_KEY`, `PARALLEL_API_KEY`, `FIRECRAWL_API_KEY` | The web tools `search`, `fetch` and `answer` ([Browser, voice and search](browser-voice-search.md)) |
-| `ELEVENLABS_API_KEY` | The bundled speech program |
+| `ELEVENLABS_API_KEY` | The bundled speech program; a restricted key needs the Text to Speech and Voices (read) permissions |
 
 Each name is optional, and the file is readable only by you (`chmod 600 ~/.razor/keys.toml` if you write it yourself). Any other name, or an empty value, stops the server and `razor doctor` from starting, with a sentence naming the four it may hold:
 
@@ -78,19 +104,70 @@ Every terminal keyboard action can be changed in your own `config.toml`. Tables 
 
 ```toml
 [ui.keys.global]
-prefix = ["Ctrl-B"]
+prefix = ["Ctrl-A"]
 status = ["Ctrl-Y"]
 
-[ui.keys.list]
-up = ["k", "Up"]
-down = ["j", "Down"]
+[ui.keys.prefix]
+detach = ["q", "d", "D"]
 ```
 
-Missing actions keep their defaults; `[]` unbinds an action. The prefix is unset by default. After setting it, prefix then n/p opens the next/previous root in the same project, as a click on it does, and prefix then h/j/k/l navigates the agents list. Prefix n/p leaves typing in the composer.
+Missing actions keep their defaults; `[]` unbinds an action. `overview` in `global` (F3 by default) opens the agents overview and leaves it again; the overview takes the `list` keys, with `up` and `down` moving between agents and folded groups, `right` opening the selected agent or unfolding the selected group, `fold` folding the selected agent's group and `left` doing nothing. `outward` in `line_start` (Left at the start of a composer line) goes from a helper to its parent, and from any other session opens the agents list beside it, then the overview; `inward` in `draft_end` (Right at the end of the draft while the list is open) closes the list. `outward` was named `list` until November 2026, and a setting that still names `line_start.list` is refused as an unknown action, keeping the terminal's last valid keys. While more than one question waits, Left and Right at an empty draft are the `question` context's `previous` and `next` instead, stepping between the questions.
 
-Each table is a context, the place its keys apply: `global`, `transcript`, `list` (the agents list), `prefix`, `composer`, `line_start` (the start of a composer line), `targets` (selecting click targets), `children`, `input_history` (earlier inputs), `queued_input` (withdrawing queued input), `attached_images` (entering the image selection), `question`, `voice`, `picker`, `panel`, `mcp`, `start`, `emoji`, `completion`, `shortcode`, `attachments` (while selecting an image), `editor` and `skill`.
+### The prefix
 
-Run `/keys` for every action, its context and effective keys. The [shipped catalogue](https://github.com/treygoff24/razor/blob/main/src/terminal/data/keys.toml) supplies the defaults and descriptions in the same format. Keys accept `Ctrl-`, `Alt-`, `Shift-` and `Super-`, named keys such as `Enter`, `Esc`, `Space`, `Left`, `PageUp` and `F2`, or a single character. Each action accepts up to eight keys. Changes apply while the terminal is open, and hints update with them. An invalid name, key or duplicate within a context shows an error and keeps that terminal's last valid bindings.
+Many actions sit behind a prefix, as in tmux: press backtick (`` ` ``) or Ctrl-B, then the action's key. The prefix works only while the draft is empty, so a backtick among your words is typed and Ctrl-B there moves the cursor left. Pressed twice, the prefix sends itself: two backticks type one. Esc cancels the prefix, and a key with no prefix action is refused with a line saying so.
+
+| After the prefix | Action in `[ui.keys.prefix]` | What it does |
+| --- | --- | --- |
+| `j` / `k` | `next_project` / `previous_project` | Opens the next or previous project's first top-level agent |
+| `!` `@` `#` … `(` (Shift-1 to Shift-9) | `project_1` … `project_9` | Opens the first top-level agent of project 1 to 9 |
+| `n` / `p` | `next_agent` / `previous_agent` | Opens the next or previous top-level agent in this project |
+| `1` to `9` | `agent_1` … `agent_9` | Opens top-level agent 1 to 9 in this project |
+| `c` | `global.new` | Starts a new agent |
+| `T` or `,` | `rename` | Types `/name ` to rename this session |
+| `X` | `done` | Types `/done`; Enter closes this session after its last turn |
+| `v` or `-` | `split` | Opens the selected child card, or the first child, in a split |
+| `x` | `close_split` | Closes the child's split |
+| `h` / `l` | `left` / `right` | Gives the keys to the agents list / to the conversation |
+| `Tab` or Shift-Tab | `switch` | Moves the keys between the agents list and the conversation |
+| `H` / `L` | `narrower` / `wider` | Narrows / widens the agents list |
+| `w`, `b` or `s` | `list.open` | Opens or closes the agents list |
+| `g` | `goto` | Opens Go to, as `/goto` does: find any agent or past conversation and open it |
+| `o` | `waiting` | Opens the oldest question waiting for you, else what the status chip opens |
+| `[` | `browse` | Browses the click targets from the first, as Tab does: `j`/`k` or the arrows move, Enter opens, Esc leaves |
+| Up / Down | `previous_reply` / `next_reply` | Selects the agent's reply above or below on screen |
+| `?` | `keys` | Lists every key |
+| `q` or `d` | `detach` | Leaves the terminal; sessions keep running |
+
+A reply is selected at its first row, or at the copy line under a long one. While browsing, `"` quotes the selected reply into the draft, `y` copies it (or the selected link), and Enter opens it read-only in your own editor rather than pinning it, which a click on its first row still does. The editor is `$VISUAL`, else `$EDITOR`, else `vi`, its words quoted as in a shell but run without one (no `$` expansion), with `-R` for vi, vim and nvim, so your own configuration and motions apply. Razor waits until you leave the editor, then removes the reply's temporary file.
+
+An entry in `[ui.keys.prefix]` may also name any other action in full, which then runs after the prefix as its own key does: the shipped `c` is `"global.new"` and `w`, `b` and `s` are `"list.open"`. To open the status pane with the prefix and `t` and free Ctrl-T:
+
+```toml
+[ui.keys.prefix]
+"global.status" = ["t"]
+
+[ui.keys.global]
+status = []
+```
+
+Projects follow the agents list: its top-level agents in the list's order, whatever heading holds them, grouped by the folder each runs in, leaving out NEEDS YOU, which repeats rows, and Earlier. Opening an agent this way opens the list beside it, and at either end `j`/`k` and `n`/`p` stop.
+
+Inside tmux, Herdr or another program whose own prefix is the same key, that program takes the key first. Press its prefix twice to send it on to Razor (tmux's `send-prefix`), or give Razor another prefix in `[ui.keys.global]`.
+
+### The draft
+
+With words or images in the draft, Ctrl-C empties it (`composer.clear`), and the undo key brings them back; with nothing to send, Ctrl-C starts quitting as before. Ctrl-S (`composer.stash`) sets the draft aside, words and images, and empties the box; Ctrl-S with an empty draft brings it back, into whichever conversation is open then. One draft is held at a time, until the terminal app quits, and stashing another while one is held is refused.
+
+### Vim keys
+
+Panels such as `/keys`, `/help`, `/tasks` and `/status` scroll with `j`/`k`, by half a page with Ctrl-D/Ctrl-U, and to the top and end with `g`/`G`. In `/keys`, `/help` and `/tasks`, `/` starts a search: type words and only the rows holding all of them stay; Esc ends the search, and Esc again closes the panel. The model chooser also moves with `h`/`j`/`k`/`l`. With an empty draft, Ctrl-D and Ctrl-U scroll the transcript half a page; with words in the draft they keep their editing meaning. A letter typed into an empty draft is always typed, so `j` and `k` move only while browsing.
+
+### Contexts
+
+Each table is a context, the place its keys apply: `global`, `transcript`, `list` (the agents list), `prefix`, `goto` (the Go to panel), `composer`, `line_start` (the start of a composer line), `draft_end` (the end of the draft while the agents list is open), `targets` (selecting click targets), `children`, `input_history` (earlier inputs), `queued_input` (withdrawing queued input), `attached_images` (entering the image selection), `question`, `voice`, `picker`, `panel`, `mcp`, `start`, `emoji`, `completion`, `shortcode`, `attachments` (while selecting an image), `editor` and `skill`.
+
+Run `/keys`, or the prefix and `?`, for every action, its context and effective keys. The [shipped catalogue](https://github.com/treygoff24/razor/blob/main/src/terminal/data/keys.toml) supplies the defaults and descriptions in the same format. Keys accept `Ctrl-`, `Alt-`, `Shift-` and `Super-`, named keys such as `Enter`, `Esc`, `Space`, `Left`, `PageUp` and `F2`, or a single character. Each action accepts up to eight keys. Changes apply while the terminal is open, and hints update with them. An invalid name, key or duplicate within a context shows an error and keeps that terminal's last valid bindings.
 
 ## The file about you
 
@@ -158,10 +235,25 @@ These decide what every conversation is told before your first message, and whic
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `startup` | `["razor", "project"]`; the starter pack's is `["persona.md", "razor", "about", "project", "rules.md"]` | The parts of a top-level conversation's system prompt, in order. Three words are not files: `razor` is Razor's own text about its tools, `project` is the `AGENTS.md` and `CLAUDE.md` files from the repository root down to the session's folder, and `about` is `~/.razor/about.md`. Anything else is a file, or a folder whose first 64 `.md` files are read. |
-| `skills` | `[]` | More folders of skills: written instructions an agent loads by name, one folder per skill with a `SKILL.md`. These are searched after the pack's `skills` folder and the project's `.agents/skills` and `.claude/skills`. |
+| `skills` | `[]` | More folders of skills: written instructions an agent loads by name, one folder per skill with a `SKILL.md`. These are searched last, after the folders below. |
+| `skill_updates` | `true` | Update eligible machine skills on the first server wake and then daily. Set `false` to stop future runs and restore shipped pack skills in lookup; an update already running finishes. |
 | `pack` | the starter pack | The pack folder. Naming one replaces the starter pack; removing the name brings it back. |
 
-The opening lists the pack's and project's skills with descriptions, up to 100. Additional `skills` folders remain available by name and through slash-command search.
+Razor looks for skills in this order, and when two folders hold a skill of the same name, the first one wins:
+
+1. Machine-owned skill overrides in `<Razor home>/skills`.
+2. The pack's `skills` folder.
+3. The project's `.agents/skills` and `.claude/skills`.
+4. Your own `~/.agents/skills`, `~/.claude/skills` and `~/.codex/skills`, where Codex and Claude Code keep your personal skills, so the skills you already use there come with you.
+5. The folders the `skills` setting names.
+
+A new conversation's opening lists the skills of the first four with their descriptions, up to 100, filled in that order. The `skills` setting's folders stay available by name and through slash-command search. A skill of yours that shares a name with the pack's or the project's is not used; rename it to use both.
+
+Automatic updates cover your three home skill folders and folders named by `skills`; project skills stay with their repositories. Git checkouts advance only when clean, including ignored files, on a branch tracking a remote, and only by fast-forward. This advances the whole checkout, including files outside its skills folder.
+
+For installations named in the skills CLI's global lock, Razor runs `npx --yes skills@1.7.6 update --global --yes <names>`. Node 22.20 or later is required. The vendor may overwrite local edits and refresh installations for other detected agents. Keep tailored instructions under another name outside the vendor lock or in the project, or disable updates.
+
+Pack skills with a branch in their `UPSTREAM` file receive an override in this Razor home. The pack remains untouched; pinned tags and commits move with Razor releases. Overrides use a stable symlink, retaining the current and previous version. Failures and skipped updates appear in `server.log`, with no agent turn or notification. See [automatic skill updates](design/skill-updates.md) for bounds and provenance.
 
 ### Helpers (`[children]`)
 
@@ -291,6 +383,7 @@ before = ["call"]
 
 | Setting | Default | What it does |
 | --- | --- | --- |
+| `release_updates` | `true` | Download newer stable Razor releases at server startup and daily, ready for `razor restart`. Set `false` to stop future background checks; `razor update` still works. Source builds never update automatically. |
 | `[server] address` | none: the local socket only | A `host:port` the server also listens on, for other devices and for paired servers, the Razor servers on your other machines that you connect to this one; plain HTTP, so use a private network ([More machines](machines.md)). Needs a restart. |
 | `[server] https_url` | none | An HTTPS address that reaches this server, used to finish MCP sign-ins. Without it, you paste the address the browser landed on. |
 | `[server] name` | empty | This machine's short name: the first word of the name of each new session you start, and the machine name other servers show. Empty: sessions are named after their project. |
@@ -304,8 +397,10 @@ before = ["call"]
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `[ui] motion` | `true` | `false` draws everything still, in its settled form. |
-| `[ui] blocks` | `"octant"` | Pictures are drawn with octants, Unicode characters that split a cell into eight blocks. `"half"` uses half blocks instead, for fonts that lack octants. |
+| `[ui] suggestions` | `false` | Suggest a next message in the composer, included in the agent's reply. This uses extra tokens but no extra request. Tab accepts it into the draft; send it separately. |
+| `[ui] blocks` | `"auto"` | The workshop scene and the top bar's clock use octants, Unicode characters that split a cell into eight blocks, except in tmux or on narrow screens, where they use half blocks. `"octant"` also uses octants in tmux; `"half"` always uses half blocks. Narrow screens use half blocks for all three settings. Pictures in the transcript do not follow this setting ([Troubleshooting](troubleshooting.md#installing)). |
 | `[ui] stage` | `"workshop"` | The status pane ends in a small animated workshop scene. `"off"` hides it and gives its rows to the pane. |
+| `[ui] quit` | `"detach"` | What pressing Ctrl-C twice with an empty draft does: `"detach"` leaves the terminal and the session keeps running, as `/detach` does; `"end"` ends the session you are talking to at once, as `/end` does, then leaves. |
 | `[brand] name` | `"Razor"` | The product name clients show. |
 | `[brand] colours` | none | Replacements for the theme's colours, each name mapped to `"#rrggbb"`; the names are below. |
 

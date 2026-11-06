@@ -89,19 +89,7 @@ pub(in crate::terminal) async fn edit(app: &mut App) -> Result<(), Error> {
         let mut file = options.open(&path).await?;
         file.write_all(&before).await?;
         drop(file);
-        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
-        let mut shell = tokio::process::Command::new("sh");
-        let shell = shell.arg("-c").arg(format!(r#"{editor} "$1""#));
-        if !shell
-            .arg("razor-views")
-            .arg(&path)
-            .status()
-            .await?
-            .success()
-        {
-            let failed = "The editor did not exit successfully.";
-            return Err(std::io::Error::other(failed));
-        }
+        crate::terminal::editor::open(&path, false).await?;
         let (mut bytes, limit) = (Vec::new(), crate::protocol::BODY_BYTES as u64 + 1);
         let file = tokio::fs::File::open(&path).await?;
         file.take(limit).read_to_end(&mut bytes).await?;
@@ -117,7 +105,10 @@ pub(in crate::terminal) async fn edit(app: &mut App) -> Result<(), Error> {
         let words = format!("Views were not saved; your edits remain at {path}: {e}");
         error(words)
     };
-    if let Some(edited) = edited.await.map_err(|e| failure(e.to_string()))? {
+    if let Some(edited) = edited
+        .await
+        .map_err(|e: std::io::Error| failure(e.to_string()))?
+    {
         let saved = api.json(Method::PUT, "v1/views", Some(serde_json::json!(edited)));
         saved.await.map_err(|e| failure(e.to_string()))?;
     }

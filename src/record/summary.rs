@@ -79,6 +79,12 @@ pub(crate) struct Summary {
     /// When the model last showed reply text.
     pub(crate) spoke_at: Option<Millis>,
     pub(crate) last_reply: String,
+    /// The latest input that asked for a suggested next message.
+    suggesting: Option<EntryId>,
+    /// The latest reply's entry while it has a suggestion and nothing has worked since, an idle
+    /// handover's own entries aside (`unseen`), with whether its turn ended well answering
+    /// `suggesting`.
+    suggestion: Option<(EntryId, bool)>,
     pub(crate) cut: EntryId,
     pub(crate) last: EntryId,
     pub(crate) unanswered: Vec<EntryId>,
@@ -89,7 +95,9 @@ pub(crate) struct Summary {
     pub(crate) voice_calls_left_out: usize,
     /// The newest 16 meetings started, in the order they started.
     pub(crate) meetings: Vec<Meeting>,
-    pub(crate) unresolved: Vec<(CallId, EntryId)>,
+    /// Each call no Result answers yet, oldest first, with its tool's name, `target` and when it
+    /// started: the newest of them is what the agent is doing.
+    pub(crate) unresolved: Vec<(CallId, EntryId, (String, String, Millis))>,
     /// This turn's code-mode exec Calls. A cell is named by its exec's call id, and a call the
     /// cell makes has that id, a colon and a number. Cells stop when their turn ends, which
     /// clears this and `waits`, so each holds one conversation's calls at most.
@@ -128,6 +136,9 @@ pub(crate) struct Summary {
     pub(crate) changed_files: Vec<PathBuf>,
     /// Tool calls over the whole record, including unresolved calls.
     pub(crate) calls_made: u32,
+    /// Finished reports since upkeep: 2 is due, 3 has already been reminded.
+    pub(crate) upkeep: u8,
+    upkeep_writes: Vec<CallId>,
     /// Calls whose result was an error, over the whole record.
     pub(crate) failed: u32,
     /// The newest turn's cache reads over its request input, once a turn has reported usage.
@@ -190,6 +201,8 @@ impl Summary {
             person_input_at: None,
             spoke_at: None,
             last_reply: String::new(),
+            suggesting: None,
+            suggestion: None,
             cut: EntryId(0),
             last: EntryId(0),
             unanswered: Vec::new(),
@@ -219,6 +232,8 @@ impl Summary {
             headline_at: None,
             changed_files: Vec::new(),
             calls_made: 0,
+            upkeep: 0,
+            upkeep_writes: Vec::new(),
             failed: 0,
             cache: None,
             context: None,
@@ -272,6 +287,16 @@ impl Summary {
         }
     }
 
+    /// The reply whose suggestion a client may offer now: its turn ended well, answering an input
+    /// that asked for one, with no work, input or question since.
+    pub(crate) fn suggestion(&self) -> Option<EntryId> {
+        let idle = self.unanswered.is_empty() && self.unresolved.is_empty();
+        let offer = self.suggestion.filter(|(_, ended)| *ended && idle);
+        offer
+            .filter(|_| self.questions.is_empty())
+            .map(|(id, _)| id)
+    }
+
     pub(super) fn fold(&mut self, entry: &Entry) {
         self.last = entry.id;
         self.at = entry.at;
@@ -281,6 +306,37 @@ impl Summary {
                 self.idle_since = None;
             }
         }
+        let reply = match &entry.body {
+            Body::Text { text } => Some(super::reply(text)),
+            _ => None,
+        };
+        let offers = reply.as_ref().is_some_and(|r| r.suggestion.is_some());
+        self.suggestion = match &entry.body {
+            _ if self.idle_handover && unseen(&entry.body) => self.suggestion,
+            Body::Input(input) if input.suggestions => {
+                self.suggesting = Some(entry.id);
+                None
+            }
+            Body::Text { .. } => offers.then_some((entry.id, false)),
+            Body::TurnEnd {
+                inputs,
+                end: End::Done,
+                closed: false,
+                ..
+            } if self.suggesting.is_some_and(|id| inputs.contains(&id)) => {
+                self.suggestion.map(|(id, _)| (id, true))
+            }
+            Body::Headline { .. }
+            | Body::ChangedFiles { .. }
+            | Body::Job(_)
+            | Body::Child { .. }
+            | Body::Withdrawn { .. }
+            | Body::Name { .. }
+            | Body::Effort { .. }
+            | Body::Notice { .. }
+            | Body::VoiceCall { .. } => self.suggestion,
+            _ => None,
+        };
         let idle_close = matches!(
             entry.body,
             Body::TurnEnd {
@@ -317,7 +373,22 @@ impl Summary {
                     None => name.clone(),
                 };
             }
-            Body::Input(input) => self.input(entry.id, input),
+            Body::Input(input) => {
+                if input.upkeep && input.from == Origin::Razor {
+                    self.upkeep = 3;
+                } else if self.upkeep < 2
+                    && matches!(
+                        input.from,
+                        Origin::Report {
+                            status: ReportStatus::Finished,
+                            ..
+                        }
+                    )
+                {
+                    self.upkeep += 1;
+                }
+                self.input(entry.id, input);
+            }
             Body::VoiceCall {
                 call,
                 source,
@@ -357,10 +428,12 @@ impl Summary {
             }
             Body::Call { call, name, input } => {
                 self.calls_made += 1;
-                self.unresolved.push((call.clone(), entry.id));
-                let action =
-                    (name.strip_prefix("functions.")).or_else(|| name.strip_prefix("mcp__razor__"));
-                match action.unwrap_or(name) {
+                let doing = (name.clone(), target(input), entry.at);
+                self.unresolved.push((call.clone(), entry.id, doing));
+                if matches!(action(name), "task" | "memory") && input["action"] == "write" {
+                    self.upkeep_writes.push(call.clone());
+                }
+                match action(name) {
                     "exec" => self.cells.push((call.clone(), entry.id)),
                     "wait" => self
                         .waits
@@ -375,18 +448,24 @@ impl Summary {
                 inputs,
                 ..
             } => {
+                if let Some(at) = self.upkeep_writes.iter().position(|id| id == call) {
+                    self.upkeep_writes.remove(at);
+                    if *outcome == Outcome::Success {
+                        self.upkeep = 0;
+                    }
+                }
                 self.unanswered.retain(|id| !inputs.contains(id));
                 self.failed += u32::from(*outcome == Outcome::Error);
                 if *outcome == Outcome::Error
-                    && let Some((_, id)) = self.unresolved.iter().find(|(c, _)| c == call)
+                    && let Some((_, id, _)) = self.unresolved.iter().find(|(c, ..)| c == call)
                 {
                     self.questions.retain(|ask| ask.id.1 != *id);
                 }
                 if *outcome == Outcome::Unknown {
-                    let calls = self.unresolved.iter().filter(|(c, _)| c == call);
-                    self.unknown.extend(calls.map(|(_, at)| *at));
+                    let calls = self.unresolved.iter().filter(|(c, ..)| c == call);
+                    self.unknown.extend(calls.map(|(_, at, _)| *at));
                 }
-                self.unresolved.retain(|(c, _)| c != call);
+                self.unresolved.retain(|(c, ..)| c != call);
             }
             Body::Job(event @ JobEvent::Started { job, .. }) => {
                 self.next_job = JobId(self.next_job.0.max(job.0 + 1));
@@ -441,29 +520,6 @@ impl Summary {
                 self.headline = text.clone();
                 self.headline_at = Some(entry.at);
             }
-            Body::Text { text } if !self.idle_handover => {
-                self.spoke_at = Some(entry.at);
-                self.last_reply.clear();
-                for word in text.split_whitespace() {
-                    if !self.last_reply.is_empty() {
-                        self.last_reply.push(' ');
-                    }
-                    let room = 512 - self.last_reply.len();
-                    self.last_reply
-                        .push_str(&word[..word.floor_char_boundary(room.min(word.len()))]);
-                    if word.len() >= room || word.ends_with(['.', '!', '?']) {
-                        break;
-                    }
-                }
-                // Until a child sets a headline, its newest reply's first line with content
-                // stands for one, cut to the headline tool's 64 KiB.
-                if self.child.is_some()
-                    && self.headline_at.is_none()
-                    && let Some(line) = text.lines().map(str::trim).find(|l| !l.is_empty())
-                {
-                    self.headline = line[..line.floor_char_boundary(64 << 10)].into();
-                }
-            }
             Body::ChangedFiles { files } => self.changed_files = files.clone(),
             Body::MailSent {
                 id,
@@ -481,6 +537,31 @@ impl Summary {
                 options: options.clone(),
                 at: entry.at,
             }),
+        }
+        // A reply whose only line is its suggestion leaves the preview before it.
+        let shown = reply.map(|r| r.text).filter(|t| !t.trim().is_empty());
+        if let Some(text) = shown.filter(|_| !self.idle_handover) {
+            self.spoke_at = Some(entry.at);
+            self.last_reply.clear();
+            for word in text.split_whitespace() {
+                if !self.last_reply.is_empty() {
+                    self.last_reply.push(' ');
+                }
+                let room = 512 - self.last_reply.len();
+                self.last_reply
+                    .push_str(&word[..word.floor_char_boundary(room.min(word.len()))]);
+                if word.len() >= room || word.ends_with(['.', '!', '?']) {
+                    break;
+                }
+            }
+            // Until a child sets a headline, its newest reply's first line with content
+            // stands for one, cut to the headline tool's 64 KiB.
+            if self.child.is_some()
+                && self.headline_at.is_none()
+                && let Some(line) = text.lines().map(str::trim).find(|l| !l.is_empty())
+            {
+                self.headline = line[..line.floor_char_boundary(64 << 10)].into();
+            }
         }
         self.runs.fold(&self.session, entry, &self.unanswered);
     }
@@ -687,6 +768,32 @@ impl Summary {
     }
 }
 
+/// A call's action under each route's name for it.
+fn action(name: &str) -> &str {
+    let razor = name.strip_prefix("mcp__razor__");
+    name.strip_prefix("functions.").or(razor).unwrap_or(name)
+}
+
+/// What an idle handover the person never sees records: its input, the note turn's words and
+/// `handover` call (a code cell's calls are their own entries), the rebuild that ends it, and a
+/// turn end that is no failure of an input. Any other call is work; a question, a night's
+/// rebuild or a close changes what the person sees.
+fn unseen(body: &Body) -> bool {
+    match body {
+        Body::Input(_) | Body::Text { .. } | Body::Thinking { .. } => true,
+        Body::Response { .. } | Body::Result { .. } => true,
+        Body::Call { name, .. } => ["handover", "exec", "wait"].contains(&action(name)),
+        Body::Rebuild { trigger, .. } => *trigger != Trigger::Night,
+        Body::TurnEnd {
+            inputs,
+            end,
+            closed,
+            ..
+        } => !closed && (*end == End::Done || inputs.is_empty()),
+        _ => false,
+    }
+}
+
 /// The input of a call that asks the person a question: a `message` of type question to the
 /// parent or to no one. A child's calls ask its parent, not the person; callers check that.
 pub(crate) fn ask(name: &str, input: &serde_json::Value) -> Option<serde_json::Value> {
@@ -701,6 +808,17 @@ pub(super) fn said(name: &str, input: &serde_json::Value) -> Option<serde_json::
     }
     let kind = matches!(input["type"].as_str(), Some("note" | "question"));
     (kind && input["to"].as_str().is_none_or(|to| to == "parent")).then(|| input.clone())
+}
+
+/// What a call acts on: its command, file, pattern, path, address or query, else its first text,
+/// on one line of at most 120 bytes.
+pub(crate) fn target(input: &serde_json::Value) -> String {
+    let named = ["command", "file_path", "pattern", "path", "url", "query"];
+    let text = named.iter().find_map(|k| input[k].as_str());
+    let text = text.or_else(|| input.as_object()?.values().find_map(|v| v.as_str()));
+    let line = text.unwrap_or_default().split_whitespace();
+    let line = line.collect::<Vec<_>>().join(" ");
+    line[..line.floor_char_boundary(120)].into()
 }
 
 /// A text's first line, at most 200 characters: a report's preview and a run's line.

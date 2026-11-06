@@ -83,8 +83,9 @@ Run them with `scripts/flows.sh` and flow numbers or names ([Contributing](contr
 
 - 25 The API: a device key, sessions, pages, attaching, sending and revoking.
 - 26 The terminal app: the transcript, a helper's card, the question band, the status pane and MCP.
+- 80 Saved transcript images in the terminal: Kitty protocol detection and transfers, coloured half-block fallback, small viewport chips and clearing after scroll.
 - 47 Questions in the terminal app: answering by number or in words, and two at once.
-- 56 Saved views of the agents list, shared between two servers and edited through `$EDITOR`.
+- 56 Saved views of the agents list, shared between two servers and edited through `$VISUAL` or `$EDITOR`.
 - 58 An older terminal app meeting a newer server's line says so once and shows the rest.
 - 69 The session list over HTTP: roots newest first, narrowed to a folder, with the limit counted after narrowing.
 
@@ -109,6 +110,7 @@ Run them with `scripts/flows.sh` and flow numbers or names ([Contributing](contr
 
 - 59 `razor setup` and `razor keys` in a real terminal: hidden keys saved privately and kept on Enter, running setup twice, and `--console` reaching Claude Code's own sign-in.
 - 60 The installer: a bad checksum keeps the current version; old versions are pruned, the current and previous kept; the first install enters setup in a terminal, an update prints the restart line.
+- 81 Release updates: a local HTTP release installs with its checksum and npm dependencies while the old server keeps running; readiness appears once in a newly launched terminal, restart selects the new version, and opt-out, source builds, cached installs and failed downloads keep their promised behavior.
 - 72 `razor stop` and `razor restart`: the lock an agent's file read cannot free, a lock with no PID refused, a second home beside another home's service, and install removing the service file it wrote when no manager answers.
 
 ## The evaluation

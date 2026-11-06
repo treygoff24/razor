@@ -582,6 +582,7 @@ impl Status {
             person_input_at: s.person_input_at,
             spoke_at: s.spoke_at,
             last_reply: s.last_reply.clone(),
+            suggestion: s.suggestion(),
             looked_at: old.and_then(|r| r.looked_at),
             seen: old.and_then(|r| r.seen),
             context: context.or(s.context),
@@ -591,7 +592,8 @@ impl Status {
                 .and_then(|c| c.worktree.as_ref())
                 .map(|_| children::branch(&s.session)),
             changed_files: s.changed_files.clone(),
-            calls: s.unresolved.iter().map(|(_, at)| *at).collect(),
+            calls: s.unresolved.iter().map(|(_, at, _)| *at).collect(),
+            doing: s.unresolved.last().map(|(.., doing)| doing.clone()),
             calls_made: s.calls_made,
             failed: s.failed,
             asks: s.questions.clone(),

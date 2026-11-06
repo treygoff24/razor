@@ -36,7 +36,7 @@ pub(super) async fn serve(
     mut incoming: mpsc::Receiver<ToBridge>,
     mut lines: mpsc::Receiver<Output>,
     outgoing: mpsc::Sender<Output>,
-) {
+) -> bool {
     let (runs, mut receiver) = mpsc::channel(64);
     let mut task = Task {
         bridge,
@@ -52,6 +52,7 @@ pub(super) async fn serve(
         active: false,
         settle: false,
     };
+    let mut refused = false;
     let result = async {
         loop {
             tokio::select! {
@@ -61,6 +62,7 @@ pub(super) async fn serve(
                 },
                 line = lines.recv() => {
                     let Some(line) = line else { break; };
+                    refused |= matches!(&line.0.says, FromBridge::TurnEnd { reason: Some(reason), .. } if reason == "authentication_failed");
                     if !task.line(line).await? { break; }
                 },
                 Some((call, result)) = task.locals.next(), if !task.locals.is_empty() => {
@@ -88,6 +90,7 @@ pub(super) async fn serve(
             })
             .await;
     }
+    refused
 }
 
 impl Task {

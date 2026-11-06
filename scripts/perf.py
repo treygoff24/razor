@@ -64,11 +64,9 @@ def median(name, values, where=""):
 tempfile.tempdir = "/dev/shm"
 replies = []
 with flow(replies, model=MODEL, config=PLAIN) as f:
-    (f.cwd / "persona.md").write_text("You are Ember, the measured resident.")
     beat = time.strftime("%H:%M:%S", time.localtime(time.time() + 12 * 3600))  # never due here
     with (f.home / ".razor/config.toml").open("a") as config:
         config.write(f"[residents.ember]\ncwd = {json.dumps(str(f.cwd))}\n"
-                     f"persona = {json.dumps(str(f.cwd / 'persona.md'))}\n"
                      f'[residents.ember.heartbeat]\nat = ["{beat}"]\ntext = "Heartbeat."\n')
     page, stop = f.cwd / "page.txt", f.cwd / "stop"
     page.write_text(page_text())

@@ -20,6 +20,7 @@ pub(crate) struct Mcp {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Definition {
     #[serde(default = "enabled")]
     enabled: bool,
@@ -109,6 +110,7 @@ pub(crate) enum Reference {
 
 /// Expected authorization server and an optional preregistered client.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct OAuth {
     pub(crate) issuer: Option<String>,
     pub(crate) client_id: Option<String>,

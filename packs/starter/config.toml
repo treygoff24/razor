@@ -93,5 +93,6 @@ answer = ["exa", "parallel"]
 
 # The terminal without animation, or with half blocks for fonts that lack octants.
 # [ui]
+# suggestions = true # Include a suggested next message in the reply; uses extra tokens, no extra request.
 # motion = false
 # blocks = "half"

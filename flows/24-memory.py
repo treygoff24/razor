@@ -185,3 +185,27 @@ with flow(replies) as f:
     until(f, parent, lambda _: "claim:" not in nested_task.read_text(), timeout=75)
     assert "closed:" not in nested_task.read_text(), nested_task.read_text()
     assert [p.read_text().split("---\n")[-1].strip() for p in nested_task.parent.glob("comments/2/*.md")] == ["Nested project report."]
+
+# A session in a resident's folder cannot replace its state; its /done names the home session
+# and a refused write returns the existing note, including for a session opened by cwd.
+with flow([reply((None, 'mcp__razor__memory', {'action': 'write', 'kind': 'state', 'text': 'HOME_STATE_348'}), match='HOME_348'),
+           reply(text='saved', match='HOME_348'),
+           reply((None, 'mcp__razor__memory', {'action': 'write', 'kind': 'state', 'text': 'THREAD_STATE_348'}), match='THREAD_348'),
+           reply(text='refused', match='THREAD_348'),
+           reply(text='closed', match='The person asked for `/done`')], config='[server]\naddress = "127.0.0.1:0"') as f:
+    from server import start
+    (f.cwd / 'persona.md').write_text('You are Ember.')
+    with (f.home / '.razor/config.toml').open('a') as config:
+        config.write(f'\n[residents.ember]\ncwd = {json.dumps(str(f.cwd))}\nstartup = [{json.dumps(str(f.cwd / "persona.md"))}, "razor"]\n')
+    start(f)
+    post(f, '/sessions/ember/input', {'text': 'HOME_348'})
+    until(f, 'ember', lambda es: any(e['kind'] == 'turn_end' for e in es))
+    thread = post(f, '/sessions', {'cwd': str(f.cwd)})['session']
+    post(f, f'/sessions/{thread}/input', {'text': 'THREAD_348'})
+    entries = until(f, thread, lambda es: any(e['kind'] == 'turn_end' for e in es))
+    refused = next(e for e in entries if e['kind'] == 'result')
+    assert refused['outcome'] == 'error' and 'HOME_STATE_348' in refused['output'] and 'ember' in refused['output'], refused
+    post(f, f'/sessions/{thread}/done', {})
+    entries = until(f, thread, lambda es: any(e.get('closed') for e in es))
+    closeout = next(e['text'] for e in entries if e['kind'] == 'input' and 'The person asked for `/done`' in e.get('text', ''))
+    assert 'ember' in closeout and '`message`' in closeout and "write the project's state note" not in closeout, closeout

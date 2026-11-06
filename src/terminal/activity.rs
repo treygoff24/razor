@@ -12,7 +12,11 @@ unsafe extern "C" {
 /// Reports local input at most once per fifteen seconds, only when this machine can play.
 /// One token identifies this process across all agents and directly paired servers.
 pub fn report(app: &mut App) {
-    if !app.audio.play || std::env::var_os("SSH_CONNECTION").is_some() {
+    if std::env::var_os("SSH_CONNECTION").is_some() {
+        return;
+    }
+    if !app.audio.play {
+        app.audio.input = Some(Instant::now());
         return;
     }
     if app

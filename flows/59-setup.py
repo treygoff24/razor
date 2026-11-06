@@ -4,6 +4,8 @@ CLI and the browser installer stand in for other people's software (docs/design/
 import json
 import os
 import select
+import re
+import socket
 import shutil
 import subprocess
 import time
@@ -58,9 +60,20 @@ with flow([reply(None, "mcp__razor__search", {"query": "setup saved key"}), repl
             ("PARALLEL_API_KEY:", ""), ("ELEVENLABS_API_KEY:", "")]
     ending = [("background when you log in", ""), ("Open Razor for your first message", "")]
     saved, person, you = (f.home / ".razor" / name for name in ("keys.toml", "config.toml", "about.md"))
-    before = person.read_bytes()
+    before = tomllib.loads(person.read_text())
+    tailscale = f.home / "tailscale"
+    tailscale.write_text("#!/bin/sh\necho '{\"BackendState\":\"Running\",\"Self\":{\"TailscaleIPs\":[\"127.0.0.1\"]},\"Peer\":{}}'\n")
+    tailscale.chmod(0o755)
     terminal(f, ["setup"], [("Use Claude, ChatGPT or both", "chatgpt"), *ending])
-    assert not saved.exists() and not you.exists() and person.read_bytes() == before, "setup asked for or wrote more than providers and the service"
+    settings = tomllib.loads(person.read_text())
+    server = settings.pop("server")
+    assert not saved.exists() and not you.exists() and settings == before, "setup changed unrelated settings"
+    expected = re.sub("-+", "-", re.sub("[^a-z0-9]", "-", socket.gethostname().split(".")[0].lower()))[:32].strip("-")
+    assert server["name"] == expected and "label" not in server, server
+    host, port = server["address"].rsplit(":", 1)
+    assert host == "127.0.0.1" and 7433 <= int(port) <= 7442, server
+    person.write_text(person.read_text().replace(f'name = "{server["name"]}"', 'name = "chosen59"'))
+    before = person.read_bytes()
     # Keys are typed hidden, saved together at 0600, and Enter keeps a saved one.
     screen = terminal(f, ["keys"], keys)
     assert secret.encode() not in screen, "keys echoed the typed key"

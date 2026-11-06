@@ -3,7 +3,7 @@
 use super::{App, Composer, Error, error, fail};
 use base64::Engine;
 use ratatui::backend::CrosstermBackend;
-use std::io::{Stdout, Write};
+use std::io::Write;
 
 pub const MAX: usize = 72 << 10;
 
@@ -152,7 +152,10 @@ fn block(text: &str, index: Option<usize>) -> Result<String, Error> {
 }
 
 /// Writes an encoded copy, if one is ready, between frames.
-pub fn write(app: &mut App, output: &mut CrosstermBackend<Stdout>) -> Result<(), Error> {
+pub fn write(
+    app: &mut App,
+    output: &mut CrosstermBackend<super::writer::Writer>,
+) -> Result<(), Error> {
     let Some((encoded, said)) = app.clipboard.take() else {
         return Ok(());
     };

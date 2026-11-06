@@ -11,9 +11,11 @@ use ratatui::{buffer::Buffer, layout::Rect};
 impl Composer {
     /// The phone form's height: the dock row, then the words' rows, one up to a third of the
     /// screen (three to ten) before they scroll.
-    pub fn phone_rows(&self, width: u16, height: u16) -> u16 {
+    pub fn phone_rows(&self, app: &App, width: u16, height: u16) -> u16 {
         let cap = (height / 3).clamp(3, 10) as usize;
-        1 + self.height(width.saturating_sub(6) as usize, cap).max(1) as u16
+        1 + self
+            .content_height(app, width.saturating_sub(6) as usize, cap)
+            .max(1) as u16
     }
 
     /// The phone form: the dock row (` ◧ status`, and the next input's model, effort and name at

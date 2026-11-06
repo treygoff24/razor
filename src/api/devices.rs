@@ -24,7 +24,12 @@ pub(super) async fn authorize(
     mut request: Request,
     next: Next,
 ) -> Response {
-    if request.method() == axum::http::Method::GET && request.uri().path() == "/v1/mcp/callback" {
+    let method = request.method();
+    let path = request.uri().path();
+    if (method == axum::http::Method::GET && path == "/v1/mcp/callback")
+        || (path == "/v1/pair"
+            && matches!(*method, axum::http::Method::GET | axum::http::Method::POST))
+    {
         return next.run(request).await;
     }
     let given = request
@@ -52,6 +57,15 @@ pub(super) async fn list(State(app): State<App>) -> Json<Vec<Device>> {
     Json(app.devices.list().await)
 }
 
+/// Only the calling enrollment, without its key, tokens or notification settings.
+pub(super) async fn identity(
+    State(app): State<App>,
+    Extension(device): Extension<Enrolled>,
+) -> Reply {
+    let name = enrolled(device)?;
+    Ok(Json(json!(app.devices.identity(&name).await)))
+}
+
 /// A device to enroll: another server has an address, and its pairing's key when the other
 /// side made it.
 #[derive(Deserialize)]
@@ -67,6 +81,19 @@ pub(super) async fn enroll(
     State(app): State<App>,
     Json(Name { name, address, key }): Json<Name>,
 ) -> Reply {
+    let own = app.address.get().copied();
+    if address.is_some() && own.is_none() {
+        return Err(bad(
+            "This server has no listening address; check server.address, restart Razor, then pair.",
+        ));
+    }
+    let (key, answered, request) = match (&address, key, own) {
+        (Some(address), None, Some(own)) => match app.devices.answered(address, own).await {
+            Some(key) => (Some(key), true, false),
+            None => (None, false, true),
+        },
+        (_, key, _) => (key, false, false),
+    };
     let device = app.devices.enroll(name, address, key).await?;
     let server = app.controller.config().await.server;
     let line = device
@@ -76,6 +103,15 @@ pub(super) async fn enroll(
         .flatten();
     let mut answer = json!(device);
     answer["pairing"] = json!(line);
+    let requested = match (&device.address, own, &device.key) {
+        (Some(address), Some(own), Some(key)) if request => {
+            app.devices.ask(address, &own.to_string(), key).await
+        }
+        _ => false,
+    };
+    answer["own"] = json!(own);
+    answer["requested"] = json!(requested);
+    answer["answered"] = json!(answered);
     Ok(Json(answer))
 }
 
@@ -201,7 +237,6 @@ fn phone(device: Enrolled, push: &Push) -> Result<String, Refusal> {
 
 /// The enrolled device a request came from; the local key names none.
 fn enrolled(Enrolled(name): Enrolled) -> Result<String, Refusal> {
-    let sentence =
-        "Only an enrolled device registers for notifications; enroll it with razor devices add.";
+    let sentence = "This request needs an enrolled device; enroll it with razor devices add.";
     name.ok_or_else(|| bad(sentence))
 }

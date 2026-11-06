@@ -34,6 +34,7 @@ class Terminal:
         self.pending, self.output, self.queries, self.frame = b"", b"", b"", b""
         self.frames, self.frame_at, self.received = 0, None, None
         self.fd, slave = os.openpty()
+        self.device = os.ttyname(slave)
         self.original = termios.tcgetattr(slave)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
         self.started = time.monotonic()
@@ -49,7 +50,7 @@ class Terminal:
             os.execvpe(BINARY, [BINARY, *args], {**f.env, "TERM": "xterm-256color"})
         os.close(slave)
         self.chunks, self.arrived, self.reading = deque(), threading.Condition(), True
-        self.unread, self.overflowed = 0, False
+        self.unread, self.overflowed, self.quit_said = 0, False, None
         self.reader = threading.Thread(target=self.read, daemon=True)
         self.reader.start()
 
@@ -58,7 +59,8 @@ class Terminal:
 
     def __exit__(self, kind, error, trace):
         try:
-            self.quit()
+            if self.quit_said is None:  # not already quit
+                self.quit()
         except Exception:
             if kind is None:  # else the earlier failure, the one to report, goes on
                 raise
@@ -133,7 +135,9 @@ class Terminal:
             while END in self.pending:
                 frame, self.pending = self.pending.split(END, 1)
                 self.frame = frame + END
-                self.stream.feed(self.frame)
+                # pyte has no APC parser: graphics are terminal output, not text cells. Keep
+                # the original frame for protocol checks while hiding its payload from pyte.
+                self.stream.feed(re.sub(rb"\x1b_[^\x1b]*\x1b\\", b"", self.frame))
                 self.frames += 1
                 self.frame_at = self.received
                 if predicate(self):
@@ -161,14 +165,24 @@ class Terminal:
         """Wait for a whole frame with every named phrase still visible."""
         return self.until(lambda t: all(word in t.text() for word in words), timeout)
 
-    def quit(self):
-        """Ctrl-C, its armed line, then Ctrl-C again must leave exit zero and exactly the terminal
-        modes from before attach."""
+    def quit(self, said="PRESS CTRL-C AGAIN TO QUIT"):
+        """Ctrl-C, its armed line saying `said`, then Ctrl-C again must leave exit zero and exactly
+        the terminal modes from before attach. A Ctrl-C that empties a draft comes first."""
+        # A suggestion hides the empty composer's placeholder: this press can already arm quit.
+        if "Message the agent" not in self.text():
+            self.send(b"\x03")
+            self.pump(5, lambda t: "Message the agent" in t.text() or said in t.text())
+        if said not in self.text():
+            self.send(b"\x03")
+            assert self.pump(10, lambda t: said in t.text()), \
+                "the first Ctrl-C did not ask for a second:\n" + self.text()
+        self.quit_said = said
         self.send(b"\x03")
-        assert self.pump(10, lambda t: "PRESS CTRL-C AGAIN TO QUIT" in t.text()), \
-            "the first Ctrl-C did not ask for a second:\n" + self.text()
-        self.send(b"\x03")
-        # The app waits up to 30 s for its last draft save before it quits.
+        self.leaves("Ctrl-C did not quit the app")
+
+    def leaves(self, failure):
+        """Exit zero within 30 s (time for a last draft save), modes restored; else `failure`."""
+        self.quit_said = self.quit_said or failure
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             pid, status = os.waitpid(self.pid, os.WNOHANG)
@@ -181,7 +195,7 @@ class Terminal:
         with suppress(ProcessLookupError):
             os.kill(self.pid, signal.SIGKILL)
         os.waitpid(self.pid, 0)
-        raise AssertionError("Ctrl-C did not quit the app")
+        raise AssertionError(failure)
 
     def records(self):
         """The OSC 7501 records the app's reports leave, kept as the protocol says a terminal does."""

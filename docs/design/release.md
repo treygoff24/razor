@@ -29,3 +29,37 @@ Check the HTTP installer in a clean Linux container and a scratch Mac home, incl
 Node on PATH avoids downloading a runtime for most developers; automatically installing pinned Node otherwise removes a first-run barrier at the cost of a roughly 40 MB download and maintaining the pinned checksum. Private Node is used only for the bridge, so it cannot shadow the user's Node in agent shells. Browser installation itself belongs to `razor setup`.
 
 A source build without `--link` requests an unselected candidate from the common installer; installation must not remove existing versions in that mode.
+
+## Updating an installed release
+
+```rust
+/// Install a newer stable release from this install's source, selecting it only after success.
+/// Returns a sentence naming the ready version or saying the selected version is current.
+/// Source installations and concurrent updates are refused without changing the installation.
+pub async fn update_release() -> Result<String, Error>;
+/// The newer selected release awaiting this process's restart; absent on source installs.
+pub(crate) async fn release_ready() -> Option<String>;
+/// The selected release binary for starting a server; source installs keep their own binary.
+pub async fn selected_executable() -> std::io::Result<PathBuf>;
+```
+
+A release lives directly under the canonical data directory as `MAJOR.MINOR.PATCH`,
+with `current/razor` present; source builds use git SHA folders or live outside this root.
+A release check reads the generated installer's stable `MAJOR.MINOR.PATCH` declaration.
+Only a version newer than both the running and selected versions is installed.
+The installed binary embeds the installer and runs it with selection enabled under one
+per-install lock. The downloaded installer supplies only the version and download URL.
+Installer improvements reach an existing installation one release later; downloaded shell
+code is never executed. Every release archive must install correctly with the previous
+release's installer.
+Its checksum, dependency installation, atomic selection and retention stay authoritative.
+A failed check or install leaves the running server and selected version available.
+The residents loop starts checks on its first wake and daily, using its existing clock.
+`release_updates = false` prevents future automatic checks; a running check finishes.
+The existing server status line carries `release_ready`; the terminal shows a restart notice.
+
+The hard decision is selecting `current` while a server runs. The server already freezes its
+canonical install folder before starting its runtime, and the installer retains folders with
+live executable paths. Reusing its selection preserves those guarantees and lets the existing
+service start the new release at the person's next `razor restart`. Detached servers also
+start the selected binary. No automatic restart interrupts a session.

@@ -26,7 +26,9 @@ replies = [reply(b, "mcp__razor__status", {}), agent(b, "start", name="kid44", b
            reply("(your child) asks", text="Noted."), reply("FORGED_44", text="Forged."),
            reply("Your context is nearly full", "mcp__razor__handover", {"note": "Wait."}),
            reply("The context was rebuilt", text="Rebuilt.")]
-with flow(replies, config='[server]\naddress = "127.0.0.1:0"') as f:
+# Ctrl-S opens the new-agent chooser here, so words can stand in the draft behind it.
+keys = '[ui.keys.global]\nnew = ["Ctrl-S"]\n[ui.keys.composer]\nstash = []\n'
+with flow(replies, config=keys + '[server]\naddress = "127.0.0.1:0"') as f:
     other = f.home / ".razor-b"
     other.mkdir()
     for name in ("config.toml", "auth.json"):
@@ -132,6 +134,29 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"') as f:
     assert not any(e.get("text") == "OLD_44" for e in f.record(here)), "a click behind the chooser sent"
     (new,) = set(os.listdir(other / "sessions")) - before
     assert far(new)[0]["cwd"] == str(beta.cwd) and far(new)[0].get("child") is None, far(new)[0]
+
+    # A git folder can hold projects; a hidden manager is not one, and the same origin reached
+    # over SSH and HTTPS is one chooser row with both servers.
+    ventures = f.home / "Ventures"
+    one, two, hidden = ventures / "raffle", ventures / "group" / "grapple", f.home / ".pyenv"
+    for folder in (ventures, one, two, hidden):
+        folder.mkdir(parents=True, exist_ok=True)
+        replace(f, cwd=folder).git("init", "-q")
+    for folder, origin in ((one, "git@github.com:Example/picker-shared.git"),
+                           (two, "https://github.com/example/picker-shared/")):
+        replace(f, cwd=folder).git("remote", "add", "origin", origin)
+    places = request("/repos?under=" + str(f.home), home=local, method="GET")["repos"]
+    by_path = {r["path"]: r for r in places}
+    assert str(one) in by_path and str(two) in by_path and str(hidden) not in by_path, places
+    assert by_path[str(one)]["identity"] == by_path[str(two)]["identity"], places
+    label = json.loads(send(local, "GET", "/status").readline())["server"]["label"]
+    with Terminal(replace(f, cwd=ventures), "--resume", here) as t:
+        t.shown("Sent."), t.send("\x13"), t.shown("new agent ·")
+        t.until(lambda t: any("picker-shared" in line and "far44" in line and label in line
+                              for line in t.text().splitlines()))
+        assert sum("picker-shared" in line for line in t.text().splitlines()) == 1, t.text()
+        t.send("\x1b"), t.until(lambda t: "new agent ·" not in t.text())
+
     f.cwd.chmod(0o111)  # an unreadable folder holding the past folders is skipped, not refused
     listed = request("/repos", home=local, method="GET")["repos"]
     f.cwd.chmod(0o755)

@@ -22,20 +22,24 @@ const SILENT: &str = "The microphone gave no sound; check its device and permiss
 const STOPPED: &str = "The microphone program stopped; check `capture` and try again.";
 const SAVING: &str = "Local audio could not be saved; check the temporary folder.";
 const INVALID: &str = "The server's answer is invalid; reconnect to a matching server.";
+const REMOTE: &str = "Over SSH, audio would play on {}, not your machine; pair Razor on yours.";
 const QUIT: &str = " QUITTING WILL DISCARD AUDIO. <composer.back> stays.";
 /// This process and its start, which name its private audio folder and its notes' request ids.
 pub(super) static RUN: LazyLock<String> =
     LazyLock::new(|| format!("{}-{}", std::process::id(), now()));
 
 /// At most one note and one player; the newest program's task, which the next awaits so one
-/// program runs at a time; and whether this machine's `capture` was set when last read.
+/// program runs at a time; whether this machine's `capture` was set when last read, and its name.
 #[derive(Default)]
 pub struct Audio {
     home: PathBuf,
     tx: Option<Sender<Done>>,
     capture: bool,
+    machine: String,
     pub(super) play: bool,
     pub(super) reported: Option<Instant>,
+    // One input awaiting audio settings, discarded past the owner's one-minute activity window.
+    pub(super) input: Option<Instant>,
     note: Option<Note>,
     player: Option<Player>,
     last: Option<JoinHandle<()>>,
@@ -99,9 +103,21 @@ async fn settings(home: PathBuf, tx: &Sender<Done>) -> Result<Config, Error> {
     let read = read.await.map_err(fail(unread))?;
     let config = read.map_err(fail(unread))?.config;
     let (capture, play) = (!config.capture.is_empty(), !config.play.is_empty());
+    let machine = match config.server.name.as_str() {
+        "" => crate::profiles::machine(),
+        name => name.into(),
+    };
     let _ = tx
         .send(Box::new(move |app| {
-            (app.audio.capture, app.audio.play) = (capture, play)
+            (app.audio.capture, app.audio.play, app.audio.machine) = (capture, play, machine);
+            if app
+                .audio
+                .input
+                .take()
+                .is_some_and(|at| play && at.elapsed() < Duration::from_secs(60))
+            {
+                super::activity::report(app);
+            }
         }))
         .await;
     Ok(config)
@@ -136,6 +152,7 @@ pub fn unsent(app: &App) -> bool {
 /// Starts a note for the addressed session, stopping the player; the editor's words, images and
 /// answer stay as they are. A held note must be sent or discarded first.
 pub fn record(app: &mut App) {
+    app.dismiss_suggestion();
     let waiting = "A note or input is waiting; send or discard it before recording again.";
     if app.audio.note.is_some() || app.sending.is_some() {
         return app.say(waiting);
@@ -167,11 +184,36 @@ pub fn record(app: &mut App) {
 pub fn captures(app: &App, k: KeyEvent) -> bool {
     matches!(k.code, KeyCode::Enter | KeyCode::Esc)
         && (app.audio.note.is_some()
-            || app
-                .audio
+            || app.audio.player.as_ref().is_some_and(|p| {
+                k.code == KeyCode::Esc || p.state.is_err() && app.composer.text.is_empty()
+            }))
+}
+
+/// The failure shown in the audio band, if any.
+pub fn failure(app: &App) -> Option<&str> {
+    app.audio
+        .note
+        .as_ref()
+        .and_then(|n| match &n.phase {
+            Phase::Failed(why) => Some(why.as_str()),
+            _ => None,
+        })
+        .or_else(|| {
+            app.audio
                 .player
+                .as_ref()?
+                .state
                 .as_ref()
-                .is_some_and(|p| k.code == KeyCode::Esc || p.state.is_err()))
+                .err()
+                .map(String::as_str)
+        })
+}
+
+/// Dismisses a failed player when the person sends typed words.
+pub fn dismiss_failure(app: &mut App) {
+    if app.audio.player.as_ref().is_some_and(|p| p.state.is_err()) {
+        app.audio.player = None;
+    }
 }
 
 pub fn key(app: &mut App, k: KeyEvent) -> bool {
@@ -403,8 +445,12 @@ pub fn listen(app: &mut App) {
 }
 
 /// Plays a saved note, or reads the newest completed reply aloud, in place of what was playing;
-/// the same again stops it. Recorded inputs play at their own speed, agent speech at 1.2.
+/// the same again stops it. Recorded inputs play at their own speed, agent speech at 1.2. Over
+/// SSH nothing plays: this machine's speakers are not the person's.
 pub fn play(app: &mut App, session: SessionId, entry: EntryId) {
+    if std::env::var_os("SSH_CONNECTION").is_some() {
+        return app.say(&REMOTE.replace("{}", &crate::profiles::machine()));
+    }
     if app.audio.note.as_ref().is_some_and(|n| n.stop.is_some()) {
         return app.say("Stop the recording before playing audio.");
     }
@@ -640,7 +686,7 @@ fn rows(app: &App, note: &Note, columns: usize) -> Vec<Line<'static>> {
     };
     let doing = match local.filter(|_| note.phase == Phase::Recording) {
         Some(_) if note.voice.levels.is_empty() => "Opening microphone…".into(),
-        Some(server) => format!("Recording on {}", server.machine),
+        Some(_) => format!("Recording on {}", app.audio.machine),
         None => "voice note".into(),
     };
     let head = clip(&format!(" YOU · {doing}"), columns.saturating_sub(6));
@@ -701,7 +747,7 @@ pub fn controls(app: &App, b: &mut Buffer, hits: &mut Vec<Hit>) {
         }
         if !matches!(action, Action::Play(..)) {
             let play = Action::Play(target.0.clone(), target.1);
-            plays.push((Rect::new(x, r.y, 2, 1), play));
+            plays.push((Rect::new(x, r.y, if cap { 1 } else { 2 }, 1), play));
         }
     }
     hits.extend(plays);

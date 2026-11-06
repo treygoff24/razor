@@ -1,0 +1,3 @@
+
+
+For this input only, optionally end your complete final reply with a separate line [razor-suggestion] {"text":"..."} containing at most 120 characters in the person's language and style; propose only a clear next message that continues work the person explicitly requested and left unfinished, without inventing any fact, requirement, preference or hypothetical; omit the line if your reply asks a question, needs a decision, completes all requested work, or leaves the next step unclear, and never propose assent, permission, an answer to your own question, or yes, go, approve, merge, push or deploy.

@@ -77,7 +77,9 @@ with flow(replies, model="gpt-6.1-sol", config='startup = ["razor", "project"]\n
     estimate = (len(prefix_text) + 3) // 4
     # 12,037 with the notify wording (2026-11-03): it took right reach-the-person behaviour from
     # 30/42 (opus low) and 20/42 (terra medium) to 41/42 for each, so the extra tokens stay.
-    assert estimate < 12_060, estimate
+    # 12,159 with razor.md's "Browser and desktop" section (Trey, 2026-11-06: "update the Razor
+    # system prompt to let agents know about agent browser and agent desktop").
+    assert estimate < 12_160, estimate
     offered = next(i for i in prefix if i["type"] == "additional_tools")["tools"]
     tools = next(t for t in offered if t["name"] == "functions")["tools"]
     assert {t["name"] for t in tools} == {"exec", "wait"}, tools

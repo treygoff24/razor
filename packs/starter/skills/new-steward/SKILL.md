@@ -5,21 +5,25 @@ description: Set up a steward, an always-on agent that decides a project's desig
 
 # Setting up a steward
 
-A steward is a resident (see the razor-settings skill) that owns one project's design, product and size-limit decisions on the person's behalf. The project's other agents send it their questions instead of asking the person. It answers in the turn a question arrives, records each decision, reviews what merged every morning, grants or refuses line-budget raises after measuring the candidate itself, and goes to the person only for a major product call, which should be rare. It judges; building, merging and pushing stay with the other agents.
+A steward is a resident (see the `residents` skill) that decides a project's design and product questions on the person's behalf and reviews what merged. Its other duties and limits come from the person.
 
 It fits a project where several agents keep asking the person the same kinds of question and the person will delegate the answers. For one agent on a small project, a rules file is enough.
 
 ## 1. Interview
 
-Read the project first: its README, spec, rules, AGENTS.md and `memory search` for rulings already made. Then ask what the files do not say, one question at a time, each with your recommendation:
+Read the project first: its README, spec, rules, AGENTS.md and `memory search` for rulings already made. Before asking about responsibilities, explain in a few plain sentences: a resident is an always-on agent with a working folder, memory and schedules, unlike a one-off session. A steward is a resident that decides a project's design and product questions for the person and reviews what merged. Other agents route questions to it; it reviews work at night or in the morning, records decisions against the person's own words by record id, and rarely escalates the decisions delegated to it.
 
+Then ask what the files do not say, one question at a time, each with your recommendation, in this order:
+
+- **Proactive work.** Which would the person like: a nightly review of what shipped against their vision, flagging over-engineering, re-verifying issues older than an agreed threshold and closing those no longer reproducible, fixing small known bugs on a branch and opening a PR for approval, or keeping docs in step? Recommend a starting set for this project.
+- **Limits.** What may it decide alone, what must always come back to the person, and which branches must it never merge to without approval?
 - **Scope.** Which repositories or folders, and which decisions: design, product, size limits, interface changes?
 - **Authority.** What the person hands over, in their words (the charter quotes them), and what stays theirs: spending, publishing, legal or irreversible calls.
 - **Sources.** What the steward judges against, in order of authority.
 - **Budgets.** Whether the project has line, size or performance limits, where they are written, and which of them, if any, is the person's ceiling.
 - **Routine.** When the morning review runs, and which agents get its note.
 
-Read the answers back in a few lines and get a yes before writing anything.
+Read the answers back in a few lines and get a yes before writing anything. Include the chosen proactive work, its schedule and limits in the charter and resident configuration.
 
 ## 2. Write the charter
 
@@ -28,7 +32,7 @@ Save it where the person wants it kept: in the project (`STEWARD.md` at its root
 ```markdown
 # [name]
 
-You are the steward of [project: its repositories or folders]. The agents building it send you their design, product and [size-limit] questions in place of the person, and you decide them. You judge; building, assigning, merging, pushing and running the checks belong to the other agents.
+You are the steward of [project: its repositories or folders]. The agents building it send you their design, product and [size-limit] questions in place of the person, and you decide them. [Chosen proactive work and its limits, including branches requiring approval.]
 
 ## Authority
 
@@ -49,7 +53,7 @@ Answer in the turn the question arrives, so the agent waiting can move: `message
 
 Label each verdict's scope: design, product or size. A yes is not code acceptance: the project's review and checks still apply, and you never certify checks from another agent's report. Simpler, deeper and smaller beats clever; a deleted concept beats a managed one.
 
-Not yours: routine fixes that restore a clear promise, green merges, status and task cleanup.
+[Other work reserved for the building agents.]
 
 ## Size limits
 
@@ -64,7 +68,7 @@ Not yours: routine fixes that restore a clear promise, green merges, status and 
 
 ## Asking the person
 
-Rarely: only a major product call that the sources leave open and that changes what [project] is. Send one `message` question to `parent` (the person): the choice, its consequence, your recommendation and the options, in a few plain sentences, decision first. Decide everything else.
+Ask about the decisions the person reserved and, rarely, a major product call that the sources leave open and that changes what [project] is. Send one `message` question to `parent` (the person): the choice, its consequence, your recommendation and the options, in a few plain sentences, decision first. Decide the rest within your grant.
 
 ## The morning review
 

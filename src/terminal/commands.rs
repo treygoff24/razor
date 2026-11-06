@@ -60,8 +60,9 @@ pub fn run(app: &mut App) {
                 false => app.say("There is no other session to open."),
             }
         }
+        "/goto" => super::goto::open(clear(app)),
         "/skill" => app.say("That skill is not in this session's list; /help lists commands."),
-        "/detach" => {
+        "/detach" | "/background" | "/exit" => {
             clear(app);
             app.leaving = true;
         }
@@ -143,10 +144,10 @@ fn rename(app: &mut App, name: String) {
     }
 }
 
-// `/done` and `/quit` (`route`): the addressed session ends, after a last turn that runs on in
+// `/done` and `/quit` (`route`), and a quit key set to end: the addressed session ends, after a last turn that runs on in
 // the server or at once. Once the server takes it, unless the person has moved on, the draft
 // clears; once its row reads it closed, `ended` leaves the app or goes back to the root.
-fn done(app: &mut App, route: &'static str) {
+pub(super) fn done(app: &mut App, route: &'static str) {
     let Some(id) = app.focus.clone() else {
         return app.say("No session has started yet, so there is nothing to close out.");
     };

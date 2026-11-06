@@ -70,6 +70,13 @@ pub fn command(app: &mut App, args: &str) -> bool {
                 let (name, value) = header.unwrap_or_default();
                 let reference = match value.split_once(':') {
                     Some(("env", var)) => json!({"env": var}),
+                    Some(("file", path)) if remote_home(app, path) => {
+                        return refuse(
+                            app,
+                            "For a remote session, use an absolute path on the server instead of ~/.",
+                            false,
+                        );
+                    }
                     Some(("file", path)) => json!({"file": typed(app, path)}),
                     _ => return refuse(app, BY_REFERENCE, true),
                 };
@@ -84,6 +91,13 @@ pub fn command(app: &mut App, args: &str) -> bool {
             config["headers"] = Value::Object(headers);
             Some(json!({"op": "add", "name": name, "scope": scope, "config": config}))
         }
+        (Some("import"), [file]) if remote_home(app, file) => {
+            return refuse(
+                app,
+                "For a remote session, use an absolute path on the server instead of ~/.",
+                false,
+            );
+        }
         (Some("import"), [file]) => {
             Some(json!({"op": "import", "source": typed(app, file), "scope": scope}))
         }
@@ -93,7 +107,7 @@ pub fn command(app: &mut App, args: &str) -> bool {
         asked: now(),
         ..Mcp::default()
     };
-    (app.panel, app.panel_scroll) = (Some(Panel::Mcp(mcp)), 0);
+    super::panel::open(app, Panel::Mcp(mcp));
     read(app, Duration::ZERO);
     post(app, operation.into_iter().collect());
     true
@@ -493,6 +507,11 @@ pub(super) fn home(path: &Path) -> String {
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
     }
+}
+
+fn remote_home(app: &App, path: &str) -> bool {
+    path.starts_with("~/")
+        && (app.remote || app.focus.as_ref().is_some_and(|id| id.address().is_some()))
 }
 
 /// A typed path: `~/` is the home directory, and a relative one is under the terminal's.

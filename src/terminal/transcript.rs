@@ -7,7 +7,7 @@ mod question;
 mod rows;
 pub(super) mod select;
 
-use super::{markdown, motion, text::*, tools, view};
+use super::{markdown, motion, pictures, text::*, tools, view};
 use crate::protocol::{Body, CallId, End, Entry, EntryId, JobId, SessionId};
 pub(super) use pages::{jump, read_visible};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color, text::Line};
@@ -44,6 +44,8 @@ pub(super) struct Row {
     pub(super) kind: markdown::Kind,
     /// A blinking cursor drawn past the words, which no copy takes.
     pub(super) cursor: bool,
+    /// The picture row drawn from the lead, in place of words.
+    pub(super) picture: Option<pictures::Slice>,
 }
 impl Row {
     pub(super) fn frame(mut self) -> Self {
@@ -88,6 +90,8 @@ pub(super) struct Transcript {
     /// Spoken notes from the app's newest 256 deliveries, keyed by their call entry.
     pub(super) deliveries: BTreeMap<EntryId, crate::protocol::Delivery>,
     pub(super) cursor: EntryId,
+    // One dismissal per session, retained when history pages replace the visible entries.
+    pub(super) dismissed_suggestion: Option<EntryId>,
     pub(super) partial: String,
     // Streamed words a stopped turn never recorded, by its retained turn end: the only copy
     // there is, counted in that entry's size and evicted with it.
@@ -187,6 +191,13 @@ pub(super) struct Transcript {
     server: String,
     // Where the rows were last drawn, and the screen row of the first.
     area: Option<(Rect, u16)>,
+    /// The session files' pictures, those the last layout's visible entries name but nobody
+    /// has read, and those this frame drew.
+    pub(super) pictures: pictures::Known,
+    pub(super) unread: Vec<Arc<str>>,
+    pub(super) drawn: Vec<pictures::Fragment>,
+    // The rows a picture may take, a cell's pixels, and the frame being drawn.
+    room: (u16, (u16, u16), u64),
 }
 
 impl Transcript {
@@ -228,6 +239,21 @@ impl Transcript {
     /// A frame starts: its rows are nowhere until the frame draws them.
     pub(super) fn undraw(&mut self) {
         self.area = None;
+        self.drawn.clear();
+    }
+    /// Whether this frame drew the rows.
+    pub(super) fn shown(&self) -> bool {
+        self.area.is_some()
+    }
+    /// A cell's pixels and the frame being drawn; another cell size lays every row out again.
+    pub(super) fn frame(&mut self, cell: (u16, u16), frame: u64) {
+        self.dirty |= self.room.1 != cell;
+        (self.room.1, self.room.2) = (cell, frame);
+    }
+    fn room(&self) -> pictures::Room<'_> {
+        let (rows, cell, _) = self.room;
+        let known = &self.pictures;
+        pictures::Room { known, rows, cell }
     }
     pub(super) fn takes(&mut self, takes: bool) {
         self.dirty |= self.takes != takes;
@@ -470,6 +496,7 @@ impl Transcript {
                 .output
                 .as_ref()
                 .filter(|v| job.is_some_and(|j| j.0 == v.job)),
+            room: self.room(),
             tail: job.and_then(|j| self.tail.get(&j.0)),
             lines: self.commands.get(&entry.id).copied().unwrap_or(0),
             job,
@@ -504,7 +531,7 @@ impl Transcript {
         let moved = self.tick >= self.look;
         if changed || moved || self.first_row != first || self.height != end - first {
             let rows = self.layout_rows(columns, model, first..end, true).0;
-            (self.rows, self.look) = (rows.rows, rows.look);
+            (self.rows, self.look, self.unread) = (rows.rows, rows.look, rows.unread);
             (self.first_row, self.height) = (first, end - first);
         }
         (self.dirty, self.recount) = (false, false);
@@ -573,8 +600,10 @@ impl Transcript {
             let head = (Action::Toggle(entry.id), Rect::new(r.x, r.y, r.width, 1));
             return back.into_iter().chain([head]).collect();
         }
-        self.dirty |= now >= self.size || self.working != working;
-        (self.tick, self.working) = (now, working);
+        // A picture takes at most half the transcript's rows.
+        let room = r.height / 2;
+        self.dirty |= now >= self.size || self.working != working || self.room.0 != room;
+        (self.tick, self.working, self.room.0) = (now, working, room);
         let (wide, height) = (r.width.saturating_sub(2) as usize, r.height as usize);
         // Before the first layout, assume overflow: a long transcript is laid out once.
         let over = self.total == 0 || self.total > height;
@@ -589,6 +618,7 @@ impl Transcript {
         let column = r.right().saturating_sub(1);
         let over = scrollbar(b, column, r.y, height, self.total, self.first_row);
         let mut hits = Vec::new();
+        let mut drawn: Vec<pictures::Fragment> = Vec::new();
         for (row, y) in self.rows.iter().zip(top..) {
             if row.bg != GLASS {
                 let ground = r.width.saturating_sub(4 + u16::from(over));
@@ -615,7 +645,37 @@ impl Transcript {
             if let Some(action) = row.action {
                 hits.push((action, Rect::new(r.x, y, r.width, 1)));
             }
+            if let Some(slice) = &row.picture
+                && let Some((_, Some((_, thumb)))) = self.pictures.get(&slice.name)
+            {
+                let x = r.x + row.lead;
+                let width = slice.cells.0.min(r.right().saturating_sub(x));
+                pictures::paint(b, Rect::new(x, y, width, 1), thumb, slice, row.bg);
+                match drawn.last_mut() {
+                    Some(f) if f.name == slice.name && f.row + f.rows == slice.row => f.rows += 1,
+                    _ => drawn.push(pictures::Fragment {
+                        name: slice.name.clone(),
+                        at: (x, y),
+                        row: slice.row,
+                        rows: 1,
+                        width,
+                        cells: slice.cells,
+                        ground: row.bg,
+                        drawn: Vec::new(),
+                    }),
+                }
+            }
         }
+        // Each picture's cells as drawn, so a placement covers only what nothing drew over.
+        for f in &mut drawn {
+            let cells = (f.at.1..f.at.1 + f.rows)
+                .flat_map(|y| (f.at.0..f.at.0 + f.width).map(move |x| (x, y)));
+            f.drawn = cells.filter_map(|at| b.cell(at).cloned()).collect();
+            if let Some(known) = self.pictures.get_mut(&f.name) {
+                known.0 = self.room.2;
+            }
+        }
+        self.drawn = drawn;
         // An input the model just took fades in from the glass where the record puts it.
         let left = self.left.filter(|l| self.motion && !l.2 && now < l.1 + 320);
         if let Some(&(first, count)) = left.and_then(|l| self.counts.get(&l.0)) {

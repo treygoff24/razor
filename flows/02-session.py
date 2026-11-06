@@ -2,10 +2,69 @@
 and the session's facts give the model, and the startup.md that shows it."""
 import json
 import subprocess
+import threading
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from driver import BINARY, REPLIES, Reply, flow
 from terminal import Terminal
+import server
 
 prompt = "Hello"
+
+# An immediate chat reply sends its live words before committing them. Print must subscribe
+# before admitting input, including on resume; stored entries cannot replay these lines. A relay
+# holds the real input acknowledgment until the turn ends, making the scheduling gap repeatable.
+chunks = [{"choices": [{"index": 0, "delta": {"reasoning_content": "Fast thought.", "content": "Fast reply."}}]},
+          {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}]
+fast = Reply(("".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n").encode())
+with flow([fast] * 4, model="glm-5.3-flash",
+          config='[models."glm-5.3-flash"]\nbase_url = "{standin}"\n', env={"RUNINFRA_API_KEY": "flow-key"}) as f:
+    server.start(f)
+    class Relay(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def forward(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0))) or None
+            path = self.path.removeprefix("/v1")
+            with server.send(f, self.command, path, body, headers={"Content-Type": "application/json"}) as response:
+                if path.endswith("/input"):
+                    server.until(f, path.split("/")[2], lambda es: es[-1]["kind"] == "turn_end")
+                self.send_response(response.status)
+                self.end_headers()
+                if "/events?" in path:
+                    for line in iter(response.readline, b""):
+                        self.wfile.write(line)
+                        self.wfile.flush()
+                        if json.loads(line)["kind"] == "turn_end":
+                            break
+                else:
+                    self.wfile.write(response.read())
+
+        do_GET = do_POST = forward
+
+    relay = ThreadingHTTPServer(("127.0.0.1", 0), Relay)
+    threading.Thread(target=relay.serve_forever, daemon=True).start()
+    remote = f.home / "remote"
+    remote.mkdir()
+    address = f"127.0.0.1:{relay.server_port}"
+    (remote / "config.toml").write_text(f'[remote]\naddress = "{address}"\nkey = "{f.home}/.razor/device.key"\n')
+    client = replace(f, env={**f.env, "RAZOR_HOME": str(remote)})
+    session = None
+    for mode in ("stream", "stream", "text", "json"):
+        result = client.run(f"--print={mode}", *(["--resume", session] if session else []), "Reply now.")
+        assert result.returncode == 0, result.stderr
+        if mode == "stream":
+            lines = [json.loads(line) for line in result.stdout.splitlines()]
+            session = lines[0]["session"]
+            for kind, text in (("thought", "Fast thought."), ("delta", "Fast reply.")):
+                assert "".join(e["text"] for e in lines if e["kind"] == kind) == text, lines
+            assert [e["kind"] for e in lines if e["kind"] in ("input", "turn_end")] == ["input", "turn_end"], lines
+        else:
+            assert (json.loads(result.stdout)["message"] if mode == "json" else result.stdout.strip()) == "Fast reply.", result
+    relay.shutdown()
+    relay.server_close()
+
 with flow([Reply((REPLIES / "hello.sse").read_bytes())]) as f:
     # The default list: Razor's text, then the project's AGENTS.md (an include in place) and CLAUDE.md.
     (f.cwd / "AGENTS.md").write_text("flow agents rules\n@shared.md\n@absent.md\n")

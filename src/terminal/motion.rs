@@ -6,8 +6,15 @@ use tokio::time::{Duration, Instant};
 
 /// A moving frame comes at most twelve times a second.
 pub(super) const FRAME: Duration = Duration::from_millis(83);
-/// While a frame moves between a child's card and the split, thirty a second.
+/// While a frame moves, thirty a second.
 pub(super) const MOVE: Duration = Duration::from_millis(33);
+
+/// A frame moving, paced at `MOVE`: a child's card growing into the split or shrinking back to
+/// it, or the agents overview folding into the list or out of it since its wall ms.
+pub(super) enum Moving {
+    Card(super::split::Move),
+    Fold(u64),
+}
 
 /// The earliest wall instant, in ms, at which the screen just drawn looks different by itself.
 /// A draw starts it empty; shared by reference, so drawers holding `&App` can ask.

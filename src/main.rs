@@ -152,8 +152,10 @@ const COMMANDS: &[&str] = &[
     "serve                      run the server in this terminal",
     "stop                       stop this home's server",
     "restart                    stop and start this home's server",
-    "devices                    list paired devices\ndevices add <name> [--address <host:port>] [--key <key>]  pair a device\ndevices remove <name>      remove a paired device",
+    "update                     install the latest release; restart when ready",
+    "devices                    list paired devices\ndevices find               discover tailnet servers\ndevices add <name> [--address <host:port>] [--key <key>]  pair a device\ndevices remove <name>      remove a paired device",
     "mcp list                   list MCP servers\nmcp add <name> --scope <global|project|private> --config '<JSON>'\nmcp remove|enable|disable <name> --scope <global|project|private>\nmcp reconnect|sign-in|sign-out <name>  reconnect or change sign-in\nmcp import <file> --scope <global|project|private>  preview definitions; apply with /mcp import in the app\nmcp complete '<redirect address>'  finish a browser sign-in\n  --scope defaults to private",
+    "config get <key>           print an effective setting and its source\nconfig set <key> <value> [--project|--local]  save a setting\nconfig unset <key> [--project|--local]  remove an override\nconfig path [--project|--local]  print the settings file\n  default: your own file; --project: shared project; --local: private project",
     "plugins                    list configured plugins",
 ];
 
@@ -290,10 +292,17 @@ async fn run(home: Option<PathBuf>, words: Vec<String>) -> ExitCode {
             Some(_),
             Some(
                 command
-                @ ("serve" | "keys" | "install" | "stop" | "restart" | "doctor" | "plugins"),
+                @ ("serve" | "keys" | "install" | "stop" | "restart" | "update" | "doctor" | "plugins"),
             ),
         ) if words.len() != 1 => Err(Usage(format!("Run razor {command} without arguments."))),
         (Some(home), Some("serve")) => serve(home).await,
+        (Some(_), Some("update")) => tokio::select! {
+            result = residents::update_release() => result.map(|sentence| {
+                println!("{sentence}");
+                ExitCode::SUCCESS
+            }).map_err(|e| Failed(e.to_string())),
+            _ = tokio::signal::ctrl_c() => Ok(ExitCode::from(130)),
+        },
         (Some(home), Some("setup")) if words.len() == 1 || words[1..] == ["--console"] => {
             match setup::run(&home, words.len() == 2).await {
                 Ok(true) => terminal(home, Args::default()).await,
@@ -329,6 +338,11 @@ async fn run(home: Option<PathBuf>, words: Vec<String>) -> ExitCode {
                 },
                 Err(e) => Err(e),
             },
+        },
+        (Some(home), Some("config")) => match razor_harness::config::cli::run(&home, &words[1..]).await {
+            Ok(Some(text)) => { println!("{text}"); Ok(ExitCode::SUCCESS) }
+            Ok(None) => Err(Usage("Use razor config get <key>, set <key> <value>, unset <key>, or path; writes and path accept --project or --local.".into())),
+            Err(e) => Err(Failed(e.to_string())),
         },
         (Some(home), Some("login" | "devices")) => manage(home, &words).await,
         (Some(home), Some("doctor")) => doctor(home).await,
@@ -440,20 +454,62 @@ async fn doctor(home: PathBuf) -> Result<ExitCode, Error> {
     if let Err(e) = &config {
         println!("Settings: invalid. {e} Edit the named file, then run razor doctor.");
     }
-    let browser = setup::browser();
-    let probe = tokio::process::Command::new(&browser)
-        .arg("--version")
-        .kill_on_drop(true)
-        .output();
-    if tokio::time::timeout(Duration::from_secs(2), probe)
-        .await
-        .is_ok_and(|r| r.is_ok_and(|o| o.status.success()))
-    {
-        println!("Browser: found (agent-browser executable; Chrome launch untested).");
-    } else {
-        println!(
-            "Browser: missing or unresponsive. Reinstall the agent-browser executable, then run agent-browser install."
-        );
+    if let Ok(config) = &config {
+        match &config.server.address {
+            None => println!(
+                "Pairing: no reachable server address; run razor setup with Tailscale running, or set address under [server] in {}.",
+                home.join("config.toml").display()
+            ),
+            Some(address) => {
+                let listening = async {
+                    let probe = reqwest::Client::builder()
+                        .no_proxy()
+                        .timeout(Duration::from_secs(2))
+                        .build()
+                        .ok()?;
+                    let reply = probe
+                        .get(format!("http://{address}/v1/pair"))
+                        .send()
+                        .await
+                        .ok()?;
+                    let identity: Value = reply.error_for_status().ok()?.json().await.ok()?;
+                    Some(identity["name"] == config.server.name)
+                }
+                .await;
+                if listening == Some(true) {
+                    println!(
+                        "Pairing: listening at {address} (reachability from other machines untested)."
+                    );
+                } else {
+                    println!(
+                        "Pairing: not listening at {address}; check Tailscale and address/name under [server] in {}, then run razor restart.",
+                        home.join("config.toml").display()
+                    );
+                }
+            }
+        }
+    }
+    for (name, program, fix) in [
+        (
+            "Browser",
+            "agent-browser",
+            "Reinstall agent-browser, then run agent-browser install.",
+        ),
+        ("Desktop", "agent-desktop", "Reinstall agent-desktop."),
+    ] {
+        let executable = setup::tool(program);
+        let probe = tokio::process::Command::new(executable)
+            .arg("--version")
+            .kill_on_drop(true)
+            .output();
+        if tokio::time::timeout(Duration::from_secs(2), probe)
+            .await
+            .is_ok_and(|r| r.is_ok_and(|o| o.status.success()))
+        {
+            println!("{name}: found ({program} executable; operation untested).");
+        } else {
+            println!("{name}: missing or unresponsive. {fix}");
+        }
     }
     let client = reqwest::Client::builder()
         .unix_socket(home.join(api::SOCKET))
@@ -466,12 +522,13 @@ async fn doctor(home: PathBuf) -> Result<ExitCode, Error> {
     } else if config.is_ok() {
         println!("Server: stopped; your next razor command starts it.");
     }
-    match residents::check_service(&home).await {
+    let service = residents::check_service(&home).await;
+    match &service {
         Ok(true) => println!("Service: installed."),
         Ok(false) => println!("Service: absent (optional). Run razor install."),
         Err(e) => println!("Service: invalid. {e}"),
     }
-    if let Some(state) = permissions(&home).await {
+    if let Some(state) = permissions(&home, service.is_ok_and(|s| s)).await {
         println!("Mac permissions: {state}");
     }
     let fix = "Razor cannot start until its settings load; edit the file the Settings line names, then run razor doctor.";
@@ -491,22 +548,41 @@ async fn doctor(home: PathBuf) -> Result<ExitCode, Error> {
 }
 
 /// Doctor's word on the macOS permissions of the server for `home`, asked once and given 2
-/// seconds; None off macOS or with no server running.
-async fn permissions(home: &Path) -> Option<&'static str> {
+/// seconds; None off macOS or with no server running. With one missing, the service's server
+/// running and a person at this terminal, it offers to have that server ask macOS for both, which
+/// puts Razor in both lists; the answer defaults to no, as agents should not see the screen
+/// unless the person wants it (docs/security.md).
+async fn permissions(home: &Path, service: bool) -> Option<&'static str> {
+    use std::io::IsTerminal;
     let key = tokio::fs::read_to_string(home.join(api::KEY)).await.ok()?;
     let client = reqwest::Client::builder().unix_socket(home.join(api::SOCKET));
     let client = client.timeout(Duration::from_secs(2)).build().ok()?;
-    let ask = client.get(format!("{}/v1/permissions", api::LOCAL));
-    let held = match ask.bearer_auth(key.trim()).send().await {
-        Err(e) if e.is_timeout() && cfg!(target_os = "macos") => {
-            return Some("unknown: the server did not answer within 2 seconds. Run razor restart.");
-        }
+    let url = format!("{}/v1/permissions", api::LOCAL);
+    let unknown = "unknown: the server did not answer within 2 seconds. Run razor restart.";
+    let held = match client.get(&url).bearer_auth(key.trim()).send().await {
+        Err(e) if e.is_timeout() && cfg!(target_os = "macos") => return Some(unknown),
         answer => answer.ok()?.json::<Option<[bool; 2]>>().await.ok()??,
     };
+    let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     Some(if held == [true; 2] {
         "found."
+    } else if !service {
+        "missing. To let agents see the screen and control this Mac, run razor install, then razor doctor in a terminal and answer yes."
+    } else if !terminal
+        || !setup::yes("Let agents see the screen and control this Mac?").unwrap_or(false)
+    {
+        "missing. To let agents see the screen and control this Mac, run razor doctor in a terminal and answer yes."
     } else {
-        "missing. To let agents see the screen and control this Mac, turn on Razor in System Settings, Privacy & Security, under Accessibility (Device Control and Data Access on macOS 27) and Screen & System Audio Recording; then run razor restart."
+        let post = client.post(&url).bearer_auth(key.trim()).send();
+        match async { post.await?.json::<Option<[bool; 2]>>().await }.await {
+            Ok(Some(_)) => {
+                "requested. Turn on Razor in System Settings, Privacy & Security, under Accessibility (Device Control and Data Access on macOS 27) and Screen & System Audio Recording; then run razor restart."
+            }
+            Ok(None) => {
+                "missing. Razor's service did not start this server; run razor restart, then razor doctor."
+            }
+            Err(_) => unknown,
+        }
     })
 }
 
@@ -515,7 +591,7 @@ async fn permissions(home: &Path) -> Option<&'static str> {
 async fn manage(home: PathBuf, words: &[String]) -> Result<ExitCode, Error> {
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
     let (address, given) = match words[..] {
-        ["login"] | ["devices"] | ["devices", "remove", _] => (None, None),
+        ["login"] | ["devices"] | ["devices", "find"] | ["devices", "remove", _] => (None, None),
         ["devices", "add", _, ref flags @ ..] => {
             let (mut address, mut given) = (None, None);
             for pair in flags.chunks(2) {
@@ -534,22 +610,8 @@ async fn manage(home: PathBuf, words: &[String]) -> Result<ExitCode, Error> {
         ["login"] => (api::login(&client, &key).await)
             .map(|()| "Razor is signed in to ChatGPT.".into())
             .map_err(|e| api::Error::Refused(format!("{e} Run razor login."))),
-        ["devices", "add", name, ..] => {
-            // The address this server listens on, as it wrote it when it started.
-            let found = tokio::fs::read(home.join("server.json"))
-                .await
-                .unwrap_or_default();
-            let found: Value = serde_json::from_slice(&found).unwrap_or_default();
-            api::enroll(
-                &client,
-                &key,
-                name,
-                address,
-                given,
-                found["address"].as_str(),
-            )
-            .await
-        }
+        ["devices", "add", name, ..] => api::enroll(&client, &key, name, address, given).await,
+        ["devices", "find"] => api::find(&client, &key).await,
         ["devices", "remove", name] => api::revoke(&client, &key, name).await,
         _ => api::devices(&client, &key).await,
     };
@@ -584,7 +646,7 @@ async fn connect(home: &Path) -> Result<(reqwest::Client, String), Error> {
     let child = if service {
         None
     } else {
-        Some(spawn_server(&log_path)?)
+        Some(spawn_server(&log_path).await?)
     };
     let probe = async |mut child: Option<std::process::Child>| {
         let mut delay = Duration::from_millis(1);
@@ -613,7 +675,7 @@ async fn connect(home: &Path) -> Result<(reqwest::Client, String), Error> {
             return Ok(key);
         }
         // A lock holder can exit after our child loses the race; make a server exist once more.
-        match probe(Some(spawn_server(&log_path)?)).await? {
+        match probe(Some(spawn_server(&log_path).await?)).await? {
             Ok(key) => Ok(key),
             Err(status) => Err(server_exit(&log_path, status).await),
         }
@@ -638,16 +700,19 @@ async fn connect(home: &Path) -> Result<(reqwest::Client, String), Error> {
 }
 
 /// Start a detached server with both output streams in its private log.
-fn spawn_server(log_path: &Path) -> Result<std::process::Child, Error> {
+async fn spawn_server(log_path: &Path) -> Result<std::process::Child, Error> {
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
         .open(log_path)
         .map_err(|e| Failed(format!("server.log cannot be opened: {e}.")))?;
+    let exe = residents::selected_executable()
+        .await
+        .map_err(|e| Failed(e.to_string()))?;
     let started = (|| {
         let errors = log.try_clone()?;
-        std::process::Command::new(std::env::current_exe()?)
+        std::process::Command::new(exe)
             .arg("serve")
             .stdin(Stdio::null())
             .stdout(log)
@@ -678,35 +743,94 @@ async fn server_exit(log: &Path, status: std::process::ExitStatus) -> Error {
     ))
 }
 
+/// The server the session commands use: `[remote]`'s over HTTP, which never starts one here,
+/// else this home's own through its socket; and the folder new sessions start in there.
+async fn connection(home: &Path) -> Result<api::Connection, Error> {
+    // Settings that do not load leave the local server to start, fail and name why in its log.
+    let remote = razor_harness::config::Config::load(home).await.ok();
+    let unreadable =
+        "The working directory could not be read; start Razor in an existing directory.";
+    let launched = || std::env::current_dir().map_err(|_| Failed(unreadable.into()));
+    let remote = remote.and_then(|c| c.remote);
+    let is_remote = remote.is_some();
+    let (http, base, key, cwd) = match remote {
+        None => {
+            let (http, key) = connect(home).await?;
+            (http, api::LOCAL.to_owned(), key, launched()?)
+        }
+        Some(remote) => {
+            let key = tokio::fs::read_to_string(&remote.key).await.map_err(|e| {
+                let file = remote.key.display();
+                Failed(format!("[remote] key {file} cannot be read: {e}."))
+            })?;
+            let http = reqwest::Client::builder().build();
+            let http = http.map_err(|e| Failed(format!("Razor cannot make its client: {e}.")))?;
+            let cwd = remote.folder.map_or_else(launched, Ok)?;
+            (
+                http,
+                format!("http://{}", remote.address),
+                key.trim().into(),
+                cwd,
+            )
+        }
+    };
+    let url = reqwest::Url::parse(&base);
+    let url = url.map_err(|e| {
+        Failed(format!(
+            "{base} is not a server; set [remote] address to host:port: {e}."
+        ))
+    })?;
+    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+        return Err(Failed(
+            "Set [remote] address to host:port, without a path or query.".into(),
+        ));
+    }
+    Ok(api::Connection {
+        remote: is_remote,
+        http,
+        url,
+        key,
+        cwd,
+    })
+}
+
+/// A JSON answer, or the server's sentence for its refusal.
+async fn answer(r: reqwest::Response) -> Result<Value, Error> {
+    let ok = r.status().is_success();
+    let body: Value = r.json().await.map_err(|e| Failed(e.to_string()))?;
+    match body["error"].as_str() {
+        _ if ok => Ok(body),
+        Some(sentence) => Err(Failed(sentence.to_string())),
+        None => Err(Failed("The server refused the request.".into())),
+    }
+}
+
+fn unreachable(e: reqwest::Error) -> Error {
+    Failed(format!("The Razor server did not answer: {e}."))
+}
+
+fn id(text: &str) -> Result<SessionId, Error> {
+    SessionId::try_from(text.to_string()).map_err(|e| Failed(e.to_string()))
+}
+
+/// `--continue`: the newest session in the connection's folder.
+async fn newest(c: &api::Connection) -> Result<SessionId, Error> {
+    let listed = c
+        .http
+        .get(format!("{}v1/sessions", c.url))
+        .bearer_auth(&c.key);
+    let listed = listed.query(&[("cwd", c.cwd.to_string_lossy().as_ref()), ("limit", "1")]);
+    let listed = answer(listed.send().await.map_err(unreachable)?).await?;
+    let none = || Failed("There is no session in this directory to continue.".into());
+    id(listed[0]["session"].as_str().ok_or_else(none)?)
+}
+
 /// The interactive client stages launch choices until the first input is admitted.
 async fn terminal(home: PathBuf, args: Args) -> Result<ExitCode, Error> {
-    let (client, key) = connect(&home).await?;
-    let session = if args.continue_newest {
-        let cwd = std::env::current_dir().map_err(|e| Failed(e.to_string()))?;
-        let response = client
-            .get(format!("{}/v1/sessions", api::LOCAL))
-            .query(&[("cwd", cwd.to_string_lossy().as_ref()), ("limit", "1")])
-            .bearer_auth(&key)
-            .send()
-            .await
-            .map_err(|e| Failed(format!("The session list could not be read: {e}.")))?;
-        if !response.status().is_success() {
-            return Err(Failed(
-                "The server refused the session list; check server.log.".into(),
-            ));
-        }
-        let rows: Vec<razor_harness::protocol::Listed> = response
-            .json()
-            .await
-            .map_err(|e| Failed(format!("The session list is invalid: {e}.")))?;
-        Some(
-            rows.into_iter()
-                .next()
-                .ok_or_else(|| Failed("There is no session in this directory to continue.".into()))?
-                .session,
-        )
-    } else {
-        args.resume
+    let c = connection(&home).await?;
+    let session = match args.continue_newest {
+        true => Some(newest(&c).await?),
+        false => args.resume,
     };
     let initial = razor_harness::protocol::ClientInput {
         text: args.message.unwrap_or_default(),
@@ -715,8 +839,7 @@ async fn terminal(home: PathBuf, args: Args) -> Result<ExitCode, Error> {
         speed: args.speed,
         ..Default::default()
     };
-    let server = reqwest::Url::parse(api::LOCAL).map_err(|e| Failed(e.to_string()))?;
-    razor_harness::terminal::run(client, server, key, session, initial, home, args.agents)
+    razor_harness::terminal::run(c, session, initial, home, args.agents)
         .await
         .map_err(|e| Failed(e.to_string()))?;
     Ok(ExitCode::SUCCESS)
@@ -759,57 +882,31 @@ async fn print_turn(home: &Path, args: Args) -> Result<(SessionId, End, String),
     if message.trim().is_empty() {
         return Err(Usage("The message is empty.".into()));
     }
-    let (client, key) = connect(home).await?;
+    let c = connection(home).await?;
     let call = |path: &str, body: Value| {
-        client
-            .post(format!("{}{path}", api::LOCAL))
-            .bearer_auth(&key)
-            .json(&body)
-            .send()
+        let request = c.http.post(format!("{}{path}", c.url));
+        request.bearer_auth(&c.key).json(&body).send()
     };
-    let answer = |r: reqwest::Response| async move {
-        let ok = r.status().is_success();
-        let body: Value = r.json().await.map_err(|e| Failed(e.to_string()))?;
-        match body["error"].as_str() {
-            _ if ok => Ok(body),
-            Some(sentence) => Err(Failed(sentence.to_string())),
-            None => Err(Failed("The server refused the request.".into())),
-        }
-    };
-    let unreachable = |e: reqwest::Error| Failed(format!("The Razor server did not answer: {e}."));
-    let id = |text: &str| SessionId::try_from(text.to_string()).map_err(|e| Failed(e.to_string()));
-    let cwd = std::env::current_dir().map_err(|e| Failed(e.to_string()))?;
     let session = match (args.resume, args.continue_newest) {
         (Some(id), _) => id,
-        (None, true) => {
-            let listed = client
-                .get(format!("{}/v1/sessions", api::LOCAL))
-                .query(&[("cwd", cwd.to_string_lossy().as_ref()), ("limit", "1")])
-                .bearer_auth(&key)
-                .send()
-                .await
-                .map_err(unreachable)?;
-            let listed = answer(listed).await?;
-            id(listed[0]["session"].as_str().ok_or_else(|| {
-                Failed("There is no session in this directory to continue.".into())
-            })?)?
-        }
+        (None, true) => newest(&c).await?,
         (None, false) => {
-            let created = answer(
-                call(
-                    "/v1/sessions",
-                    json!({ "cwd": cwd, "model": args.model, "effort": args.effort, "speed": args.speed }),
-                )
-                .await
-                .map_err(unreachable)?,
-            )
-            .await?;
+            let body = json!({ "cwd": c.cwd, "model": args.model, "effort": args.effort, "speed": args.speed });
+            let created = answer(call("v1/sessions", body).await.map_err(unreachable)?).await?;
             id(created["session"].as_str().unwrap_or_default())?
         }
     };
+    // Subscribe before admitting input. A cursor beyond the record skips old turns while
+    // retaining every live line from the subscription onward.
+    let url = format!("{}v1/sessions/{session}/events?after={}", c.url, u64::MAX);
+    let stream = c.http.get(url).bearer_auth(&c.key).send().await;
+    let stream = stream
+        .map_err(unreachable)?
+        .error_for_status()
+        .map_err(unreachable)?;
     let admitted = answer(
         call(
-            &format!("/v1/sessions/{session}/input"),
+            &format!("v1/sessions/{session}/input"),
             json!({ "text": message, "model": args.model, "effort": args.effort, "speed": args.speed }),
         )
         .await
@@ -817,42 +914,39 @@ async fn print_turn(home: &Path, args: Args) -> Result<(SessionId, End, String),
     )
     .await?;
     let input = EntryId(admitted["entry"].as_u64().unwrap_or(0));
-    read_turn(&client, &key, session, input, args.print).await
+    read_turn(stream, session, input, args.print).await
 }
 
-/// Read the session's stream from just before `input` until the `turn_end` naming it. The
+/// Read the already attached stream from `input` until the `turn_end` naming it. The
 /// answer is the turn's text after its last call.
 async fn read_turn(
-    client: &reqwest::Client,
-    key: &str,
+    mut stream: reqwest::Response,
     session: SessionId,
     input: EntryId,
     mode: Option<Mode>,
 ) -> Result<(SessionId, End, String), Error> {
-    let url = format!(
-        "{}/v1/sessions/{session}/events?after={}",
-        api::LOCAL,
-        input.0.saturating_sub(1)
-    );
     let gone = || Failed("The Razor server went away before the turn ended.".into());
-    let mut stream = client
-        .get(url)
-        .bearer_auth(key)
-        .send()
-        .await
-        .map_err(|e| Failed(format!("The Razor server did not answer: {e}.")))?;
     // `pending` holds at most one stream line, and `texts` the turn's text since its last call.
     let (mut pending, mut texts) = (Vec::new(), Vec::<String>::new());
     let mut stdout = tokio::io::stdout();
+    let mut started = false;
     while let Some(chunk) = stream.chunk().await.map_err(|_| gone())? {
         pending.extend_from_slice(&chunk);
         while let Some(newline) = pending.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = pending.drain(..=newline).collect();
+            let Ok(event) = serde_json::from_slice::<Value>(&line) else {
+                continue;
+            };
+            started |= event["id"].as_u64().is_some_and(|id| id >= input.0);
+            // A working session may send lines between subscription and our input.
+            if !started && event["kind"] != "attached" {
+                continue;
+            }
             if mode == Some(Mode::Stream) {
                 let _ = stdout.write_all(&line).await;
                 let _ = stdout.flush().await;
             }
-            let Ok(Event::Entry(entry)) = serde_json::from_slice::<Event>(&line) else {
+            let Ok(Event::Entry(entry)) = serde_json::from_value::<Event>(event) else {
                 continue;
             };
             match entry.body {

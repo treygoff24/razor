@@ -176,16 +176,18 @@ impl Api {
         })
     }
 
-    /// One 64 KiB range of a session file (a job's saved output) from `offset`, and its size.
+    /// One range of a session file (a job's saved output, a picture) from `offset`, at most
+    /// `length` bytes, and the file's size.
     pub async fn chunk(
         &self,
         session: &SessionId,
         file: &str,
         offset: u64,
+        length: u64,
     ) -> Result<(Vec<u8>, u64), Error> {
         let retry = "The saved output could not be read; close and reopen the card to retry.";
         let path = format!("v1/sessions/{session}/files/{file}");
-        let range = format!("bytes={offset}-{}", offset.saturating_add(CHUNK - 1));
+        let range = format!("bytes={offset}-{}", offset.saturating_add(length - 1));
         let request = self
             .request(Method::GET, &path)?
             .header(header::RANGE, range);
@@ -202,14 +204,14 @@ impl Api {
             .rsplit_once('/')
             .and_then(|(_, n)| n.parse().ok())
             .ok_or_else(|| error(retry))?;
-        let end = offset.saturating_add(CHUNK).min(size);
+        let end = offset.saturating_add(length).min(size);
         let expected = format!("bytes {offset}-{}/{size}", end.saturating_sub(1));
         if response.status() != StatusCode::PARTIAL_CONTENT || end <= offset || range != expected {
             return Err(error(retry));
         }
         let mut bytes = Vec::new();
         while let Some(part) = response.chunk().await.map_err(fail(retry))? {
-            if bytes.len() + part.len() > CHUNK as usize {
+            if (bytes.len() + part.len()) as u64 > length {
                 return Err(error(retry));
             }
             bytes.extend_from_slice(&part);

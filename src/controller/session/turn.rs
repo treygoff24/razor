@@ -111,6 +111,12 @@ impl Session {
             Some(c) => (c.rebuilt.take(), c.threshold),
             None => (None, None),
         };
+        if !success
+            && profiles::model(&self.model).transport == Transport::Claude
+            && reason.as_deref() == Some("authentication_failed")
+        {
+            self.conversation = None;
+        }
         if !success && reason.as_deref() == Some("prompt_too_long") && rebuilt.is_none() {
             self.end_turn(Vec::new(), End::Error(sentence(&message)), usage, None)
                 .await?;

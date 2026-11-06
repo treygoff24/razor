@@ -82,6 +82,27 @@ Before this change, ten runs at an earlier revision measured 101.1 ms for attach
 
 An earlier scratch 200 ms block at the start of the real draw function moved bare cold start to 212.1 ms and attach to 503.9 ms (ten samples each). Restoring the source and release binary returned the measurements to their normal range. This proves the clocks wait for actual rendered frames, not just a model request or an empty attach frame.
 
+## Pictures, measured once
+
+SPEC holds no limit for pictures, and this script does not measure them. A scratch copy of it, not checked in, added a third session at the end of the run. Its one input holds four copies of one 4096 × 2048 RGB PNG, the terminal's pixel limit, whose Sub-filtered rows compress to 30,757 bytes: every pixel is still decoded. The PTY answers no graphics query, so the pictures paint as half blocks. The first client records the cells they paint once every one has been read. Five more are each timed from fork to that frame; then a key, its erasure, a page up and a page down, each to the frame that changes. The last number is the highest `VmHWM` among those five clients.
+
+Three release runs, 2026-11-05, renderer at `e01fd9f4`, host load 7 to 10 from other tenants:
+
+| Observation | Run medians | Samples, lowest to highest |
+| --- | ---: | ---: |
+| Draw of a viewport of pictures | 184.1 to 190.7 ms | 183.9 to 231.9 ms |
+| Key over pictures | 1.3 to 1.5 ms | 0.7 to 27.9 ms |
+| Scroll over pictures | 1.8 to 2.6 ms | 1.6 to 5.2 ms |
+| Terminal memory with pictures | 41.5 to 41.7 MiB | one peak per run |
+
+In the same runs the 10,000-line transcript drew in 23.9 to 25.6 ms. What this workload leaves out was measured by hand at `e01fd9f4` with the same flows driver, the release client and the model stand-in, then again at `5278a876`. That covered Kitty uploads, files that cost more to decode than this PNG, adversarial files, and a terminal that reads slowly:
+
+- **Memory**: 53 inputs, one at a time, half-block at 120 × 40. The client's highest `VmHWM` was 99.8 MiB, for a 4096 × 2048 progressive JPEG; the text control was 14.7 MiB. Under heaptrack the highest peak heap was 82.7 MiB, the same JPEG (zune-jpeg 48.2, image 31.9). The worst WebP peaked at 78.4 MiB.
+- **Refused before any decode**, per heaptrack's decode frames: declared sizes of 100,000², 65,500² and 16,384²; a 64 × 64 JPEG padded with comment segments to 7.5 MB and 32 MiB; lossless WebP and lossy WebP with compressed alpha (both shown as a chip); and every file over a byte, pixel or metadata cap.
+- **Unchanged frames** over eight pictures at the limit wrote the same bytes as the text control. They opened no file (inotify on the images folder) and wrote no Kitty upload.
+- **Memory kept after decoding**: once eight decodes had finished, the client still held 71.5 MiB of `RssAnon`, against 3.5 MiB for text.
+- **Acknowledged Kitty rows**, measured at `9c720b1e` with a PTY and simulated terminal: one 4096 × 2048 picture became sharp in 0.25 s locally, or 2.70 s with a simulated 150 ms round trip and a 2 MB/s link. In that remote simulation, key latency was 152.9 ms median and 166.1 ms at the 99th percentile. With the terminal reader stopped, a typed input reached the server in 51 ms. These measurements use a stand-in for terminal acknowledgments and network delay, not a real SSH connection or terminal emulator.
+
 ## What each budget catches: red-proofs
 
 Re-parsing the record and holding a whole log in memory exceeded their limits; blocking did not reliably do so. These failure checks used scratch source mutations, built release, three runs each, then reverted (none committed):

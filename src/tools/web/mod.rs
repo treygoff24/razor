@@ -5,12 +5,12 @@
 use super::{Action, Error, Kind, Tools};
 use crate::protocol::EntryId;
 use reqwest::{Client, redirect::Policy};
-use serde::{Deserialize, de::Error as _};
+use serde::{Deserialize, Serialize, de::Error as _};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::LazyLock, time::Duration};
 
 /// A provider, named only in configuration.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Provider {
     Exa,
@@ -20,7 +20,7 @@ pub(crate) enum Provider {
 
 /// `[web]`: each verb's providers in the order they are tried, empty by default. Config loading
 /// refuses a provider named twice in one list, and Firecrawl in `answer`.
-#[derive(Clone, Default, PartialEq, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Config {
     pub(crate) search: Vec<Provider>,
@@ -34,7 +34,8 @@ pub(crate) struct Config {
 /// Where a provider is reached. Its key is never configuration: it is read, at each use, from
 /// the provider's own environment variable (`EXA_API_KEY`, `FIRECRAWL_API_KEY`,
 /// `PARALLEL_API_KEY`).
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Connection {
     /// An HTTP or HTTPS URL; config loading refuses anything else.
     #[serde(deserialize_with = "endpoint")]

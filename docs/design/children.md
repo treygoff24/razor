@@ -163,7 +163,7 @@ The shared types (`Child`, `Worktree`, `ChildEvent`, `Decision`, `Report`, `Repo
 | `agent settle` | `child, decision` (merge, discard, merged) | `{text}`: git's words |
 | `agent stop` | `child` | `{}` |
 | `agent wait` | `timeout_ms?` (600,000) | the next mail or report, as its whole entry; `null` at the timeout |
-| `agent headline`, `agent progress` | `text`, one line | `{}` |
+| `agent headline` | `text`, one line | `{}` |
 | `message note, question, answer` | `to?` (`parent`, the default; a child's name or id; `channel`, notes only), `text`, `question` for an answer, `options?` for a root's question | `{id}` |
 | `message read` | `limit?` (20) | `{posts, file}`: the latest posts and the channel's file |
 | `status` | none | `{agents}`, every agent in the tree but settled helpers and their subtrees: session, parent, name, headline, state, changed_files, branch |

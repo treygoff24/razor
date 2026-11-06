@@ -81,7 +81,7 @@ impl Session {
         let s = self.record.summary();
         // After Escape, nothing more runs: the turn's end records its open calls unknown.
         let stopped = self.conversation.as_ref().is_some_and(|c| c.interrupted);
-        let Some(&(_, at)) = s.unresolved.iter().find(|(id, _)| *id == call && !stopped) else {
+        let Some(&(_, at, _)) = s.unresolved.iter().find(|(id, ..)| *id == call && !stopped) else {
             return Ok(());
         };
         // A refused input is answered in call order, like any other result.

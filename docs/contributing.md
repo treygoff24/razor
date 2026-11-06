@@ -86,5 +86,6 @@ These are the words the code and its reviews use beyond [the glossary in Concept
 
 ### How the work is organised
 
+- **override**: an updater-owned copy of a pack skill in the Razor home, searched before its bundled copy.
 - **design page**: the page a lane commits before its code: the module's public surface and its one hard decision.
 - **lane**: a child building one module of this repository.

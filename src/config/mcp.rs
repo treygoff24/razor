@@ -77,11 +77,6 @@ pub(super) fn edit(settings: &Settings, operation: &McpOperation) -> Result<Valu
         },
     }
     let after = document.to_string();
-    if after.len() > 1 << 20 {
-        return Err(Error::Invalid(
-            "The changed settings would pass 1 MiB; shorten them first.".into(),
-        ));
-    }
     pack::parse(&after, &path, project)?;
     replace(&path, &before, &after)?;
     if creating {
@@ -94,6 +89,19 @@ pub(super) fn edit(settings: &Settings, operation: &McpOperation) -> Result<Valu
 /// Writes `after` to `path` at mode 0600 through a rename, only if the file still holds `before`
 /// (a missing file holds nothing).
 pub(super) fn replace(path: &Path, before: &str, after: &str) -> Result<(), Error> {
+    if after.len() > 1 << 20 {
+        return Err(Error::Invalid(
+            "The changed settings would pass 1 MiB; shorten them first.".into(),
+        ));
+    }
+    let resolved = match std::fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !path.is_symlink() => {
+            path.to_path_buf()
+        }
+        Err(error) => return Err(io(error)),
+    };
+    let path = resolved.as_path();
     let parent = path.parent().unwrap_or(Path::new("/"));
     let temp = parent.join(format!(".razor-{}.tmp", std::process::id()));
     let mut options = std::fs::OpenOptions::new();
@@ -121,7 +129,7 @@ pub(super) fn replace(path: &Path, before: &str, after: &str) -> Result<(), Erro
 }
 
 /// Exclude a newly created private file at the main checkout, including linked worktrees.
-fn exclude_private(path: &Path) -> Result<(), Error> {
+pub(super) fn exclude_private(path: &Path) -> Result<(), Error> {
     let Some(root) = path.ancestors().nth(2) else {
         return Ok(());
     };

@@ -30,9 +30,11 @@ This downloads the latest release, checks its checksum, and installs it under `~
 curl -fsSL https://github.com/treygoff24/razor/releases/latest/download/install.sh | sh
 ```
 
-The first install starts setup in your terminal. Without a terminal, it prints the command to run later. If your shell cannot find `razor`, run the PATH command the installer prints. Running the same command again installs an update; it leaves your server running, so run `razor restart` to use the new version.
+The first install starts setup in your terminal. Without a terminal, it prints the command to run later. If your shell cannot find `razor`, run the PATH command the installer prints. To update, run `razor update`, then `razor restart` when you are ready. Release installs also check when the server starts and about once a day, download newer releases in the background, and show a one-line restart notice in the terminal. Your running server keeps its old version until you restart. To turn off background updates, run `razor config set release_updates false`; manual updates still work. Source builds update from their checkout.
 
-To build from source, you need Rust, Node 22.18 or later, git, Python 3 and curl. The script builds a release from a clean checkout, downloads the agent-browser, ripgrep and jq programs, and installs it the same way, setup included:
+If you have v0.1.0, run the install command above once, then `razor restart`, to get `razor update` and background updates.
+
+To build from source, you need Rust, Node 22.18 or later, git, Python 3 and curl. The script builds a release from a clean checkout, downloads the agent-browser, agent-desktop, ripgrep and jq programs, and installs it the same way, setup included:
 
 ```sh
 git clone https://github.com/treygoff24/razor.git
@@ -70,7 +72,7 @@ Escape stops what the agent is doing. Ctrl-C twice quits the app; the session ke
 | Agents on a schedule | An agent defined in your settings wakes at set times, in its own folder with its own memory, and sends you notes or questions. |
 | Memory | Each project keeps a note on where the work stands and your decisions in your own words, and every new session starts with both. |
 | Voice | Replies read aloud, voice notes you record, and short spoken notes from agents. |
-| A browser and web search | Agents drive a real browser with [agent-browser](https://github.com/vercel-labs/agent-browser), which ships with Razor, and search the web through Exa, Parallel or Firecrawl, or their model's own search. |
+| A browser, desktop apps and web search | Agents drive a real browser with [agent-browser](https://github.com/vercel-labs/agent-browser) and operate desktop apps with [agent-desktop](https://github.com/vercel-labs/agent-desktop), both shipped with Razor, and search the web through Exa, Parallel or Firecrawl, or their model's own search. |
 | Several machines | Pair the Razor servers on your machines over Tailscale, and see each one's agents from the others. |
 | Extensions | MCP servers, your own scripts as tools, plugins that can change or refuse what agents do, and `razor --print` for scripts. |
 
@@ -100,10 +102,11 @@ The [docs index](docs/README.md) lists every page; an installed Razor carries th
 - [Always-on agents and schedules](docs/always-on-agents.md): an agent that wakes on a schedule and keeps its own memory.
 - [More machines](docs/machines.md): pairing the Razor servers on several machines over Tailscale.
 - [Security](docs/security.md): what the server exposes, where keys live, and what agents can run.
-- [Browser, voice and search](docs/browser-voice-search.md): agent-browser, the voice programs and the search providers.
+- [Browser, voice and search](docs/browser-voice-search.md): agent-browser, agent-desktop, the voice programs and the search providers.
 - [Using Razor from scripts](docs/scripting.md): `razor --print`, its JSON and streamed output, and the local API.
 - [Troubleshooting](docs/troubleshooting.md): `razor doctor` and common failures.
 - [Contributing](docs/contributing.md): the spec, the rules, the budgets, the tests, and where to send a change.
 - [Uninstall](docs/uninstall.md): removing the program, the background service that `razor install` sets up, and your data.
+- [Changelog](CHANGELOG.md): what changed in each release.
 
 Razor is dual-licensed under the [MIT license](LICENSE-MIT) and the [Apache License 2.0](LICENSE-APACHE), at your choice. Some of its code and prompt text is adapted from OpenAI's Codex under the Apache License 2.0; [NOTICE](NOTICE) lists those files.

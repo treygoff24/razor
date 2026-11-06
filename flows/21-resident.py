@@ -57,6 +57,9 @@ with tempfile.TemporaryDirectory() as fake, flow(
     # Another session's input starts the server; the resident gets none from a client.
     start = f.run("--print=json", "Start the server.")
     assert start.returncode == 0, start.stderr
+    # Only the service's own server asks macOS for permissions; a request from one a client
+    # started would put the person's terminal, not Razor, in System Settings.
+    assert post(f, "/permissions", None) is None
     entries = until(f, "ember", lambda es: sum(e["kind"] == "turn_end" for e in es) >= 2, timeout=40)
     ends = [e for e in entries if e["kind"] == "turn_end"]
     assert entries[0]["kind"] == "start" and entries[0]["cwd"] == str(f.cwd), entries[0]

@@ -9,13 +9,7 @@ description: A real browser from the shell. Open pages, read them as snapshots w
 
 ## Your own browser
 
-Without a name, every agent on this machine shares one browser and can move another's page. Give yours a name on every command; each shell call is its own process, so an `export` does not carry over:
-
-```bash
-agent-browser --session "$RAZOR_SESSION" open https://example.com
-```
-
-The commands below leave the flag out for short lines; keep it in yours. `agent-browser --session "$RAZOR_SESSION" close` ends your browser when you are done.
+Razor names your browser after your session: your shell has `AGENT_BROWSER_SESSION` set to your session's id, so the browser you open is yours alone and no other agent can move its page. `agent-browser close` ends it when you are done. `--session <name>` on a command opens another browser beside it.
 
 ## Open and look
 

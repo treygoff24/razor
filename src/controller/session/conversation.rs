@@ -276,6 +276,7 @@ impl Session {
             closing: None,
             interrupted: false,
             thoughts: self.thoughts,
+            hold: Default::default(),
         });
         Ok(())
     }
@@ -305,7 +306,18 @@ impl Session {
 
     /// Sends `batch` as one native user message, image paths made absolute, and tells clients
     /// each input is taken. The person's handover in it is this conversation's threshold input.
-    pub(super) async fn deliver(&mut self, batch: Vec<(EntryId, Input)>) -> Result<(), Error> {
+    pub(super) async fn deliver(&mut self, mut batch: Vec<(EntryId, Input)>) -> Result<(), Error> {
+        if !batch.is_empty() && self.record.summary().upkeep == 2 {
+            let input = Input {
+                upkeep: true,
+                ..Input::new(Origin::Razor, record::UPKEEP.into())
+            };
+            let next = (EntryId(self.record.summary().last.0 + 1), input);
+            if self.fit(batch.iter().chain(std::iter::once(&next))) == batch.len() + 1 {
+                let entry = self.append(Body::Input(next.1.clone()), None).await?;
+                batch.push((entry, next.1));
+            }
+        }
         for (_, input) in &batch {
             if let Some(effort) = input.effort {
                 self.model_settings.effort = match input.from {
@@ -398,7 +410,12 @@ impl Session {
     }
 
     pub(super) fn rendered(&self, entry: EntryId, input: Input) -> BridgeInput {
-        record::heard(self.record.summary(), self.record.dir(), entry, input)
+        let suggestions = input.suggestions;
+        let mut rendered = record::heard(self.record.summary(), self.record.dir(), entry, input);
+        if suggestions {
+            rendered.text.push_str(include_str!("suggestion.md"));
+        }
+        rendered
     }
 
     /// How many of `inputs` fit one encoded message within the bridge's line budget, the memory
@@ -488,15 +505,27 @@ impl Session {
 
     /// One line of the open conversation; `None` when its model path is gone.
     pub(super) async fn line(&mut self, line: Option<Output>) -> Result<(), Error> {
-        let Some((line, _held)) = line else {
+        let Some((mut line, _held)) = line else {
             return self.closed(None).await;
         };
         if let Some(c) = &mut self.conversation {
             c.resuming &= matches!(line.says, FromBridge::Closed { .. });
             c.interrupted &= !matches!(line.says, FromBridge::TurnEnd { .. });
+            if let FromBridge::Delta { text } = &mut line.says {
+                *text = c.hold.push(text);
+            } else if let FromBridge::Entry {
+                body: Body::Text { .. },
+                ..
+            }
+            | FromBridge::TurnEnd { .. }
+            | FromBridge::Void { .. } = line.says
+            {
+                c.hold = Default::default();
+            }
         }
         match line.says {
             FromBridge::Entry { body, native } => self.entry(body, native).await?,
+            FromBridge::Delta { text } if text.is_empty() => {}
             FromBridge::Delta { text } => self.publish(&Live::Delta { text }),
             FromBridge::Thought { n, text, start } => self.thought(n, text, start, false),
             FromBridge::Void { n } => self.thought(n, String::new(), false, true),

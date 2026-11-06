@@ -1,6 +1,6 @@
 [package]
 name = "razor-harness"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.91"
 description = "Razor: a harness for AI agents."
@@ -20,14 +20,20 @@ path = "src/launcher.rs"
 [dependencies]
 crossterm = { version = "0.29", features = ["event-stream", "use-dev-tty"] }
 jiff = "0.2"
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "webp"] }
+png = "=0.18.1"
+icu_properties = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+# The backend's writer, which holds the terminal's output queue.
+ratatui-crossterm = { version = "0.1.2", default-features = false, features = ["unstable-backend-writer"] }
 unicode-segmentation = "1"
 unicode-width = "0.2"
 aws-lc-rs = { version = "1.18.2", default-features = false, features = ["aws-lc-sys"] }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json", "query", "ws"] }
 base64 = "0.23.1"
 futures-util = { version = "0.3.34", default-features = false }
+getrandom = "0.4.3"
 http-range = "0.1.6"
 libc = "0.2.191"
 memchr = "2"
@@ -36,6 +42,7 @@ rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 rmcp = { version = "3.8.0", default-features = false, features = ["client", "transport-child-process", "auth", "transport-streamable-http-client-reqwest"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
+shlex = "2.0.1"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "net", "sync", "signal", "time", "io-std"] }
 tokio-tungstenite = { version = "=0.29.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 tokio-util = { version = "0.7.20", features = ["io"] }

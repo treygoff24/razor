@@ -17,8 +17,9 @@ use ratatui::{
 use reqwest::Method;
 
 /// Each command: its name, what it is for, and its arguments when it takes any.
-const COMMANDS: [(&str, &str, Option<&str>); 35] = [
+const COMMANDS: [(&str, &str, Option<&str>); 36] = [
     ("agents", "all agents beside a session", None),
+    ("goto", "find any agent or past conversation", None),
     (
         "name",
         "rename the addressed session now",
@@ -36,7 +37,7 @@ const COMMANDS: [(&str, &str, Option<&str>); 35] = [
         None,
     ),
     ("view", "switch the saved view", Some("<name>")),
-    ("views", "edit saved views in $EDITOR", None),
+    ("views", "edit saved views in $VISUAL or $EDITOR", None),
     ("record", "record a voice note", None),
     ("listen", "read the newest completed reply aloud", None),
     ("help", "the keys and commands", None),
@@ -46,7 +47,7 @@ const COMMANDS: [(&str, &str, Option<&str>); 35] = [
         "hand the agent one of its skills",
         Some("<name> [words]"),
     ),
-    ("detach", "leave; the session keeps running", None),
+    ("detach", "leave; it runs on; /background, /exit too", None),
     (
         "model",
         "pick the model and its effort",
@@ -123,16 +124,14 @@ const COMMANDS: [(&str, &str, Option<&str>); 35] = [
     ),
 ];
 const WORDS: &str = "[words for the agent]";
-/// `/help`'s rows: each command with its arguments and what it is for, then the keys.
+/// `/help`'s rows, a row each: each command with its arguments and what it is for.
 pub fn help(width: usize) -> Vec<Line<'static>> {
     let mut rows = vec![rule("COMMANDS", None, width)];
     let skill = ("<skill>", "hand the agent that skill", Some(WORDS));
     for (name, about, args) in COMMANDS.into_iter().chain([skill]) {
         let head = format!("/{name}{}", args.map_or(String::new(), |a| format!(" {a}")));
-        rows.extend(wrap(
-            vec![span(head, CYAN), span(format!("  {about}"), GRAY)],
-            width,
-        ));
+        let about = span(format!("  {about}"), GRAY);
+        rows.push(Line::from(vec![span(head, CYAN), about]));
     }
     rows
 }
@@ -269,26 +268,50 @@ pub fn edited(app: &mut App, now: u64) {
     let typing = draft.starts_with('/') && !draft.contains('\n') || token(app).is_some();
     let (opened, id) = (typing && !app.menu.typing, app.focus.clone());
     app.menu.typing = typing;
-    let Some(id) = id.filter(|_| opened && now.saturating_sub(app.menu.read) >= 1000) else {
+    if !opened || now.saturating_sub(app.menu.read) < 1000 {
         return;
-    };
+    }
     app.menu.read = now;
+    let (cwd, server, resident) = (app.cwd.clone(), app.server.clone(), app.resident.clone());
+    let path = match &id {
+        Some(id) => format!("v1/sessions/{id}/skills"),
+        None => {
+            let mut url =
+                reqwest::Url::parse("http://localhost/v1/skills").expect("valid static URL");
+            url.query_pairs_mut()
+                .append_pair("server", &server)
+                .append_pair("cwd", &cwd.to_string_lossy());
+            if let Some(name) = &resident {
+                url.query_pairs_mut().append_pair("resident", name.as_str());
+            }
+            format!("v1/skills?{}", url.query().unwrap_or_default())
+        }
+    };
     app.spawn(|api| async move {
-        let read = api
-            .json(Method::GET, &format!("v1/sessions/{id}/skills"), None)
-            .await;
+        let read = api.json(Method::GET, &path, None).await;
         let invalid = "The server sent an invalid skills list; reconnect to the server.";
         let read = read.and_then(|v| {
             serde_json::from_value::<Vec<Skill>>(v).map_err(super::super::fail(invalid))
         });
-        move |app: &mut App| match read {
-            Ok(mut skills) => {
-                skills.truncate(1024);
-                app.skills = skills;
+        move |app: &mut App| {
+            if app.focus == id && app.cwd == cwd && app.server == server && app.resident == resident
+            {
+                match read {
+                    Ok(mut skills) => {
+                        skills.truncate(1024);
+                        app.skills = skills;
+                    }
+                    Err(e) => app.say(&e.to_string()),
+                }
             }
-            Err(e) => app.say(&e.to_string()),
         }
     });
+}
+
+/// A different addressed session or folder has its own skills.
+pub fn reset(app: &mut App) {
+    app.skills.clear();
+    (app.menu.read, app.menu.typing) = (0, false);
 }
 
 /// Notes `word` as run when it names a command, for the list to show among the recent.

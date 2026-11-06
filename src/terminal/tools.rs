@@ -51,6 +51,8 @@ pub(super) struct Call<'a> {
     pub(super) tail: Option<&'a (String, u64)>,
     /// A shell call's command lines, counted once when the call was retained.
     pub(super) lines: usize,
+    /// What sizes the result's pictures.
+    pub(super) room: super::pictures::Room<'a>,
 }
 
 /// When a call's rows next look different by themselves, and when their number next changes:
@@ -138,7 +140,8 @@ impl Call<'_> {
         let inner = columns.saturating_sub(2 * slots - 2);
         let mut rows = turn::fold(self, inner, now, motion)
             .unwrap_or_else(|| card::rows(self, inner, now, motion));
-        // A result's pictures, one line each: the media type and where it was saved.
+        // A result's pictures, each a line naming its media type and where it was saved, then the
+        // picture under it.
         let (shown, look) = (!rows.is_empty(), |c| ratatui::style::Style::default().fg(c));
         for image in self
             .decoded
@@ -151,6 +154,10 @@ impl Call<'_> {
             let words = [(format!("    ▣ {kind} · "), GRAY), (path, DATA)];
             let words = words.map(|(w, c)| Span::styled(w, look(c)));
             rows.push(Row::plain(Line::from(words.to_vec())));
+            rows.extend(
+                self.room
+                    .rows(&image.path, 6, inner.saturating_sub(8), GLASS),
+            );
         }
         if !rows.is_empty() {
             let gap = match self.place.first {
@@ -623,8 +630,19 @@ pub(super) fn glance(entry: &Entry) -> Option<(&'static str, String)> {
     let Body::Call { name, input, .. } = &entry.body else {
         return None;
     };
-    let kind = kind(name);
-    let mark = match kind {
+    let (kind, mark) = (kind(name), mark(name, input));
+    let target = match kind {
+        "shell" => command(kind, input).unwrap_or("shell").to_owned(),
+        "search" => "search".into(),
+        "message" | "ask" => "message".into(),
+        _ => target(kind, input),
+    };
+    Some((mark, target))
+}
+
+/// The mark a call's row leads with, by its tool's name and input.
+pub(super) fn mark(name: &str, input: &Value) -> &'static str {
+    match kind(name) {
         "read" => "≡",
         "edit" | "write" => "±",
         "shell" => "$",
@@ -633,14 +651,7 @@ pub(super) fn glance(entry: &Entry) -> Option<(&'static str, String)> {
         "agent" if input["action"] == "wait" => "◌",
         "agent" => "✦",
         _ => "·",
-    };
-    let target = match kind {
-        "shell" => command(kind, input).unwrap_or("shell").to_owned(),
-        "search" => "search".into(),
-        "message" | "ask" => "message".into(),
-        _ => target(kind, input),
-    };
-    Some((mark, target))
+    }
 }
 
 /// A call's kind and target as one label (a shell's target already says `bash`).

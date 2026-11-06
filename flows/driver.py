@@ -124,7 +124,7 @@ def flow(replies: list[Reply], *, model: str = "opus", config: str = "",
     try:
         with serve(replies, scratch / "requests") as url:
             (home / ".razor/config.toml").write_text(
-                f"model = {json.dumps(model)}\n{config.replace('{standin}', url)}\n[responses]\nbase_url = {json.dumps(url)}\n")
+                f"skill_updates = false\nmodel = {json.dumps(model)}\n{config.replace('{standin}', url)}\n[responses]\nbase_url = {json.dumps(url)}\n")
             (home / ".razor/auth.json").write_text(json.dumps(AUTH))
             try:
                 yield Flow(home, cwd, scratch / "requests", {

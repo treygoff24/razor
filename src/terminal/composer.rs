@@ -22,6 +22,7 @@ pub mod emoji;
 mod images;
 mod phone;
 pub mod shortcodes;
+mod suggestion;
 pub use images::{draw_images, image_rows, paste};
 
 /// The editor's cap, which a saved draft and a recalled input keep to as well.
@@ -85,7 +86,8 @@ impl Composer {
         self.text.trim().is_empty() && self.active_images().next().is_none()
     }
 
-    fn selection(&self) -> Option<Range<usize>> {
+    /// The selected words' byte range, when any are selected.
+    pub fn selection(&self) -> Option<Range<usize>> {
         let at = self.anchor.filter(|at| *at != self.cursor)?;
         Some(at.min(self.cursor)..at.max(self.cursor))
     }
@@ -360,6 +362,19 @@ impl Composer {
     fn height(&self, columns: usize, cap: usize) -> usize {
         let mut count = 0;
         visit_wrap(&[Span::raw(&self.text)], columns, |_, _, _| {
+            count += 1;
+            count < cap
+        });
+        count
+    }
+
+    // Give the proposal and its key/cost hint room on narrow terminals too.
+    fn content_height(&self, app: &App, columns: usize, cap: usize) -> usize {
+        if app.suggestion().is_none() {
+            return self.height(columns, cap);
+        }
+        let mut count = 0;
+        visit_wrap(&[Span::raw(hint(app))], columns, |_, _, _| {
             count += 1;
             count < cap
         });
@@ -649,10 +664,16 @@ fn emoji_chip(app: &App) -> Style {
 
 // The empty editor names its effective send, navigation and stop keys.
 fn hint(app: &App) -> String {
+    if let Some((_, text)) = app.suggestion() {
+        return format!(
+            "{text}\n{} · Included in this reply; uses extra tokens; no extra request.",
+            super::bindings::text(app, "<suggestion.accept> to edit")
+        );
+    }
     let words = if app.answering.is_some() {
         "Answer here · <composer.send> sends only this answer · <composer.back> leaves"
     } else if app.selected.is_some() {
-        "Browsing · <composer.send> opens · <targets.next> moves · <composer.back> back"
+        "Browsing · <composer.send> opens · <targets.next> moves · <targets.quote> quotes · <targets.copy> copies · <composer.back> back"
     } else if app.split_view() {
         "Say it to the child · <composer.send> sends · <composer.back> back · <global.stop> stops it"
     } else if super::audio::available(app) {

@@ -12,61 +12,20 @@ use ratatui::{buffer::Buffer, layout::Rect};
 pub struct Loaded {
     pub number: usize,
     data: String,
+    origin: Option<(String, bool)>,
     /// Width and height, when the header in the picture's first 256 KiB names them.
     pixels: Option<(u32, u32)>,
 }
 
-// A PNG's, WebP's or JPEG's width and height, from a header that holds together: its chunk or
-// segments inside the file and both sides above zero; anything else is None.
+// Header parsing is shared with the request's image preview.
 fn pixels(data: &str) -> Option<(u32, u32)> {
     use base64::Engine;
     let head = &data[..data.len().min(1 << 18) / 4 * 4];
-    let b = base64::engine::general_purpose::STANDARD
+    let bytes = base64::engine::general_purpose::STANDARD
         .decode(head)
         .ok()?;
     let total = data.len() / 4 * 3 - data.bytes().rev().take_while(|&c| c == b'=').count();
-    let int = |at: usize, n: usize, big: bool| {
-        let bytes = b.get(at..at + n)?;
-        let fold = |v: u32, x: &u8| v << 8 | u32::from(*x);
-        Some(match big {
-            true => bytes.iter().fold(0, fold),
-            false => bytes.iter().rev().fold(0, fold),
-        })
-    };
-    // A WebP chunk at least `least` bytes long and inside the file.
-    let chunk =
-        |least: u32| int(16, 4, false).is_some_and(|n| n >= least && 20 + n as usize <= total);
-    let found = match b.get(..4).zip(b.get(12..16)) {
-        Some((b"\x89PNG", b"IHDR")) if int(8, 4, true) == Some(13) => {
-            (int(16, 4, true)?, int(20, 4, true)?)
-        }
-        Some((b"RIFF", b"VP8X")) if chunk(10) => (int(24, 3, false)? + 1, int(27, 3, false)? + 1),
-        Some((b"RIFF", b"VP8 ")) if chunk(10) && b.get(23..26) == Some(b"\x9d\x01\x2a") => {
-            (int(26, 2, false)? & 0x3fff, int(28, 2, false)? & 0x3fff)
-        }
-        Some((b"RIFF", b"VP8L")) if chunk(5) && b.get(20) == Some(&0x2f) => {
-            let v = int(21, 4, false)?;
-            ((v & 0x3fff) + 1, (v >> 14 & 0x3fff) + 1)
-        }
-        // A JPEG's segments up to its frame header, which holds height then width.
-        _ if b.starts_with(b"\xff\xd8") => {
-            let mut at = 2;
-            loop {
-                let kind = *b.get(at + 1).filter(|_| b.get(at) == Some(&0xff))?;
-                let len =
-                    int(at + 2, 2, true).filter(|&n| n >= 2 && at + 2 + n as usize <= total)?;
-                if (0xc0..=0xcf).contains(&kind) && ![0xc4, 0xc8, 0xcc].contains(&kind) {
-                    break (
-                        int(at + 7, 2, true).filter(|_| len >= 8)?,
-                        int(at + 5, 2, true)?,
-                    );
-                }
-                at += 2 + len as usize;
-            }
-        }
-        _ => return None,
-    };
-    Some(found).filter(|&(w, h)| w > 0 && h > 0)
+    crate::protocol::image_pixels(&bytes, total)
 }
 
 fn marker(number: usize) -> String {
@@ -107,6 +66,7 @@ impl Composer {
                 pixels: pixels(&data),
                 number,
                 data,
+                origin: None,
             });
         }
     }
@@ -135,7 +95,32 @@ impl Composer {
 
     pub fn images_for_send(&self) -> Vec<String> {
         self.active_images()
+            .filter(|image| !image.data.is_empty())
             .map(|image| image.data.clone())
+            .collect()
+    }
+
+    /// Keep a local image's origin with the input even when only its pointer could be sent.
+    pub fn image_origins(&self) -> String {
+        let machine = crate::profiles::machine();
+        self.active_images()
+            .filter_map(|image| {
+                let (path, fitted) = image.origin.as_ref()?;
+                let status = if image.data.is_empty() {
+                    "pointer only"
+                } else if *fitted {
+                    "scaled from"
+                } else {
+                    return None;
+                };
+                Some(format!(
+                    "\n[Image #{}: {} {} on {}; original stays on that device]",
+                    image.number,
+                    status,
+                    serde_json::to_string(path).ok()?,
+                    machine
+                ))
+            })
             .collect()
     }
 
@@ -161,7 +146,7 @@ impl Composer {
 
     // Replaces the pasted path with its chip; at twenty images the oldest removed one goes.
     // The path's last occurrence standing alone between blanks, else its last at all.
-    fn attach(&mut self, data: String, path: &str) -> bool {
+    fn attach(&mut self, data: String, origin: String, fitted: bool, path: &str) -> bool {
         let edge = |c: Option<char>| c.is_none_or(char::is_whitespace);
         let alone = |&at: &usize| {
             edge(self.text[..at].chars().next_back())
@@ -192,6 +177,7 @@ impl Composer {
             pixels: pixels(&data),
             number,
             data,
+            origin: Some((origin, fitted)),
         });
         true
     }
@@ -270,7 +256,9 @@ pub fn paste(app: &mut App, text: String) {
         for (path, piece) in files {
             let target = app.focus.clone();
             let read = app.spawn(|_| async move {
-                let loaded = load(path).await;
+                let loaded = load(path.clone())
+                    .await
+                    .map(|(data, fitted)| (data, path, fitted));
                 move |app: &mut App| loaded_image(app, loaded, piece, target)
             });
             if !read {
@@ -284,15 +272,15 @@ pub fn paste(app: &mut App, text: String) {
 
 fn loaded_image(
     app: &mut App,
-    loaded: Result<String, Error>,
+    loaded: Result<(String, String, bool), Error>,
     path: String,
     target: Option<SessionId>,
 ) {
     app.loading_images = app.loading_images.saturating_sub(1);
     match loaded {
         Err(e) => app.say(&e.to_string()),
-        Ok(data) if app.focus == target => {
-            if app.composer.attach(data, &path) {
+        Ok((data, origin, fitted)) if app.focus == target => {
+            if app.composer.attach(data, origin, fitted, &path) {
                 app.edited();
             } else if app.composer.active_images().count() == IMAGES_PER_INPUT {
                 app.say(
@@ -304,41 +292,59 @@ fn loaded_image(
     }
 }
 
-// Reads at most the server's limit and accepts only JPEG, PNG and WebP by their bytes.
-async fn load(path: String) -> Result<String, Error> {
+// Read bounded input for fitting; a file outside the bound stays on its device as a pointer.
+async fn load(path: String) -> Result<(String, bool), Error> {
     use base64::Engine;
     use tokio::io::AsyncReadExt;
+    static READ: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let _permit = READ
+        .acquire()
+        .await
+        .map_err(|_| error("Image reader unavailable."))?;
     let unreadable =
         "The pasted image path cannot be read; paste an existing JPEG, PNG or WebP path.";
-    let meta = tokio::fs::metadata(&path).await.map_err(fail(unreadable))?;
-    let large = "The image exceeds the server's 10 MB base64 limit; use a smaller image.";
-    if meta.len().div_ceil(3) * 4 > IMAGE_BASE64 as u64 {
-        return Err(error(large));
-    }
-    let file = tokio::fs::File::open(&path).await;
-    let file = file.map_err(fail(
-        "The image could not be opened; keep the path and try again.",
-    ))?;
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(fail(unreadable))?;
     let mut bytes = Vec::new();
-    let read = file
-        .take((IMAGE_BASE64 / 4 * 3 + 1) as u64)
+    file.take((32 << 20) + 1)
         .read_to_end(&mut bytes)
-        .await;
-    read.map_err(fail(
-        "The image could not be read; keep the path and try again.",
-    ))?;
-    if bytes.len().div_ceil(3) * 4 > IMAGE_BASE64 {
-        return Err(error(
-            "The image grew past the server's limit; use a smaller image.",
-        ));
-    }
-    let webp = bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP");
-    if !(bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.starts_with(b"\xff\xd8\xff") || webp) {
+        .await
+        .map_err(fail(unreadable))?;
+    if crate::protocol::image_type(&bytes).is_none() {
         return Err(error(
             "The pasted file is not JPEG, PNG or WebP; choose a supported image.",
         ));
     }
-    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    if bytes.len() > 32 << 20 {
+        return Ok((String::new(), false));
+    }
+    let dimensions = crate::protocol::image_pixels(&bytes, bytes.len());
+    let needs_fit = bytes.len().div_ceil(3) * 4 > IMAGE_BASE64
+        || dimensions.is_none_or(|(w, h)| w > 3000 || h > 3000);
+    if !needs_fit {
+        return Ok((
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+            false,
+        ));
+    }
+    let original_fits = bytes.len().div_ceil(3) * 4 <= IMAGE_BASE64;
+    let fitted = tokio::task::spawn_blocking(move || {
+        let original = original_fits.then(|| bytes.clone());
+        crate::terminal::image_codec::fitted(bytes)
+            .map(|bytes| (bytes, true))
+            .or_else(|| original.map(|bytes| (bytes, false)))
+    })
+    .await
+    .ok()
+    .flatten();
+    Ok(match fitted {
+        Some((bytes, fitted)) => (
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+            fitted,
+        ),
+        None => (String::new(), false),
+    })
 }
 
 /// The tray's one row while images wait.
@@ -357,6 +363,9 @@ pub fn draw_images(composer: &Composer, b: &mut Buffer, r: Rect, hits: &mut Vec<
     fill(b, Rect::new(r.x, r.y, r.width, 1), style(DATA, RECESS));
     let chosen = composer.chosen.filter(|&at| at < images.len());
     let size = |im: &Loaded| {
+        if im.data.is_empty() {
+            return String::new();
+        }
         let pixels = im
             .pixels
             .map_or(String::new(), |(w, h)| format!(" {w}×{h} ·"));
@@ -365,9 +374,18 @@ pub fn draw_images(composer: &Composer, b: &mut Buffer, r: Rect, hits: &mut Vec<
             n => format!("{pixels} {:.2} MiB", n as f64 / 1_048_576.),
         }
     };
-    let cell = |im: &Loaded, full: bool| {
-        width(&marker(im.number)) + 5 + if full { width(&size(im)) } else { 0 }
+    let label = |im: &Loaded| {
+        let status = if im.data.is_empty() {
+            " pointer"
+        } else if im.origin.as_ref().is_some_and(|(_, fitted)| *fitted) {
+            " scaled"
+        } else {
+            ""
+        };
+        format!("{}{status}", marker(im.number))
     };
+    let cell =
+        |im: &Loaded, full: bool| width(&label(im)) + 5 + if full { width(&size(im)) } else { 0 };
     let room = usize::from(r.width.saturating_sub(1));
     let gaps = images.len() - 1;
     let full = images.iter().map(|im| cell(im, true)).sum::<usize>() + gaps <= room;
@@ -399,14 +417,7 @@ pub fn draw_images(composer: &Composer, b: &mut Buffer, r: Rect, hits: &mut Vec<
             false => style(WHITE, CHIP),
         };
         let at = x;
-        x = put(
-            b,
-            x,
-            r.y,
-            &format!(" {} ", marker(im.number)),
-            r.right() - x,
-            look,
-        );
+        x = put(b, x, r.y, &format!(" {} ", label(im)), r.right() - x, look);
         hits.push((Rect::new(at, r.y, x - at, 1), Action::Chip(i)));
         if full {
             x = put(b, x, r.y, &size(im), r.right() - x, style(GRAY, RECESS));

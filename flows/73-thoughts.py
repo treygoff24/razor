@@ -11,9 +11,8 @@ import server
 from standin import Reply
 
 
-def turn(f, *argv):
-    """The lines `--print stream` printed for one turn, and its session."""
-    result = f.run("--print=stream", *argv, timeout=90)
+def turn(f, text, session=None):
+    result = f.run("--print=stream", *(["--resume", session] if session else []), text)
     assert result.returncode == 0, result.stderr
     lines = [json.loads(line) for line in result.stdout.splitlines()]
     return lines, lines[0]["session"]
@@ -64,9 +63,9 @@ replies = [claude.reply((None, "mcp__razor__status", {}), thinking=["First ", "t
 with flow(replies) as f:
     lines, session = turn(f, "Think, look, reply.")
     assert check(lines, 0) == (2, "tttTtTd"), lines
-    lines, _ = turn(f, "--resume", session, "Again.")
+    lines, _ = turn(f, "Again.", session)
     assert check(lines, 2) == (3, "ttTd"), lines
-    lines, _ = turn(f, "--resume", session, "Once more.")
+    lines, _ = turn(f, "Once more.", session)
     assert check(lines, 3) == (5, "ttvtTd"), lines
     unrecorded(f, session)
 
@@ -79,7 +78,7 @@ retry = retried([thought(["ABAN", "DONED"], id="rs_cut")], [thought(["COMPLETED"
 with flow([streamed, done(), *retry], model="gpt-6.1-sol", config=PLAIN) as f:
     lines, session = turn(f, "Think, look, reply.")
     assert check(lines, 0) == (2, "ttttddttTT"), lines
-    lines, _ = turn(f, "--resume", session, "Again.")
+    lines, _ = turn(f, "Again.", session)
     assert check(lines, 2) == (4, "ttvtdT"), lines
     unrecorded(f, session)
 
@@ -109,4 +108,4 @@ GLM = '[models."glm-5.3-flash"]\nbase_url = "{standin}"\n'
 with flow(replies, model="glm-5.3-flash", config=GLM, env={"RUNINFRA_API_KEY": "flow-key"}) as f:
     lines, session = turn(f, "Think and reply.")
     assert check(lines, 0) == (1, "ttdT"), lines
-    assert check(turn(f, "--resume", session, "Again.")[0], 1) == (3, "tvtdT")
+    assert check(turn(f, "Again.", session)[0], 1) == (3, "tvtdT")

@@ -3,7 +3,7 @@
 use super::inputs::{admit_answer, answer, history, send, take_back};
 use super::transcript::{Direction, select};
 use super::{App, Composer, activity, bindings, clipboard, composer, data, mcp, panel, picker};
-use super::{Transcript, recap, view::Action};
+use super::{Transcript, editor::Editing, recap, view::Action};
 use crate::protocol::{Answer, Body, EntryId, SessionId, now};
 use composer::{completion, emoji, shortcodes};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers as Mods};
@@ -11,27 +11,38 @@ use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use reqwest::Method;
 
 /// One terminal event; true for a second Ctrl-C in a row, which quits without stopping a session
-/// or its jobs. An open picker, panel or new-agent chooser takes every key and drops pastes, as
-/// the emoji grid drops them, and only a panel's or the chooser's own rows take clicks.
-pub fn event(app: &mut App, event: Event) -> bool {
+/// or its jobs, unless `[ui] quit` is `end`: then the addressed session is ended first. An open
+/// picker, panel or new-agent chooser takes every key and drops pastes, as the emoji grid drops
+/// them, and only a panel's or the chooser's own rows take clicks.
+pub fn event(app: &mut App, event: super::tty::Event) -> bool {
+    let event = match event {
+        super::tty::Event::Input(event) => event,
+        super::tty::Event::Picture(text) => {
+            app.pictures.answer(&text);
+            app.dirty = true;
+            return false;
+        }
+    };
     if let Event::Key(k) = &event
         && app.program.answer(k)
     {
-        app.dirty |= app.program.answered;
+        app.dirty = true;
         return false;
     }
     (app.dirty, app.immediate) = (true, true);
     let modal = app.picker.is_some() || app.panel.is_some() || app.start.is_some();
+    let modal = modal || app.goto.is_some();
     match event {
         Event::Key(k) if k.kind != KeyEventKind::Release => {
             activity::report(app);
             let Some((k, context, action)) = bindings::translate(app, k) else {
                 return false;
             };
-            // Ctrl-C outside the emoji grid, which takes it to close, arms quitting.
-            let quits = k.code == KeyCode::Char('c') && k.modifiers == Mods::CONTROL;
-            let quits = quits && app.grid.is_none();
+            let quits = action == "global.quit";
             if app.quitting && quits {
+                if app.ui.quit == crate::protocol::Quit::End {
+                    super::commands::done(app, "quit");
+                }
                 return true;
             }
             // The stage hears each key, and a long draft any key but Enter empties.
@@ -54,7 +65,10 @@ pub fn event(app: &mut App, event: Event) -> bool {
         Event::Paste(text) => {
             activity::report(app);
             app.quitting = false;
-            if !modal && app.grid.is_none() {
+            // Words pasted into the draft leave browsing, as typed ones do.
+            if !modal && app.grid.is_none() && app.list.overview.is_none() {
+                app.dismiss_suggestion();
+                app.unselect();
                 composer::paste(app, text);
             }
         }
@@ -87,6 +101,13 @@ fn key(app: &mut App, k: KeyEvent, context: &str, action: &str, quits: bool) {
     if app.quitting || armed && k.code == KeyCode::Esc {
         return;
     }
+    if action == "global.overview" {
+        return super::agents::overview(app);
+    }
+    // The overview takes the list's keys and nothing else.
+    if app.list.overview.is_some() && context != "list" {
+        return;
+    }
     if (context == "voice" || action == "global.record") && super::audio::key(app, k) {
         return;
     }
@@ -94,6 +115,9 @@ fn key(app: &mut App, k: KeyEvent, context: &str, action: &str, quits: bool) {
     app.transcript_mut()
         .into_iter()
         .for_each(|t| t.ended = None);
+    if app.goto.is_some() {
+        return super::goto::key(app, k, action);
+    }
     if app.panel.is_some() {
         return if matches!(context, "panel" | "mcp") {
             panel::key(app, k)
@@ -105,7 +129,10 @@ fn key(app: &mut App, k: KeyEvent, context: &str, action: &str, quits: bool) {
             picker::key(app, k)
         };
     }
-    if k.code == KeyCode::Char('s') && k.modifiers == Mods::CONTROL {
+    if context == "prefix" {
+        return prefixed(app, action);
+    }
+    if action == "global.new" {
         return super::start::open(app);
     }
     if app.start.is_some() {
@@ -117,7 +144,7 @@ fn key(app: &mut App, k: KeyEvent, context: &str, action: &str, quits: bool) {
     if app.grid.is_some() {
         return emoji::key(app, k);
     }
-    if k.code == KeyCode::Char('g') && k.modifiers == Mods::CONTROL {
+    if action == "global.emoji" {
         return emoji::open(app, shortcodes::typed(app));
     }
     // A question closed while its answer was being written: every key says so and the words stay
@@ -134,10 +161,14 @@ fn key(app: &mut App, k: KeyEvent, context: &str, action: &str, quits: bool) {
     if matches!(action, "global.copy" | "global.cut") {
         return copy(app, action == "global.cut");
     }
+    if matches!(action, "composer.clear" | "composer.stash") {
+        return aside(app, action == "composer.stash");
+    }
     if context != "attachments" {
         app.composer.chosen = None;
     }
     match context {
+        "suggestion" => app.accept_suggestion(),
         "attachments" => attachments(app, k),
         "completion" if completion::key(app, k) => {}
         "shortcode" if shortcodes::key(app, k) => {}
@@ -153,13 +184,87 @@ fn key(app: &mut App, k: KeyEvent, context: &str, action: &str, quits: bool) {
     }
 }
 
+// One prefix action, by its name in the key table; the prefix armed only with an empty draft, a
+// command it types takes no words.
+fn prefixed(app: &mut App, action: &str) {
+    let typed = |app: &mut App, command: &str| {
+        app.composer.replace(command.into());
+        app.list.keys = false;
+        app.edited();
+    };
+    match action.trim_start_matches("prefix.") {
+        "rename" => typed(app, "/name "),
+        "done" => typed(app, "/done"),
+        "split" => {
+            let first = kin(app, app.focus.clone()).into_iter().next();
+            match app.selected_child().cloned().or(first) {
+                Some(id) => focus(app, Some(id)),
+                None => app.say("No children out."),
+            }
+        }
+        "close_split" if app.split() => focus(app, None),
+        "close_split" => app.say("No child's split is open."),
+        "right" => app.list.keys = false,
+        "switch" if app.list.open && app.list.keys => app.list.keys = false,
+        "left" | "switch" | "wider" | "narrower" if !app.list.open => super::agents::toggle(app),
+        "left" | "switch" => app.list.keys = true,
+        "wider" | "narrower" => super::agents::widen(app, action == "prefix.wider"),
+        // The oldest question waiting for the person, which the status chip names; else what a
+        // press on the chip opens.
+        "waiting" => {
+            let asks = app.agents.values().flat_map(|a| &a.asks);
+            match asks.min_by_key(|q| (q.at, &q.id)).map(|q| q.id.clone()) {
+                Some(ask) => {
+                    app.ask = Some(ask.clone());
+                    super::agents::open(app, ask.0);
+                }
+                None => act(app, super::status::press(app)),
+            }
+        }
+        "keys" => _ = panel::command(app, "/keys"),
+        "detach" => app.leaving = true,
+        "browse" => select(app, true, false),
+        // The ring runs newest first, so the reply above is the next one along it.
+        "previous_reply" | "next_reply" => select(app, action == "prefix.previous_reply", true),
+        "goto" => super::goto::open(app),
+        "cancel" => {}
+        jump => super::agents::jump(app, jump),
+    }
+}
+
+// The clear key empties the draft as one undo step. The stash key sets the draft aside, words and
+// images, or with an empty draft brings it back; one is held at a time, never overwritten.
+fn aside(app: &mut App, stash: bool) {
+    match (stash, app.composer.is_empty(), app.stash.is_some()) {
+        (false, ..) => _ = app.composer.swap(0..app.composer.text.len(), ""),
+        (true, false, false) => app.stash = Some(std::mem::take(&mut app.composer)),
+        (true, false, true) => {
+            let held =
+                "A draft is already stashed; <composer.stash> with an empty draft brings it back.";
+            return app.say(&bindings::text(app, held));
+        }
+        (true, true, _) => match app.stash.take() {
+            Some(stashed) => app.composer = stashed,
+            None => return app.say("No draft is stashed."),
+        },
+    }
+    app.edited();
+}
+
 fn copy(app: &mut App, cut: bool) {
     if app.copying {
         return app.say("A clipboard write is pending; wait before copying or cutting again.");
     }
-    // With an empty draft, a copy takes the shown question.
-    if !cut && app.composer.text.is_empty() && app.shown_ask.is_some() {
-        return clipboard::question(app);
+    if !cut && app.composer.text.is_empty() {
+        if let Some(text) = super::audio::failure(app) {
+            return clipboard::copy(app, Some(text.to_owned()));
+        }
+        if app.shown_ask.is_some() {
+            return clipboard::question(app);
+        }
+        if let Some((text, _)) = app.notice.as_ref().filter(|(_, until)| now() < *until) {
+            return clipboard::copy(app, Some(text.clone()));
+        }
     }
     // A cut's words leave only when its copy can start.
     if cut && app.pending >= 8 {
@@ -182,10 +287,11 @@ fn browse(app: &mut App, k: KeyEvent) {
         KeyCode::Char(c @ ('n' | 'p')) if ctrl && app.composer.text.is_empty() => {
             children(app, c == 'n')
         }
-        KeyCode::PageUp | KeyCode::PageDown => {
+        KeyCode::PageUp | KeyCode::PageDown | KeyCode::Char('u' | 'd') => {
             if let Some(t) = app.transcript_mut() {
-                let page = t.detail_height.saturating_sub(2).max(3) as usize;
-                match k.code == KeyCode::PageUp {
+                // Ctrl-U and Ctrl-D scroll half as far.
+                let page = (t.detail_height.saturating_sub(2).max(3) as usize) >> u8::from(ctrl);
+                match matches!(k.code, KeyCode::PageUp | KeyCode::Char('u')) {
                     true => t.page_up(page),
                     false => t.page_down(page),
                 }
@@ -237,10 +343,10 @@ fn wheeled(app: &mut App, at: ratatui::layout::Position) -> Option<&mut super::T
 }
 
 // Esc backs out one layer: the selected child card, the opened card, the answer, the split view, a
-// floating status pane, the pinned reply, and only then stops the session (Trey, 2026-10-30).
+// floating status pane, the pinned reply, an offered next message, and only then stops the session
+// (Trey, 2026-10-30).
 fn escape(app: &mut App) {
-    if app.selected.take().is_some() {
-        app.revision = app.revision.wrapping_add(1);
+    if app.unselect() {
         return;
     }
     let opened = app
@@ -265,6 +371,7 @@ fn escape(app: &mut App) {
         // A new agent's composer goes back to the session addressed before it.
         None => match app.back.take().filter(|_| app.focus.is_none()) {
             Some(id) => super::agents::press(app, Action::Agent(id)),
+            None if app.suggestion().is_some() => app.dismiss_suggestion(),
             None => stop(app),
         },
     }
@@ -278,11 +385,7 @@ fn children(app: &mut App, forward: bool) {
         true => app.row().and_then(|a| a.parent.clone()),
         false => app.focus.clone(),
     };
-    let mut kin: Vec<_> = (app.agents.values())
-        .filter(|a| parent.is_some() && a.parent == parent)
-        .map(|a| (a.launched, a.session.clone()))
-        .collect();
-    kin.sort();
+    let kin = kin(app, parent);
     let n = kin.len();
     if n < 1 + usize::from(split) {
         return app.say(["No children out.", "No other child at this level."][usize::from(split)]);
@@ -292,14 +395,24 @@ fn children(app: &mut App, forward: bool) {
     } else {
         app.selected_child().cloned()
     };
-    let at = kin.iter().position(|(_, id)| Some(id) == here.as_ref());
-    let next = kin[step(at, n, forward)].1.clone();
+    let at = kin.iter().position(|id| Some(id) == here.as_ref());
+    let next = kin[step(at, n, forward)].clone();
     if split || app.columns < super::view::PHONE {
         return focus(app, Some(next));
     }
     // The selection is the next child of the list, whether or not its card is drawn yet.
     (app.pane_open, app.selected) = (Some(true), Some(Action::Child(next)));
     app.revision = app.revision.wrapping_add(1);
+}
+
+// The children of `parent` in launch order.
+fn kin(app: &App, parent: Option<SessionId>) -> Vec<SessionId> {
+    let mut kin: Vec<_> = (app.agents.values())
+        .filter(|a| parent.is_some() && a.parent == parent)
+        .map(|a| (a.launched, a.session.clone()))
+        .collect();
+    kin.sort();
+    kin.into_iter().map(|(_, id)| id).collect()
 }
 
 // The place after `at` round a ring of `n`, or before it; with none, the first or the last.
@@ -310,17 +423,31 @@ fn step(at: Option<usize>, n: usize, forward: bool) -> usize {
     }
 }
 
-// The browse ring: every drawn click target in the ring's order; Enter on one does what a
-// click does.
-fn select(app: &mut App, forward: bool) {
-    let ring = app.targets.clone();
+// The browse ring: every drawn click target in the ring's order, or one stop for each reply;
+// Enter on one does what a click does, or reads a reply.
+fn select(app: &mut App, forward: bool, replies: bool) {
+    let mut ring = app.targets.clone();
+    // A reply's stops, its heading and a long one's copy line, lie together on screen.
+    if replies {
+        ring.retain(|t| replied(t).is_some());
+        ring.dedup_by(|a, b| replied(a) == replied(b));
+    }
     let n = ring.len();
     if n == 0 {
-        return app.say("nothing to open yet");
+        return app.say(["nothing to open yet", "No reply is on screen."][usize::from(replies)]);
     }
-    let at = (app.selected.as_ref()).and_then(|a| ring.iter().position(|t| t == a));
+    let same = |t: &Action, a: &Action| t == a || replies && replied(t) == replied(a);
+    let at = (app.selected.as_ref()).and_then(|a| ring.iter().position(|t| same(t, a)));
     app.selected = Some(ring[step(at, n, forward)].clone());
     app.revision = app.revision.wrapping_add(1);
+}
+
+/// The reply a browse stop stands for: its heading row, or a long one's copy line.
+pub(super) fn replied(a: &Action) -> Option<(&SessionId, EntryId)> {
+    match a {
+        Action::Pin(session, entry) | Action::CopyText(session, entry) => Some((session, *entry)),
+        _ => None,
+    }
 }
 
 fn edit(app: &mut App, k: KeyEvent, context: &str) {
@@ -353,9 +480,23 @@ fn edit(app: &mut App, k: KeyEvent, context: &str) {
             }
             _ => {}
         },
-        "line_start" if app.list.open => app.list.keys = true,
-        "line_start" => super::agents::toggle(app),
-        "targets" => select(app, matches!(k.code, KeyCode::Tab | KeyCode::Down)),
+        "line_start" => super::agents::outward(app),
+        "draft_end" => super::agents::toggle(app),
+        // The ring runs newest first, so Up steps along it, to older entries higher on screen.
+        "targets" => match (k.code, app.selected.clone()) {
+            (KeyCode::Char('"' | 'y') | KeyCode::Enter, Some(a)) if replied(&a).is_some() => {
+                let text = replied(&a).and_then(|(session, entry)| reply(app, session, entry));
+                match (text, k.code) {
+                    (None, _) => app.say(GONE),
+                    (Some(text), KeyCode::Enter) => app.editing = Some(Editing::Reply(text)),
+                    (Some(text), KeyCode::Char('"')) => select::quoted(app, &text),
+                    (Some(text), _) => clipboard::copy(app, Some(text)),
+                }
+            }
+            (KeyCode::Char('y'), Some(a @ (Action::Link(_) | Action::Copy(_)))) => act(app, a),
+            (KeyCode::Char('"' | 'y'), _) => app.say("Select a reply, link or copy line first."),
+            _ => select(app, matches!(k.code, KeyCode::Tab | KeyCode::Up), false),
+        },
         "input_history" => history(app, k.code == KeyCode::Up),
         "queued_input" => {
             let t = app.transcript();
@@ -378,9 +519,7 @@ fn edit(app: &mut App, k: KeyEvent, context: &str) {
                 return remove_image(app, number);
             }
             if app.composer.key(k) {
-                if app.selected.take().is_some() {
-                    app.revision = app.revision.wrapping_add(1);
-                }
+                app.unselect();
                 app.edited();
             }
         }
@@ -427,7 +566,9 @@ fn mouse(app: &mut App, m: MouseEvent) {
         let down = m.kind == MouseEventKind::ScrollDown;
         let step = if down { 3 } else { -3 };
         app.selection = None;
-        if app.list.area.is_some_and(|r| r.contains(at)) {
+        if let Some(scroll) = &mut app.list.overview {
+            *scroll = scroll.saturating_add_signed(step);
+        } else if app.list.area.is_some_and(|r| r.contains(at)) {
             app.list.scroll = app.list.scroll.saturating_add_signed(step);
         } else if app.status_area.is_some_and(|r| r.contains(at)) {
             app.status_scroll = app.status_scroll.saturating_add_signed(step);
@@ -452,7 +593,7 @@ fn mouse(app: &mut App, m: MouseEvent) {
         }
         return;
     }
-    if draft(app, m, cell) {
+    if app.list.overview.is_none() && draft(app, m, cell) {
         app.list.keys = false;
         return;
     }
@@ -526,6 +667,8 @@ fn act(app: &mut App, action: Action) {
         Action::Chip(at) => app.composer.chosen = Some(at),
         Action::Unfold(session, id) => held(app, &session, |t| t.expand([id], true)),
         Action::Back => focus(app, None),
+        Action::Overview => super::agents::overview(app),
+        Action::Close => super::agents::toggle(app),
         Action::Archive => app.archive = !app.archive,
         a @ (Action::Section(_) | Action::Agent(_) | Action::New | Action::Thread(_)) => {
             super::agents::press(app, a)
@@ -551,24 +694,20 @@ fn act(app: &mut App, action: Action) {
             app.pane_open = Some(!app.pane_open.unwrap_or(wide));
         }
         Action::Copy(text) => clipboard::copy(app, Some(text)),
-        Action::CopyText(session, entry) => {
-            let entry = app
-                .transcripts
-                .get(&session)
-                .and_then(|t| t.entries.get(&entry));
-            match entry.map(|e| &e.body) {
-                Some(Body::Text { text } | Body::Thinking { text }) => {
-                    clipboard::copy(app, Some(text.clone()))
-                }
-                _ => app.say(
-                    "That reply is no longer in the transcript buffer; use recall to copy it.",
-                ),
-            }
-        }
+        Action::CopyText(session, entry) => match reply(app, &session, entry) {
+            Some(text) => clipboard::copy(app, Some(text)),
+            None => app.say(GONE),
+        },
         Action::RemoveImage(number) => remove_image(app, number),
         Action::TakeBack(input) => take_back(app, input),
         Action::Quote => select::quote(app),
-        Action::Jump(session, id) => super::transcript::jump(app, &session, id),
+        Action::Jump(session, id) => {
+            super::transcript::jump(app, &session, id);
+            app.say(&bindings::text(
+                app,
+                "Jumped in transcript · <transcript.bottom> for latest.",
+            ));
+        }
         Action::Latest(session) => held(app, &session, Transcript::bottom),
         Action::Pin(session, id) => held(app, &session, |t| t.pin(Some(id))),
         // Only an open `/mcp` draws these, and it takes its own clicks.
@@ -579,6 +718,17 @@ fn act(app: &mut App, action: Action) {
             (app.ask_open, app.ask_at) = (Some(id), now());
             app.say(&format!("Press 1-{n} to answer."));
         }
+    }
+}
+
+const GONE: &str = "That reply is no longer in the transcript buffer; use recall to copy it.";
+
+// The words of a reply the transcript still holds.
+fn reply(app: &App, session: &SessionId, entry: EntryId) -> Option<String> {
+    let entry = app.transcripts.get(session)?.entries.get(&entry)?;
+    match &entry.body {
+        Body::Text { text } | Body::Thinking { text } => Some(text.clone()),
+        _ => None,
     }
 }
 
@@ -718,6 +868,7 @@ pub(super) fn focus(app: &mut App, next: Option<SessionId>) {
     (app.selected, app.panel, app.history, app.initial) = (None, None, None, None);
     app.revision = app.revision.wrapping_add(1);
     app.composer = Composer::default();
+    completion::reset(app);
     super::split::start(app, old, now());
     recap::back(app);
     if let Some(id) = app.focus.clone() {

@@ -59,6 +59,9 @@ impl App {
         });
         if self.edits == edits && self.sending.is_none() {
             self.composer.replace(draft);
+            if !self.composer.is_empty() {
+                self.dismiss_suggestion();
+            }
         }
         super::recap::check(self);
         self.stream(id, cursor);
@@ -179,6 +182,21 @@ impl App {
             Live::Agent(row) => self.agent(*row),
             Live::Delivery(delivery) => self.delivery(*delivery),
             _ => {}
+        }
+        if !self.release_noticed
+            && let Some((server, version)) = self.servers.iter().find_map(|server| {
+                server
+                    .release_ready
+                    .as_ref()
+                    .map(|version| (server, version))
+            })
+        {
+            let sentence = format!(
+                "Razor {version} is ready on {}; run razor restart to use it",
+                server.machine
+            );
+            self.release_noticed = true;
+            self.say(&sentence);
         }
     }
 

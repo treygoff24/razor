@@ -414,7 +414,7 @@ class Conversation {
         [this.carried, this.requests] = [{ input: 0, output: 0, cache_read: 0, cache_write: 0 }, 0];
         // An input whose request Escape aborted is in the conversation, and the next request reads it.
         // Escape after the batch yielded finds the CLI's turn ended cleanly: it is still stopped.
-        const sent = this.send({ type: 'turn_end', success: m.subtype === 'success' && !m.is_error && !yielded, reason: yielded ? 'stopped' : m.terminal_reason ?? null,
+        const sent = this.send({ type: 'turn_end', success: m.subtype === 'success' && !m.is_error && !yielded, reason: yielded ? 'stopped' : m.subtype === 'success' && m.is_error && (m.api_error_status === 401 || m.api_error_status === 403) ? 'authentication_failed' : m.terminal_reason ?? null,
           // The CLI's advice for a missing sign-in names its own /login, which Razor does not have.
           message: (m.subtype === 'success' ? m.result : m.errors.join(' ')).replace(/Not logged in[^\n]*\/login/, 'Claude is not signed in; run razor setup'), usage,
           window: Math.max(0, ...Object.values(m.modelUsage).map((usage) => usage.contextWindow)), took: this.started });

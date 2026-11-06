@@ -54,6 +54,7 @@ with flow([]) as f:
     assert "razor login" in found["ChatGPT sign-in"], text
     assert "Node" in found["Claude"] and str(fresh / "bin") in found["Claude"] and not (home / ".razor").exists(), text
     assert "agent-browser install" in found["Browser"] and found["Server"].startswith("stopped;"), text
+    assert "agent-desktop" in found["Desktop"] and found["Desktop"].startswith("missing"), text
     assert found["Service"].endswith("Run razor install.") and "Memory" not in found, text
 
     def untouched(*words, code=0):
@@ -72,6 +73,7 @@ with flow([]) as f:
     stub = fresh / "bin/agent-browser"
     stub.write_text("#!/bin/sh\nexit 0\n")
     stub.chmod(0o755)
+    shutil.copy2(stub, fresh / "bin/agent-desktop")
 
     planted = ["sk-ant-oat01-flow-planted-claude", "flow-planted-openai-key", "flow-planted-exa-key"]
     (home / ".claude").mkdir(exist_ok=True)
@@ -84,7 +86,7 @@ with flow([]) as f:
     node = Path(shutil.which("node")).parent
     code, found, text = doctor(PATH=f"{fresh / 'bin'}:{node}", EXA_API_KEY=planted[2])
     assert code == 0 and "Razor can run on Claude and GPT." in text, text
-    for thing in ("Claude", "ChatGPT sign-in", "EXA_API_KEY", "Browser"):
+    for thing in ("Claude", "ChatGPT sign-in", "EXA_API_KEY", "Browser", "Desktop"):
         assert found[thing].startswith(("found.", "found (")), (thing, text)
     assert found["FIRECRAWL_API_KEY"].startswith("missing. ")
     leaked = [value for value in planted + [AUTH["tokens"]["access_token"]] if value in text]

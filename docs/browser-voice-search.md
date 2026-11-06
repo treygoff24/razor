@@ -1,12 +1,12 @@
 # Browser, voice and search
 
-Three capabilities come from programs and online services outside Razor: a real browser for agents, voice in both directions, and web search. Each works out of the box once its program is installed or its key is set, and each is optional.
+Capabilities from programs and online services outside Razor include a browser, desktop control, voice and web search. Each works out of the box once its program is installed or its key is set, and each is optional.
 
 ## The browser
 
 Agents can drive a real Chrome browser from their shell with [agent-browser](https://github.com/vercel-labs/agent-browser), a command-line browser from Vercel Labs (Apache-2.0) that ships beside the `razor` binary. The server puts it on its agents' `PATH`, so any agent can open a page, read it as a list of the page's elements, each with a short reference it can click or type into, wait for content, run page JavaScript and take screenshots.
 
-The starter pack, the folder of default settings, prompt files and skills that Razor ships, includes a skill (written instructions agents load by name) that teaches them agent-browser's commands. It also tells each agent to name its own browser with `--session "$RAZOR_SESSION"` (Razor sets `RAZOR_SESSION` to the session's id in every agent's shell), since without a name every agent on the machine shares one browser.
+The starter pack, the folder of default settings, prompt files and skills that Razor ships, includes a skill (written instructions agents load by name) that teaches them agent-browser's commands. Each agent gets a browser of its own: Razor sets `AGENT_BROWSER_SESSION` to the session's id in every agent's shell, which names the browser agent-browser opens.
 
 `razor setup` downloads the Chrome that agent-browser drives. To do it yourself, use the copy beside Razor, or the one on your `PATH` if you built from source:
 
@@ -26,6 +26,12 @@ Built from source without the release script, Razor has no copy of its own; inst
 npm install --global agent-browser
 agent-browser install
 ```
+
+## Desktop apps
+
+Agents can use [agent-desktop](https://github.com/vercel-labs/agent-desktop) (Apache-2.0), shipped beside Razor, to read and operate desktop apps through the operating system's accessibility interface. Its starter skill explains how to observe, act and check the result. `razor doctor` checks that the program runs; `~/.local/share/razor/current/agent-desktop status` reports platform support and permissions. A source build can use an independently installed copy on `PATH`.
+
+On macOS, desktop control and screenshots require permissions for Razor; see [screen and control](security.md#screen-and-control-on-macos). On Linux, desktop access requires an accessible graphical session; see [agent-desktop's Linux requirements](https://agent-browser.dev/desktop/platforms/linux). Screenshots, accessibility output and clipboard contents can contain private information.
 
 ## Web search, page reading and answers
 
@@ -55,7 +61,7 @@ Voice has three parts. Each needs its own program, and Razor ships one of them.
 
 ### Replies read aloud
 
-Click the ▶ beside the newest reply, or type `/listen`, to hear it. The starter pack's `speech` program, `scripts/speech.py`, sends the text to [ElevenLabs](https://elevenlabs.io) and needs `ELEVENLABS_API_KEY`, which `razor keys` saves; without the key, the ▶ answers with a sentence saying how to add it. It reads code blocks, tables and links as short phrases rather than spelling them out. With `ffmpeg` installed it also sets the volume and measures the waveform the terminal draws.
+Click the ▶ beside the newest reply, or type `/listen`, to hear it. The starter pack's `speech` program, `scripts/speech.py`, sends the text to [ElevenLabs](https://elevenlabs.io) and needs `ELEVENLABS_API_KEY`, which `razor keys` saves (a restricted key needs the Text to Speech and Voices (read) permissions); without the key, the ▶ answers with a sentence saying how to add it. It reads code blocks, tables and links as short phrases rather than spelling them out. With `ffmpeg` installed it also sets the volume and measures the waveform the terminal draws.
 
 macOS plays the audio with `afplay`. Linux has no player by default; with `ffmpeg` installed, this one works:
 
@@ -63,6 +69,8 @@ macOS plays the audio with `afplay`. Linux has no player by default; with `ffmpe
 # ~/.razor/config.toml
 play = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", "-af", "atempo={rate}"]
 ```
+
+Audio plays on the machine the terminal app runs on. Over SSH that is the machine you connected to, not the one in front of you, so there the ▶ and `/listen` play nothing and say so, and recording is refused. To hear replies on the machine you sit at, install Razor there, pair it with the other machine ([More machines](machines.md)), and open the session from its own terminal app: the other server still makes the audio, and this one plays it. Agents' spoken notes reach it the same way.
 
 Any program that reads text on standard input and writes MP3 audio to standard output can replace `speech`. Its last argument names the speaker: a resident's name, or the session's id, so one agent can have its own voice. It gets the chosen voice, gain and expressiveness in `RAZOR_VOICE`, `RAZOR_GAIN_DB` and `RAZOR_EXPRESSIVENESS`, and run with `--voices` it prints its voices as JSON, for the voice list below.
 

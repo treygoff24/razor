@@ -14,8 +14,8 @@ pub(in crate::terminal) struct Decoded {
     pub(super) complete: bool,
     pub(super) job: Option<JobId>,
     pub(super) end: Option<JobEnd>,
-    // The pictures the result names, each drawn as a line under its call.
-    pub(super) images: Vec<Image>,
+    // The pictures the result names, each drawn as a line and a picture under its call.
+    pub(in crate::terminal) images: Vec<Image>,
     // Where a shell or MCP result's whole output was saved when it ran past what it held.
     pub(super) path: Option<String>,
 }
@@ -58,7 +58,14 @@ impl Decoded {
             .and_then(|n| u32::try_from(n).ok())
             .map(JobId);
         let end = serde_json::from_value(value["end"].take()).ok();
-        let images: Vec<Image> = serde_json::from_value(value["images"].take()).unwrap_or_default();
+        let mut images: Vec<Image> =
+            serde_json::from_value(value["images"].take()).unwrap_or_default();
+        // A generated picture too large to show the model keeps only its saved path.
+        let generated = images.is_empty() && value["output_hint"].is_string() && !shell;
+        if let Some(path) = value["path"].as_str().filter(|_| generated) {
+            let (media_type, path) = ("image/png".into(), path.into());
+            images.push(Image { media_type, path });
+        }
         let (text, count) = match value["output"].take() {
             Value::String(text) => {
                 let count = text.lines().count();

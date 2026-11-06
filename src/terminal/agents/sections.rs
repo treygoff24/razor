@@ -132,12 +132,12 @@ fn section_body(
     }
     body
 }
-fn totals(sections: &[Section]) -> (usize, usize) {
+pub(super) fn totals(sections: &[Section]) -> (usize, usize) {
     let rows = || sections.iter().flat_map(|s| &s.sessions);
     let agents = rows().filter(|r| r.depth == 0).count();
     (agents, rows().count() - agents)
 }
-fn subtree(sections: &[Section]) -> &[Section] {
+pub(super) fn subtree(sections: &[Section]) -> &[Section] {
     let end = 1 + sections[1..]
         .iter()
         .take_while(|s| s.depth > sections[0].depth)
@@ -151,7 +151,7 @@ pub fn mark(app: &App, action: &Action, folded: bool) -> &'static str {
         (false, false) => "▾",
     }
 }
-fn counts(agents: usize, helpers: usize) -> String {
+pub(super) fn counts(agents: usize, helpers: usize) -> String {
     [(agents, "agent"), (helpers, "helper")]
         .into_iter()
         .filter(|(n, _)| *n > 0)
@@ -305,13 +305,17 @@ pub fn section_rows<'a>(
     let (mut out, mut cards) = (Vec::new(), cards.into_iter());
     for (row, fold, count, here) in &shown {
         let room = (width as usize).saturating_sub(1);
+        // A helper's state mark, branch and name sit under its parent's name, a step further at
+        // each depth, with its fold or selection mark a space before them (Trey, 5 November 2026).
+        let indent = (4 * row.depth).saturating_sub(2).min(room as u16 / 2);
+        let lead = " ".repeat(indent.into());
         let mark = fold
             .as_ref()
             .map_or(" ", |(_, shut)| ["▾", "▸"][usize::from(*shut)]);
         let toggle = fold.as_ref().map(|(id, _)| Action::Section(id.clone()));
         if let Some(n) = count {
-            let selected = app.list.open && app.list.selected == toggle;
-            let words = format!("{} {mark} {n} finished", if selected { "❯" } else { " " });
+            let selected = [" ", "❯"][usize::from(app.list.open && app.list.selected == toggle)];
+            let words = format!("{lead}{selected} {mark} {n} finished");
             let mut line = Line::from(span(clip(&words, room + 1), GRAY));
             addressed(&mut line, *here);
             out.push(status::Row(line, toggle, Vec::new()));
@@ -321,21 +325,14 @@ pub fn section_rows<'a>(
         let action = Action::Agent(card.agent.session.clone());
         let selected = app.list.open && app.list.selected.as_ref() == Some(&action);
         let size = [Size::Compact, Size::Mini][usize::from(row.depth > 0)];
-        let branch = match row.depth {
-            0 => String::new(),
-            depth => format!("{}└ ", "│ ".repeat((depth - 1).min(8) as usize)),
-        };
         // The selection shows in the fold's column, so the card's own mark column is the space
         // between it and the state.
-        let columns = room.saturating_sub(text::width(&branch));
-        let mut lines = card.rows(size, columns, detail, (false, false));
-        if row.depth > 0 {
-            for line in &mut lines {
+        let columns = room.saturating_sub(lead.len() + 2 * usize::from(row.depth > 0));
+        for (i, mut line) in card.rows(size, columns, detail, (false, false)).enumerate() {
+            if row.depth > 0 {
                 line.spans
-                    .insert(3.min(line.spans.len()), span(branch.clone(), GRAY_DIM));
+                    .insert(3.min(line.spans.len()), span("└ ", GRAY_DIM));
             }
-        }
-        for (i, mut line) in lines.into_iter().enumerate() {
             // Selected, a parent's fold arrow turns cyan and keeps its shape; another row shows ❯.
             let (mark, ink) = match i {
                 0 if selected && fold.is_some() => (mark, CYAN),
@@ -344,8 +341,9 @@ pub fn section_rows<'a>(
                 _ => (" ", GRAY),
             };
             line.spans.insert(0, Span::styled(mark, bold(ink, GLASS)));
+            line.spans.insert(0, span(lead.clone(), GRAY));
             addressed(&mut line, *here);
-            let folds = Vec::from_iter(toggle.clone().filter(|_| i == 0).map(|a| (0, a)));
+            let folds = Vec::from_iter(toggle.clone().filter(|_| i == 0).map(|a| (indent, a)));
             out.push(status::Row(line, Some(action.clone()), folds));
         }
     }

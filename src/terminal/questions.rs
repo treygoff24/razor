@@ -9,7 +9,8 @@ use crate::protocol::{Ask, EntryId, SessionId};
 use crate::terminal::bindings;
 use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, text::Span};
 
-fn waiting(app: &App) -> usize {
+/// How many questions wait for the person, on every agent.
+pub(super) fn waiting(app: &App) -> usize {
     app.agents.values().map(|a| a.asks.len()).sum()
 }
 

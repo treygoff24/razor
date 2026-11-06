@@ -25,8 +25,11 @@ failures = []
 for name in subprocess.check_output(["git", "ls-files", "-z"], cwd=root, text=True).split("\0"):
     path = Path(name)
     # An eval task's repository is a fixture the model edits, not our source; its check counts.
+    # Vendored third-party code, never edited here and named by its folder's UPSTREAM file, is not
+    # ours either; each such folder is listed here by name.
     if (not name or path.parts[0] in ("planning", "docs") or path.suffix not in COMMENTS
-            or path.parts[0] == "eval" and path.parts[3:4] == ("repo",)):
+            or path.parts[0] == "eval" and path.parts[3:4] == ("repo",)
+            or name.startswith("packs/starter/skills/impeccable/")):
         continue
     text = (root / path).read_text()
     if path.parts[0] != "flows" and ("tests" in path.parts or path.name.startswith("test_")

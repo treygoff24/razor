@@ -7,6 +7,7 @@ mod deliveries;
 mod install;
 mod list;
 mod projects;
+mod updates;
 
 pub use deliveries::Deliveries;
 pub(crate) use install::permissions;
@@ -14,6 +15,8 @@ pub use install::{
     TEARDOWN_TIMEOUT, check_service, install, installed, server_lock, server_running, start, stop,
 };
 pub(crate) use list::{Listed, homes};
+pub(crate) use updates::release_ready;
+pub use updates::{selected_executable, update_release};
 
 use crate::config::{Config, Day, Deliver, Resident, Schedule, Time};
 use crate::controller::{self, Controller};
@@ -254,8 +257,37 @@ impl Residents {
 
     async fn fire(self) {
         let mut last = now();
+        let mut attempted = None::<tokio::time::Instant>;
+        let mut release_attempted = None::<tokio::time::Instant>;
         loop {
             let config = self.config().await;
+            if config.skill_updates
+                && attempted.is_none_or(|at| at.elapsed() >= Duration::from_secs(86_400))
+            {
+                attempted = Some(tokio::time::Instant::now());
+                let settings = self.inner.controller.machine_settings().await;
+                let folders = crate::config::home_skills()
+                    .into_iter()
+                    .chain(settings.config.skills.iter().cloned())
+                    .collect();
+                tokio::spawn(crate::tools::update_skills(
+                    folders,
+                    settings.skill_overrides(),
+                    settings.pack_skills(),
+                ));
+            }
+            if config.release_updates
+                && release_attempted.is_none_or(|at| at.elapsed() >= Duration::from_secs(86_400))
+                && updates::installation().await.is_some()
+            {
+                release_attempted = Some(tokio::time::Instant::now());
+                tokio::spawn(async {
+                    match updates::update_release().await {
+                        Ok(sentence) => eprintln!("razor: {sentence}"),
+                        Err(error) => eprintln!("razor: release updates: {error}"),
+                    }
+                });
+            }
             let now = now();
             if now / 60_000 > last / 60_000 {
                 self.inner.controller.memory().tick(&self.inner.controller);
@@ -379,7 +411,7 @@ impl Residents {
                 if let Ok(entry) = serde_json::from_str::<Entry>(&line)
                     && let Body::Text { text } = entry.body
                 {
-                    said = crate::record::preview(&text);
+                    said = crate::record::preview(crate::record::reply(&text).text);
                 }
             }
         }

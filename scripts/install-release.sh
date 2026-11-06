@@ -23,10 +23,10 @@ executables() {
 }
 root=${XDG_DATA_HOME:-$HOME/.local/share}/razor
 target=$root/$RAZOR_VERSION
+mkdir -p "$root"
+stage=$(mktemp -d "$root/.install.XXXXXX")
+trap 'rm -rf "$stage"' EXIT HUP INT TERM
 if [ ! -d "$target" ]; then
-  mkdir -p "$root"
-  stage=$(mktemp -d "$root/.install.XXXXXX")
-  trap 'rm -rf "$stage"' EXIT HUP INT TERM
   archive=razor-$RAZOR_VERSION-$platform.tar.gz
   curl -fsSL "$RAZOR_BASE_URL/$archive" -o "$stage/archive"
   curl -fsSL "$RAZOR_BASE_URL/$archive.sha256" -o "$stage/checksum"
@@ -46,7 +46,11 @@ if [ ! -d "$target" ]; then
 fi
 if [ "${RAZOR_SELECT:-1}" = 1 ]; then
   previous=$(readlink "$root/current" 2>/dev/null || echo "$RAZOR_VERSION")
-  ln -sfn "$RAZOR_VERSION" "$root/current"
+  ln -s "$RAZOR_VERSION" "$stage/current"
+  case "$platform" in
+    darwin-*) mv -fh "$stage/current" "$root/current" ;;
+    linux-*) mv -fT "$stage/current" "$root/current" ;;
+  esac
   mkdir -p "$HOME/.local/bin"
   first=0
   if [ ! -e "$HOME/.local/bin/razor" ] && [ ! -L "$HOME/.local/bin/razor" ]; then

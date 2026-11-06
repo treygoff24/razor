@@ -51,9 +51,7 @@ pub(super) fn folders(dir: &Path, root: &Path) -> Folders {
 /// expiry, each newest first) and the descriptions of facts and notes, newest first, then how
 /// many more there are.
 pub(super) fn page(folders: &Folders) -> Result<(Option<String>, String, String), Error> {
-    let today = jiff::Zoned::now().date().to_string();
-    let state = read(&folders.current[0].join("state.md"), "state").ok();
-    let state = state.filter(|f| !expired(&f.file, &today));
+    let state = state(folders);
     let standing = |f: &Found| Some(usize::from(header(&f.file, "expires").is_none()));
     let rulings = best(folders, KEEP, |id| kind(id) == "ruling", standing)?.0;
     let line = |f: &Found| {
@@ -62,8 +60,14 @@ pub(super) fn page(folders: &Folders) -> Result<(Option<String>, String, String)
         format!("- {}{said} ({})", until.unwrap_or_default(), f.id)
     };
     let rulings = fit(rulings.iter().map(line), RULINGS).0;
-    let state = state.map(|f| split(&f.file).1.to_owned());
     Ok((state, rulings, known(folders, KNOWN)?))
+}
+
+/// The current state note, if present and unexpired.
+pub(super) fn state(folders: &Folders) -> Option<String> {
+    let found = read(&folders.current[0].join("state.md"), "state").ok()?;
+    (!expired(&found.file, &jiff::Zoned::now().date().to_string()))
+        .then(|| split(&found.file).1.to_owned())
 }
 
 /// The descriptions of facts and notes, newest first, in at most `most` lines and bytes, then a

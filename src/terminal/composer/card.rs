@@ -8,9 +8,11 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
 impl Composer {
     /// The full card's height for its width: three to ten rows of words and its frame.
-    pub fn rows(&self, width: u16, height: u16) -> u16 {
+    pub fn rows(&self, app: &App, width: u16, height: u16) -> u16 {
         let cap = (height / 4).clamp(3, 10) as usize;
-        self.height(width.saturating_sub(8) as usize, cap).max(3) as u16 + 3
+        self.content_height(app, width.saturating_sub(8) as usize, cap)
+            .max(3) as u16
+            + 3
     }
 
     /// The full card: its border label, the words or a hint, and the dock of chips and buttons.
@@ -92,9 +94,13 @@ impl Composer {
         let chip = status.then(|| width(&status::chip(app, 40).1) + 5);
         // The Image chip counts the images waiting to go, as ` ⎘ Image · 2 `.
         let waiting = app.composer.active_images().count();
-        let count = match waiting {
-            0 => String::new(),
-            n => format!("· {n} "),
+        let count = if app.loading_images > 0 {
+            "· preparing… ".to_string()
+        } else {
+            match waiting {
+                0 => String::new(),
+                n => format!("· {n} "),
+            }
         };
         let need = |words: bool, n: usize| {
             [8, 23 + width(&count)][usize::from(words)] + width(&choice[n]) + 1

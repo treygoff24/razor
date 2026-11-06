@@ -1,7 +1,7 @@
 //! The split while a child is addressed: the main session paused on the left from 80 columns,
 //! and on the right the child's ancestry, identity, transcript, children and compact composer.
 //! With motion on, a clicked card grows into the split, and shrinks back to it after.
-use super::motion::{ease_out, progress};
+use super::motion::{Moving, ease_out, progress};
 use super::tools::rim::Rim;
 use super::view::{self, Action, Hit, PHONE, Question};
 use super::{App, cards, gauge, picker, text::*, tools};
@@ -39,14 +39,17 @@ pub fn start(app: &mut App, old: Option<SessionId>, now: u64) -> Option<()> {
     let card = card(app, &app.hits, &child).filter(|_| opening);
     (card.is_some() == opening).then_some(())?;
     // On from the same openness, the other way.
-    let open = was.filter(|m| m.child == child).and_then(|m| m.open(now));
+    let open = match was {
+        Some(Moving::Card(m)) if m.child == child => m.open(now),
+        _ => None,
+    };
     let open = open.unwrap_or(f64::from(u8::from(!opening)));
     let (part, ms) = match opening {
         true => (1. - (1. - open).cbrt(), 420.),
         false => (1. - open.cbrt(), 280.),
     };
     let at = now - (part * ms) as u64;
-    app.moving = Some(Move { child, at, card });
+    app.moving = Some(Moving::Card(Move { child, at, card }));
     None
 }
 
@@ -54,7 +57,10 @@ pub fn start(app: &mut App, old: Option<SessionId>, now: u64) -> Option<()> {
 /// shrinking from the right half to the child's card where this frame draws it. Some while it
 /// moves, so the cursor hides; nothing under it takes a click.
 pub fn closing(app: &mut App, b: &mut Buffer, now: u64, hits: &mut Vec<Hit>) -> Option<()> {
-    let child = app.moving.as_ref().filter(|_| !app.split())?.child.clone();
+    let Some(Moving::Card(m)) = app.moving.as_ref().filter(|_| !app.split()) else {
+        return None;
+    };
+    let child = m.child.clone();
     let inside = frame(app, b, b.area, now, hits)?;
     view::transcript(app, b, inside, &child, now, hits);
     hits.retain(|(r, _)| !r.intersects(inside));
@@ -75,7 +81,7 @@ pub fn draw(
 ) -> Option<(u16, u16)> {
     let focus = app.focus.clone()?;
     let wide = area.width >= 80;
-    if wide || app.moving.is_some() {
+    if wide || matches!(app.moving, Some(Moving::Card(_))) {
         let mut left = area;
         left.width /= 1 + u16::from(wide);
         main(app, b, left, now, hits);
@@ -89,8 +95,8 @@ pub fn draw(
     }
     let phone = right.width < PHONE;
     let card = match phone {
-        true => app.composer.phone_rows(right.width, right.height),
-        false => app.composer.rows(right.width, right.height),
+        true => app.composer.phone_rows(app, right.width, right.height),
+        false => app.composer.rows(app, right.width, right.height),
     };
     let stack = view::band(app, &question, right.width, right.height, now);
     let stack = stack.min(right.height.saturating_sub(card));
@@ -148,7 +154,9 @@ fn half(area: Rect) -> Rect {
 // in the child's light, still while it moves, around a cleared inside, which it returns. None,
 // and the move is over, once it lands or its card is gone.
 fn frame(app: &mut App, b: &mut Buffer, area: Rect, now: u64, hits: &[Hit]) -> Option<Rect> {
-    let m = app.moving.as_ref()?;
+    let Some(Moving::Card(m)) = app.moving.as_ref() else {
+        return None;
+    };
     let child = m.child.clone();
     let Some((open, card)) = m.open(now).zip(m.card.or_else(|| card(app, hits, &child))) else {
         app.moving = None;

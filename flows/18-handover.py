@@ -1,4 +1,5 @@
 """On-demand handover uses the same rebuild and preserves the complete old ask."""
+import base64
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ from apns import apple
 from claude import reply
 from clock import wall_clock
 from driver import REPLIES, Reply, flow
+from mcp import PNG
 from responses import PLAIN, call, done, response
 import server
 
@@ -399,9 +401,9 @@ key = {json.dumps(str(apns.key))}
 
 # Both native routes preserve their structured overflow reason. The first failed request
 # rebuilds with the last note; two rejections pause with the rebuilt byte size, without a loop.
+refusal = Reply(json.dumps({"error": {"type": "invalid_request_error",
+    "code": "context_length_exceeded", "message": "prompt is too long: 201000 tokens > 200000 maximum"}}).encode(), status=400)
 for model in ("opus", "gpt-6.1-sol"):
-    refusal = Reply(json.dumps({"error": {"type": "invalid_request_error",
-        "code": "context_length_exceeded", "message": "prompt is too long: 201000 tokens > 200000 maximum"}}).encode(), status=400)
     for again in (False, True):
         success = reply(text="flow done") if model == "opus" else done()
         with flow([refusal, refusal if again else success], model=model, config=PLAIN) as f:
@@ -420,6 +422,58 @@ for model in ("opus", "gpt-6.1-sol"):
             else:
                 assert answer["message"] == "flow done", answer
             assert len(list(f.requests.glob("[0-9]*.body"))) == 2, "overflow retried in a loop"
+
+# Non-image native history can still exceed Razor's own cap and rebuild exactly once.
+large_reasoning = "x" * (34 << 20)
+replies = [response([{"type": "reasoning", "id": f"large_{n}", "summary": [],
+                     "encrypted_content": large_reasoning},
+                    call("read", json.dumps({"path": "small.txt"}), f"large_call_{n}")])
+           for n in range(2)]
+with flow(replies + [done()], model="sol", config=PLAIN) as f:
+    (f.cwd / "small.txt").write_text("ok")
+    result = f.run("--print=json", "Keep this request through the cap.", timeout=180)
+    assert result.returncode == 0, result.stderr
+    answer = json.loads(result.stdout)
+    entries = list(f.record(answer["session"]))
+    rebuilds = [e for e in entries if e["kind"] == "rebuild"]
+    assert len(rebuilds) == 1 and rebuilds[0]["trigger"] == "overflow", rebuilds
+    requests = sorted(f.requests.glob("[0-9]*.body"))
+    assert len(requests) == 3 and requests[1].stat().st_size > 32 << 20, requests
+    assert requests[2].stat().st_size < 1 << 20, requests[2].stat().st_size
+
+# Responses retain the newest image bytes and spill the oldest in stable steps, without a rebuild.
+batches = [["large.png"] * 4, ["small.png"], ["small.png"], ["large.png"] * 4]
+replies = [response([call("read", json.dumps({"path": path}), f"image_{n}_{i}")
+                     for i, path in enumerate(batch)]) for n, batch in enumerate(batches)]
+with flow(replies + [done()], model="sol", config=PLAIN) as f:
+    small = base64.b64decode(PNG)
+    (f.cwd / "small.png").write_bytes(small)
+    (f.cwd / "large.png").write_bytes(small.ljust(7_000_000, b"\0"))
+    result = f.run("--print=json", "Inspect the images and keep this request.", timeout=120)
+    assert result.returncode == 0, result.stderr
+    answer = json.loads(result.stdout)
+    entries = list(f.record(answer["session"]))
+    assert not [e for e in entries if e["kind"] == "rebuild"], "images caused a rebuild"
+    outputs = [json.loads(e["output"]) for e in entries if e["kind"] == "result"]
+    paths = [Path(output["images"][0]["path"]) for output in outputs]
+    assert len(paths) == 10 and all(p.is_file() for p in paths), paths
+    requests = sorted(f.requests.glob("[0-9]*.body"))
+    assert len(requests) == 5, requests
+    def images(path):
+        content = [c for item in json.loads(path.read_bytes())["input"]
+                   for c in item.get("content", [])]
+        spills = [c["text"] for c in content if "<persisted-output>" in c.get("text", "")]
+        inline = [c["image_url"] for c in content if c.get("type") == "input_image"]
+        return spills, inline
+    first, between, later, final = [images(p) for p in requests[1:]]
+    assert all(sum(len(url.split(",", 1)[1]) for url in inline) <= 32 << 20
+               for _, inline in (first, between, later, final)), "image budget exceeded"
+    assert len(first[0]) == 1 and str(paths[0]) in first[0][0], first[0]
+    assert "read image" in first[0][0] and "pixels" in first[0][0] and "7000000 bytes" in first[0][0]
+    assert first[0] == between[0] == later[0], "small images moved the cutoff"
+    assert len(final[1]) == 3, "newest images did not remain inline"
+    assert len(final[0]) == 7 and all(str(path) in spill for path, spill in zip(paths, final[0])), final[0]
+    assert all(p.stat().st_size < 64 << 20 for p in requests), "request cap exceeded"
 
 # A cell's handover uses the same path on GPT and Claude, including its sentence result.
 for model in ("opus", "sol"):

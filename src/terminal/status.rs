@@ -454,7 +454,8 @@ impl Status<'_> {
     }
 }
 
-fn age(ms: u64) -> String {
+/// `42s`, `6m`, `2h`.
+pub(super) fn age(ms: u64) -> String {
     match ms / 1000 {
         seconds @ 0..60 => format!("{seconds}s"),
         seconds @ 60..3600 => format!("{}m", seconds / 60),

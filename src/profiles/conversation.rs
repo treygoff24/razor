@@ -7,7 +7,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::{Component, Path, PathBuf},
 };
 use tokio::io::AsyncReadExt;
@@ -16,6 +16,78 @@ use tokio::io::AsyncReadExt;
 pub(crate) const IMAGE: u64 = 10 << 20;
 /// An upload with less than this left of Google's 48 hours is made again.
 const HOUR: Millis = 3_600_000;
+const INLINE_IMAGES: usize = 32 << 20;
+const IMAGE_STEP: usize = 8 << 20;
+
+struct ImageProjection {
+    files: VecDeque<Option<ImageFile>>,
+    cutoff: usize,
+    offset: usize,
+}
+
+struct ImageFile {
+    path: PathBuf,
+    metadata: std::fs::Metadata,
+}
+
+impl ImageFile {
+    async fn open(part: &Value, dir: &Path) -> Option<Self> {
+        let path = Path::new(part["path"].as_str()?);
+        if !path.components().all(|c| matches!(c, Component::Normal(_))) {
+            return None;
+        }
+        let path = tokio::fs::canonicalize(dir.join(path)).await.ok()?;
+        if !path.starts_with(tokio::fs::canonicalize(dir).await.ok()?) {
+            return None;
+        }
+        let metadata = tokio::fs::metadata(&path).await.ok()?;
+        (metadata.is_file() && metadata.len() <= IMAGE).then_some(Self { path, metadata })
+    }
+
+    fn encoded(&self) -> usize {
+        (self.metadata.len() as usize).div_ceil(3) * 4
+    }
+
+    async fn unchanged(&self) -> bool {
+        tokio::fs::metadata(&self.path).await.is_ok_and(|m| {
+            m.len() == self.metadata.len() && m.modified().ok() == self.metadata.modified().ok()
+        })
+    }
+
+    async fn preview(&self, profile: &Profile) -> Option<String> {
+        let mut head = Vec::new();
+        tokio::fs::File::open(&self.path)
+            .await
+            .ok()?
+            .take(1 << 18)
+            .read_to_end(&mut head)
+            .await
+            .ok()?;
+        if !self.unchanged().await {
+            return None;
+        }
+        let pixels = crate::protocol::image_pixels(&head, self.metadata.len() as usize)
+            .map_or_else(
+                || "dimensions unavailable".to_string(),
+                |(w, h)| format!("{w} x {h} pixels"),
+            );
+        let name = self.path.file_name()?.to_string_lossy();
+        let source = if name.starts_with("gen-") {
+            "generated"
+        } else if name.starts_with("read-") {
+            "read"
+        } else if name.starts_with("mcp-") {
+            "MCP result"
+        } else {
+            "attached"
+        };
+        let preview = format!("{source} image; {pixels}; {} bytes", self.metadata.len());
+        Some(profile.say(
+            "spill",
+            &[("path", &self.path.to_string_lossy()), ("text", &preview)],
+        ))
+    }
+}
 
 /// The wire input of one native conversation. `prefix` is the `razor_prefix` descriptor: the
 /// opening input and top-level tools, recorded with the first response and never re-rendered.
@@ -47,6 +119,9 @@ fn named(tool: &Value) -> Option<&str> {
 }
 
 impl Conversation {
+    pub(crate) fn is_chat(&self) -> bool {
+        self.chat.is_some()
+    }
     /// A fresh fixed prefix from `tools` and the profile's prompt; code mode puts declarations
     /// in an addition, plain mode at the top level. The first completed response records it.
     pub(crate) fn new(profile: &Profile, tools: Vec<Value>) -> Self {
@@ -337,6 +412,27 @@ impl Conversation {
             ),
         };
         let uploads = self.uploads();
+        let mut images = VecDeque::new();
+        if self.chat.is_none() {
+            for part in items
+                .iter()
+                .flat_map(|i| i["content"].as_array().into_iter().flatten())
+            {
+                if part["type"] == "razor_image" {
+                    images.push_back(ImageFile::open(part, dir).await);
+                }
+            }
+        }
+        let total = images
+            .iter()
+            .flatten()
+            .fold(0usize, |n, image| n.saturating_add(image.encoded()));
+        let cutoff = total.saturating_sub(INLINE_IMAGES).div_ceil(IMAGE_STEP) * IMAGE_STEP;
+        let mut images = ImageProjection {
+            files: images,
+            cutoff,
+            offset: 0,
+        };
         // The envelope is a nonempty object; its items are written after its last field.
         body.pop();
         let tier = match (speed, &self.chat) {
@@ -362,7 +458,7 @@ impl Conversation {
             if n > 0 {
                 body.push(b',');
             }
-            let shown = self.shown(item, profile, dir, &uploads).await;
+            let shown = self.shown(item, profile, dir, &uploads, &mut images).await;
             // Plain JSON values with string keys always serialize.
             let _ = serde_json::to_writer(&mut body, shown.as_ref().unwrap_or(item));
         }
@@ -379,6 +475,7 @@ impl Conversation {
         profile: &Profile,
         dir: &Path,
         uploads: &HashMap<&str, &Value>,
+        images: &mut ImageProjection,
     ) -> Option<Value> {
         let media = |p: &Value| matches!(p["type"].as_str(), Some("razor_image" | "razor_video"));
         item["content"].as_array()?.iter().find(|p| media(p))?;
@@ -400,10 +497,43 @@ impl Conversation {
             if part["type"] != "razor_image" {
                 continue;
             }
-            *part = match data_url(part, dir).await {
-                Some(url) if chat => json!({"type": "image_url", "image_url": {"url": url}}),
-                Some(url) => json!({"type": "input_image", "image_url": url}),
-                None => {
+            let image = if chat {
+                None
+            } else {
+                images.files.pop_front().flatten()
+            };
+            let spill = image.as_ref().is_some_and(|image| {
+                let start = images.offset;
+                images.offset = images.offset.saturating_add(image.encoded());
+                start < images.cutoff
+            });
+            let url = if !spill && (chat || image.is_some()) {
+                data_url(part, dir).await
+            } else {
+                None
+            };
+            let stable = match &image {
+                Some(image) => {
+                    image.unchanged().await
+                        && url.as_ref().is_some_and(|url| {
+                            url.rsplit_once(',')
+                                .is_some_and(|(_, data)| data.len() == image.encoded())
+                        })
+                }
+                None => chat,
+            };
+            let preview = if spill {
+                image.as_ref().unwrap().preview(profile).await
+            } else {
+                None
+            };
+            *part = match (url.filter(|_| stable), preview) {
+                (_, Some(text)) => json!({"type": "input_text", "text": text}),
+                (Some(url), None) if chat => {
+                    json!({"type": "image_url", "image_url": {"url": url}})
+                }
+                (Some(url), None) if !spill => json!({"type": "input_image", "image_url": url}),
+                _ => {
                     let path = dir.join(part["path"].as_str().unwrap_or_default());
                     let text = profile.say("image_gone", &[("path", &path.to_string_lossy())]);
                     json!({"type": if chat { "text" } else { "input_text" }, "text": text})

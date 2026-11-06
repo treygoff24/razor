@@ -46,7 +46,6 @@ pub(super) enum Agent {
     Wait {
         timeout_ms: Option<u64>,
     },
-    #[serde(alias = "progress")]
     Headline {
         text: String,
     },

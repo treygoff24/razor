@@ -108,7 +108,8 @@ impl Turn {
                 if id != first.0 {
                     text.push_str(TEXT_BREAK);
                 }
-                let kept = head(&part, room.saturating_sub(text.len()));
+                let part = crate::record::reply(&part).text;
+                let kept = head(part, room.saturating_sub(text.len()));
                 truncated = kept.len() < part.len() || text.len() > room;
                 text.push_str(kept);
                 if truncated {

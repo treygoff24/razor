@@ -2,14 +2,16 @@
 
 mod cursor;
 mod rebuild;
+mod reply;
 mod runs;
 mod search;
 mod summary;
 mod text;
 pub(crate) use cursor::Summaries;
+pub(crate) use reply::{Hold, reply, shown};
 pub use search::backfill;
 pub(crate) use search::search;
-pub(crate) use summary::{ChildSummary, Meeting, MeetingState, Summary, ask, preview};
+pub(crate) use summary::{ChildSummary, Meeting, MeetingState, Summary, ask, preview, target};
 pub(crate) use text::{call_line, calls_left_out, handover, heard, interrupted, length};
 
 use crate::protocol::{Body, Child, Entry, EntryId, JobEvent, Native, SessionId, Thread, now};
@@ -33,6 +35,7 @@ pub(crate) const STOPPED: &str = include_str!("text/stopped.md");
 
 /// What `recall` answers for a thinking entry, in any session (RULES.md 16).
 pub(crate) const REASONING: &str = include_str!("../controller/session/reasoning.md");
+pub(crate) const UPKEEP: &str = include_str!("text/upkeep.md");
 
 /// The one separator between a turn's closing Text blocks, also used when bounding reports.
 pub(crate) const TEXT_BREAK: &str = "\n\n";
@@ -189,6 +192,7 @@ impl Record {
             at: now(),
             body,
             native,
+            suggestion: None,
         };
         let mut line = serde_json::to_string(&entry)
             .map_err(|e| io("serializing an entry")(std::io::Error::other(e)))?;

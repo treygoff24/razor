@@ -4,7 +4,7 @@ use super::{
     App, children, composer, gauge, motion, panel, picker, questions, split, status, strip,
     text::*, transcript,
 };
-use crate::protocol::{AgentView, Ask, Body, EntryId, Input, MailId, SessionId, State};
+use crate::protocol::{AgentView, Ask, Body, EntryId, Input, MailId, Quit, SessionId, State};
 use composer::{completion, emoji, shortcodes};
 use ratatui::{
     buffer::Buffer,
@@ -34,6 +34,10 @@ pub(super) enum Action {
     New,
     /// The agents list's right edge: a press starts widening or narrowing the list.
     Edge,
+    /// The agents list's ⤢: opens the overview, as F3 does.
+    Overview,
+    /// The agents list's ‹: closes it, as F2 does.
+    Close,
     /// A resident's "+ New thread" row, by its home session: aims the composer at a fresh thread.
     Thread(SessionId),
     /// A project row of the new-agent chooser, or one of its servers, by server and folder as
@@ -107,15 +111,19 @@ pub(super) fn draw(app: &mut App, b: &mut Buffer, area: Rect, now: u64) -> Optio
     }
     app.shown_ask = question.as_ref().map(|q| q.2.clone());
     let mut hits = Vec::new();
-    let mut cursor = if app.list.open || app.list.area.is_some() {
-        super::agents::frame(app, b, area, question, now, &mut hits)
-    } else {
-        match app.split() {
-            true => split::draw(app, b, area, question, now, &mut hits),
-            false => normal(app, b, area, question, now, &mut hits),
+    // Under the overview at rest nothing else is drawn.
+    let mut cursor = match () {
+        _ if super::agents::covers(app, now) => None,
+        _ if app.list.open || app.list.area.is_some() => {
+            super::agents::frame(app, b, area, question, now, &mut hits)
         }
+        _ if app.split() => split::draw(app, b, area, question, now, &mut hits),
+        _ => normal(app, b, area, question, now, &mut hits),
     };
     if split::closing(app, b, now, &mut hits).is_some() {
+        cursor = None;
+    }
+    if super::agents::overlay(app, b, now, &mut hits) {
         cursor = None;
     }
     super::audio::controls(app, b, &mut hits);
@@ -127,7 +135,10 @@ pub(super) fn draw(app: &mut App, b: &mut Buffer, area: Rect, now: u64) -> Optio
     if app.picker.is_some() || app.panel.is_some() {
         cursor = None;
     }
-    match app.picker.is_some() {
+    if app.goto.is_some() {
+        cursor = super::goto::draw(app, b, area, now);
+    }
+    match app.picker.is_some() || app.goto.is_some() {
         true => app.links.clear(),
         false => bare(b, &mut app.links),
     }
@@ -209,8 +220,8 @@ pub(super) fn normal(
     let (y, mid) = (area.y + bar, area.height - bar);
     let band = band(app, &question, width, area.height, now).min(mid);
     let card = match phone {
-        true => app.composer.phone_rows(width, area.height),
-        false => app.composer.rows(width, area.height),
+        true => app.composer.phone_rows(app, width, area.height),
+        false => app.composer.rows(app, width, area.height),
     };
     let card = card.min(mid - band);
     let rows = mid - band - card;
@@ -433,6 +444,7 @@ pub(super) fn transcript(
         t.name.clone_from(&a.name);
     }
     t.motion(motion, app.presence);
+    t.frame(app.pictures.cell, app.pictures.frame);
     let mut acts = t.draw(b, r, &model, working, now, &mut app.links);
     if app.columns >= 120 {
         t.map(b, r, &mut acts);
@@ -500,29 +512,7 @@ pub(super) fn stack(
     let ruled = ruled || lamps || recap > 0 || app.columns < PHONE || unanswered(app).is_some();
     let rule = if ruled { "▁" } else { " " }.repeat(r.width as usize);
     put(b, r.x, r.y, &rule, r.width, style(GRAY_DIM, GLASS));
-    let notice = app.notice.as_ref().filter(|(_, until)| now < *until);
-    let notice = notice.map(|(sentence, _)| sentence.as_str());
-    let quit = super::bindings::text(
-        app,
-        "Press <global.quit> again to quit. <composer.back> to stay. The conversation keeps running.",
-    );
-    let said = app.quitting.then_some(quit.as_str()).or(notice);
-    // Once any reader skipped a line, the person is told for the rest of the terminal's life,
-    // as written: the command is lowercase.
-    let newer = app.api.as_ref().is_some_and(super::api::Api::newer);
-    let said = said.map(str::to_uppercase);
-    if let Some(sentence) = said.or_else(|| newer.then(|| NEWER.into())) {
-        fill(b, Rect::new(r.x, r.y, r.width, 1), style(DATA, BEZEL));
-        let (bold, room) = (bold(WHITE, BEZEL), r.width.saturating_sub(2));
-        put(
-            b,
-            r.x + 1,
-            r.y,
-            &clip(&sentence, room.max(8) as usize),
-            room,
-            bold,
-        );
-    }
+    notice(app, b, r, now);
     let strip = strip::rows(app, now);
     let below = r.bottom().saturating_sub(strip);
     let mut y = r.y + 1;
@@ -613,6 +603,35 @@ pub(super) fn stack(
     composer::draw_images(&app.composer, b, images, hits);
     super::recap::draw(app, b, Rect::new(r.x, below - recap, r.width, recap), now);
     strip::draw(app, b, Rect::new(r.x, below, r.width, strip), now, hits);
+}
+
+/// A notice on `r`'s first row, in capitals on the bezel: the quit a second Ctrl-C makes, the
+/// latest notice, or a newer server's warning; nothing without one.
+pub(super) fn notice(app: &App, b: &mut Buffer, r: Rect, now: u64) {
+    let notice = app.notice.as_ref().filter(|(_, until)| now < *until);
+    let notice = notice.map(|(sentence, _)| sentence.as_str());
+    let then = match app.ui.quit {
+        Quit::Detach => "quit. <composer.back> to stay. The conversation keeps running.",
+        Quit::End => "end this session. <composer.back> to stay. /background leaves it running.",
+    };
+    let quit = super::bindings::text(app, &format!("Press <global.quit> again to {then}"));
+    let said = app.quitting.then_some(quit.as_str()).or(notice);
+    // Once any reader skipped a line, the person is told for the rest of the terminal's life,
+    // as written: the command is lowercase.
+    let newer = app.api.as_ref().is_some_and(super::api::Api::newer);
+    let said = said.map(str::to_uppercase);
+    if let Some(sentence) = said.or_else(|| newer.then(|| NEWER.into())) {
+        fill(b, Rect::new(r.x, r.y, r.width, 1), style(DATA, BEZEL));
+        let (bold, room) = (bold(WHITE, BEZEL), r.width.saturating_sub(2));
+        put(
+            b,
+            r.x + 1,
+            r.y,
+            &clip(&sentence, room.max(8) as usize),
+            room,
+            bold,
+        );
+    }
 }
 
 // The person's newest message, when a turn ended after it with no reply and the session is

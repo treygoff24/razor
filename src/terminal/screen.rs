@@ -14,21 +14,41 @@ use ratatui::{Terminal, backend::CrosstermBackend, buffer::Buffer, layout::Rect}
 use std::{collections::BTreeMap, io::Write, sync::Arc};
 
 pub fn draw(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    terminal: &mut Terminal<CrosstermBackend<super::writer::Writer>>,
     app: &mut App,
 ) -> Result<(), Error> {
     app.next.take();
+    app.pictures.frame += 1;
     let backend = terminal.backend_mut();
     crossterm::execute!(backend, crossterm::terminal::BeginSynchronizedUpdate)
         .map_err(Error::Terminal)?;
     app.transcripts.values_mut().for_each(|t| t.undraw());
+    let mut pictures = Vec::new();
     let drawn = terminal.draw(|frame| {
         let (area, now) = (frame.area(), now());
         if let Some((x, y)) = view::draw(app, frame.buffer_mut(), area, now) {
             frame.set_cursor_position((x, y));
         }
+        // A cleared screen keeps its fallback until its pictures have been sent again. Keep
+        // the held ids until draw succeeds, so error cleanup can still delete them.
+        if app.painted.0.area == area {
+            pictures = super::pictures::place(app, frame.buffer_mut());
+        }
     });
-    let mut drawn = drawn.map(|frame| links(&app.links, &mut app.painted, frame.buffer));
+    // A new area was cleared whole, pictures included; its cells' pixels may differ too.
+    let mut drawn = drawn.map(|frame| {
+        let cleared = app.painted.0.area != frame.buffer.area;
+        let mut bytes = links(&app.links, &mut app.painted, frame.buffer);
+        if cleared {
+            pictures = app.pictures.forget().into_bytes();
+        }
+        bytes.extend(pictures);
+        if cleared && app.pictures.cell != super::pictures::cell() {
+            app.pictures.cell = super::pictures::cell();
+            app.next.at(now());
+        }
+        bytes
+    });
     let title = title(app);
     if let (Ok(bytes), false) = (&mut drawn, title == app.title) {
         bytes.extend(format!("\x1b]2;{title}\x07").bytes());
@@ -77,15 +97,17 @@ fn title(app: &App) -> String {
     title.chars().filter(|c| !c.is_control()).take(64).collect()
 }
 
+/// The program status query, OSC 7501's.
+pub const QUERY: &str = "\x1b]7501;?\x1b\\";
+
 /// What the app tells its terminal through OSC 7501 (the Program Status Protocol): nothing until
-/// the terminal answers the query `Modes::enter` sends; then one OSC 7501 record for the attached
+/// the terminal answers the query the first `Modes::enter` sends; then one OSC 7501 record for the attached
 /// session and one for each live descendant, each written when its bytes change, and every one
 /// cleared when the app drops.
 #[derive(Default)]
 pub struct ProgramStatus {
     /// The terminal answered the query, so it keeps OSC 7501 records.
     pub answered: bool,
-    // Characters of the answer read so far: at most 4,096, the protocol's whole sequence.
     reading: Option<usize>,
     // Each OSC 7501 record's pairs as last written, by its id pair ("" for the attached
     // session's): at most 64, the fewest a terminal keeps, so none Razor still means is evicted.
@@ -260,7 +282,9 @@ pub type Painted = (Buffer, Vec<(Rect, Arc<str>)>);
 /// Raw mode, the alternate screen, paste, mouse, focus and kitty key reports, restored on drop.
 pub struct Modes;
 impl Modes {
-    pub fn enter() -> Result<Self, Error> {
+    /// Enters them and writes `query`: the terminal queries, asked once a run, since a second
+    /// answer would read as typed keys.
+    pub fn enter(query: &str) -> Result<Self, Error> {
         crossterm::terminal::enable_raw_mode().map_err(Error::Terminal)?;
         let modes = Self;
         let flags = Flags::DISAMBIGUATE_ESCAPE_CODES | Flags::REPORT_EVENT_TYPES;
@@ -272,7 +296,8 @@ impl Modes {
             crossterm::style::Print("\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h"),
             term::PushKeyboardEnhancementFlags(flags),
             term::EnableFocusChange,
-            crossterm::style::Print("\x1b[22;2t\x1b]7501;?\x1b\\")
+            crossterm::style::Print("\x1b[22;2t"),
+            crossterm::style::Print(query)
         )
         .map_err(Error::Terminal)?;
         Ok(modes)

@@ -28,7 +28,10 @@ pub fn send(app: &mut App) {
     let Some(id) = app.focus.clone() else {
         return create(app);
     };
-    let (text, images) = (app.composer.text.clone(), app.composer.images_for_send());
+    let (text, images) = (
+        app.composer.text.clone() + &app.composer.image_origins(),
+        app.composer.images_for_send(),
+    );
     let (skill, text) = match completion::skill(app, &text) {
         Some((name, words)) => (Some(name), words),
         None => (None, text),
@@ -271,9 +274,13 @@ pub fn admit_answer(app: &mut App, (id, ask): MailId, answer: Answer) {
         app,
         format!("v1/sessions/{id}/asks/{}", ask.0),
         (body, !words),
-        |app, _| {
+        // Clearing the sent words, still marked as an answer, leaves this session's offer; a
+        // picked option changed no words.
+        move |app, _| {
+            if words {
+                app.edited();
+            }
             (app.history, app.answering) = (None, None);
-            app.edited();
         },
     );
 }
@@ -298,7 +305,12 @@ where
         move |app: &mut App| {
             let sent = app.sending.take().unwrap_or_default();
             match admitted {
-                Ok(v) => then(app, v),
+                Ok(v) => {
+                    if !sent.text.is_empty() {
+                        super::audio::dismiss_failure(app);
+                    }
+                    then(app, v);
+                }
                 Err(e) => {
                     let typed = std::mem::replace(&mut app.composer, sent);
                     merge(app, typed);

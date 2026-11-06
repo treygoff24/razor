@@ -22,17 +22,23 @@ pub async fn opening(profile: &Profile, list: &[String], root: Option<&Path>, s:
 
 `src/config/pack.rs`, `Settings`: a person's file that names no `pack` gets `packs/starter` from `config::INSTALL_DIR` (the one resolution of the binary's folder, made before the runtime starts), else from the source tree the binary was built from, read and layered as any pack (docs/design/packs.md); the lookup is a stat in Settings' own blocking read. A file that names a pack gets that pack alone, and removing the name brings the starter back. With neither folder holding one, there is no pack and no error.
 
-**The starter pack** (`packs/starter/`, text only):
+**The starter pack** (`packs/starter/`, text, besides the scripts two skills run):
 
 | File | What it holds |
 | --- | --- |
 | `config.toml` | `startup = ["persona.md", "razor", "about", "project", "rules.md"]`, with the instruction that a person who changes it copies the list and the two files beside their own file, since a relative path counts from the file naming it; `notify` and `ask` set to `../../scripts/notify.sh`; `speech` set to `../../scripts/speech.py`; `[web]` listing Exa, Parallel and Firecrawl, each verb live only while one of its keys is set (`src/tools/web/mod.rs:83-94`), the model's own web tools otherwise. Every other optional feature is a commented example with one sentence: ntfy for a phone, `play` and `capture` for each platform, model and effort, `memorum`, guards, children, a local chat model, an MCP server, a resident with a schedule, a plugin, the terminal's motion. Each example parses when uncommented. |
 | `persona.md` | Who the agent is to the person: a collaborator who brings judgment and says when it disagrees, in general terms, with nothing personal. |
 | `rules.md` | How it talks and reports, kept apart from what Razor's own prompt already says. |
-| `skills/agent-browser/` | A self-contained guide: every command from agent-browser's own documentation, run by hand against v0.41.0, plus a named browser per agent (`--session "$RAZOR_SESSION"`; the unnamed one is shared by every agent on the machine), covered clicks and `doctor`, less its date-field line, whose `.value` assignment fires neither `input` nor `change`. It credits agent-browser's documentation (Apache-2.0, 2025 Vercel Inc.). There is no pointer to `agent-browser skills`, which the native binary Razor ships lacks. |
+| `skills/agent-browser/` | A self-contained guide: every command from agent-browser's own documentation, run by hand against v0.41.0, plus a browser per agent, named by the `AGENT_BROWSER_SESSION` that `Tools::open` sets to the session's id beside `RAZOR_SESSION` (the unnamed one is shared by every agent on the machine), covered clicks and `doctor`, less its date-field line, whose `.value` assignment fires neither `input` nor `change`. It credits agent-browser's documentation (Apache-2.0, 2025 Vercel Inc.). There is no pointer to `agent-browser skills`, which the native binary Razor ships lacks. |
+| `skills/agent-desktop/` | agent-desktop's own guide, copied unmodified from its upstream at the tag its `UPSTREAM` file names, which matches the shipped binary; the binary prints the same text with `agent-desktop skills get desktop`. |
 | `skills/razor-settings/` | Changing Razor's own settings for the person: the four files, keys, `about.md`, MCP servers, notifications to a phone, residents. |
 | `skills/writing/`, `skills/review/` | Prose a person will read; reviewing a change. |
+| `skills/changing-code/`, `repair/`, `task-design/`, `structural-review/`, `challenge-the-design/` | Changing code: the standard and shared design words, then the procedure for the moment: fixing a bug, designing a change, reviewing structure, questioning a subsystem. |
+| `skills/no-ceremony/`, `writing-for-agents/`, `grilling/`, `claude-goal/` | Honest reporting and process that earns its place; documents an agent reads; questioning a plan round by round; a Claude Code `/goal` condition. |
+| `skills/hillclimb/`, `cross-family-review/`, `codex-prompting/`, `agent-persona/` | Improving a measured number with its `hc` harness; reviewing a finished package with helpers from the other model family; prompting GPT models; writing an agent's persona. |
+| `skills/impeccable/` | Frontend design, copied unmodified from its upstream at the revision its `UPSTREAM` file names, with its license; the NOTICE credits it. |
 | `skills/new-steward/` | Setting up a steward, a resident that decides a project's design, product and size-limit questions for the person: the interview, a charter template, the resident's settings and the paragraph that routes other agents' questions to it. |
+| `skills/residents/` | Choosing and setting up an always-on role: a short interview, the working folder and memory conventions, four worked configs, contact and access policy, and a trial run. |
 
 **The about-you file**, shared with `razor setup` (docs/design/setup.md): `$RAZOR_HOME/about.md`, plain Markdown, first line `# About <name>`, then free lines. Setup writes it, never inside the pack. A pack cannot name it by path: a pack's relative paths count from the pack and `~/` from the home folder (`parse`), and neither reaches `$RAZOR_HOME` when it is not `~/.razor`. Hence the word.
 
@@ -41,7 +47,7 @@ pub async fn opening(profile: &Profile, list: &[String], root: Option<&Path>, s:
 1. The person's file names no pack, so Settings reads `<install>/packs/starter` (a release) or `<checkout>/packs/starter` (built from source).
 2. The starter's `config.toml` sits beneath the person's file; its relative paths count from the pack, so `../../scripts/` is the bundled programs in a checkout and in a release, which keeps the source layout.
 3. A conversation opens with persona.md, Razor's own text, `about.md` when it exists, the project's files, then rules.md: 5,018 characters with a two-line `about.md`.
-4. Its first input lists the starter's five skills with descriptions; that line is how an agent learns agent-browser is there, so no other startup text is added.
+4. Its first input lists the starter's skills with descriptions. Razor's own text (`data/razor.md`) also names agent-browser and agent-desktop, the programs that ship beside the binary, says when to use each and points to their skills, since the skill list alone did not make agents aware of them (Trey, 2026-11-06: "update the Razor system prompt to let agents know about agent browser and agent desktop, because I don't think they're aware of it right now, that it comes in the harness").
 5. Web verbs appear for each verb with a provider key in the server's environment (setup's `keys.toml`); without keys the model keeps its own web tools.
 6. Speech runs the bundled program; with no key the reply's ▶ and an agent's voice note are refused with the setup sentence, as an install with no `speech` refuses today.
 7. A root's note to the person goes to the inbox, then through `notify` to the desktop.

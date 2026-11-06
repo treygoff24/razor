@@ -264,7 +264,7 @@ razor --version
 
 **Does.**
 - With neither `--resume` nor `--continue`, it creates a session with the message. `--resume ID` admits the message to that session. `--continue` lists sessions with this `cwd`, limit 1, then admits the message to that one. `--model` or `--effort` with either is refused in the slice.
-- It attaches with `after` set to its input's id minus one, so the stream starts with `attached` and then its own `input`.
+- Before admitting input, it subscribes with a cursor beyond the record, skipping previous turns. In `stream` mode it prints `attached`, then lines from its own `input` onward; any lines arriving between subscription and admission are skipped.
 - It reads until the first `turn_end` whose `inputs` holds its input's id. That turn is the one that answered it, whether the input opened it, was taken at a tool boundary of a turn already running, or was carried by a rebuild.
 
 **Writes.**
@@ -283,7 +283,7 @@ razor --version
 
 ## Data flow
 
-1. `razor --print "…"` finds or starts `razor serve` and posts the message.
+1. `razor --print "…"` finds or starts `razor serve`, creates or selects a session, subscribes to its live stream, then posts the message.
 2. The API calls `create` or `admit`. The session's task appends the `Input`, whose line is in the file before anything else happens, and sends it to the bridge, opening a conversation first if none is open.
 3. The bridge feeds the SDK's streaming `query`, and maps each SDK message to a line. The task appends text, thinking, calls and results as entries with their native marker and publishes each; deltas are published, never appended.
 4. Before any tool runs, the `PreToolUse` hook waits for `Admitted`, which the task sends once the `Call` is appended.

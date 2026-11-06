@@ -110,7 +110,7 @@ with flow(replies,
         t.send("\x15/name " + "x" * 65 + "\r")
         t.shown("A NAME IS ONE LINE OF 1 TO 64 CHARACTERS.")
         assert ask("/sessions?resident=ember&jobs=false&limit=1")[0]["name"] == "tc-six"
-        t.send("\x1b[D")
+        t.send("`h")  # the prefix and h give the list the keys
         start(lambda: t.send("jn"), 7, "tc-seven")
         # The resident's block folds and opens again.
         t.click("▾ ○ ember")
@@ -119,7 +119,7 @@ with flow(replies,
         t.shown("+ New thread", "tc-six", "tc-seven")
         # Every arrow press lands on a drawn mark, up past the resident: its fold is no stop of its own.
         t.click("└ tc-seven")
-        t.send("\x1b[D")
+        t.send("`h")
         for _ in range(13):
             t.send("k")
             t.pump(0.3)

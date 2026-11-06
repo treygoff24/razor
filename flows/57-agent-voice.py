@@ -28,6 +28,24 @@ def restart(f, home):
     assert f.run("devices").returncode == 0
 
 
+# The first key can precede the asynchronous audio settings: it must still select a playable
+# terminal, while a machine without a player must leave voice notes on the phone.
+for player in ([], ["/bin/true"]):
+    with flow([], model="sol", config=f"play = {json.dumps(player)}\n") as f:
+        server.start(f)
+        made = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+        selected = lambda: server.post(f, "/voice/reserve", {"characters": 1, "requested": True}).get("terminal")
+        with Terminal(f, "--resume", made) as t:
+            t.shown("Message the agent")
+            t.send("r")
+            t.shown("❯ r")
+            if player:
+                wait(lambda: str(selected()).startswith(str(t.pid) + "-"))
+            else:
+                t.pump(1)
+                assert selected() is None
+
+
 scratch = Path(tempfile.mkdtemp(prefix="voice-program-"))
 program = scratch / "speech.py"
 player, played = scratch / "play.py", scratch / "played"
@@ -76,8 +94,11 @@ endpoint = "{apple_server.url}"
 [push.development]
 key_id = "FLOWKEY48"
 key = {json.dumps(str(apple_server.key))}
+[ui.keys.composer]
+clear = []
 '''
-    # PLAIN opens a TOML table: machine settings must precede it.
+    # PLAIN opens a TOML table: machine settings must precede it. The keys typed below as
+    # activity stay in the draft, and Ctrl-C quits past them with the clear key unbound.
     config = config.replace(PLAIN,"")+PLAIN
     with flow(replies,model="sol",config=config,env={"VOICE_RUNS":str(scratch/"runs"),
               "VOICE_MP3":str(REPLIES/"voice.mp3")}) as f:
@@ -300,7 +321,7 @@ key = {json.dumps(str(apple_server.key))}
             (other/name).write_bytes((home/name).read_bytes())
         beta = replace(f,env={**f.env,"RAZOR_HOME":str(other)})
         assert beta.run("devices").returncode == 0
-        address = json.loads((other/"server.json").read_text())["address"]
+        address = wait(lambda: json.loads((other/"server.json").read_text())["address"])
         paired = f.run("devices","add","b","--address",address)
         counterpart = paired.stdout.splitlines()[-1].split()
         assert beta.run("devices","add","a",*counterpart[4:]).returncode == 0

@@ -68,8 +68,9 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     until(SimpleNamespace(record=lambda _: listening), "proxy", bool)
     paired = f.run("devices", "add", "b", "--address", f"127.0.0.1:{listening[0]}")
     assert paired.returncode == 0, paired.stderr
-    assert beta.run("devices", "add", "a", *paired.stdout.splitlines()[-1].split()[4:]).returncode == 0
     key = next(d["key"] for d in json.loads((local / "devices.json").read_text()) if d["name"] == "b")
+    # The proxy is not beta's bound listener, so pair explicitly with the same key.
+    assert beta.run("devices", "add", "a", "--address", addresses[local], "--key", key).returncode == 0
 
     def request(home, path, body=None, *, peer=False, status=200, method="POST"):
         answer = send(home, method, path, body, key=key if peer else None)

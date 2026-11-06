@@ -47,7 +47,7 @@ pub(super) fn line(entry: &Entry, s: &Summary) -> Option<String> {
     }
     let flat = |text: &str| text.replace(['\t', '\n', '\r'], " ");
     let mut start = String::new();
-    let (from, text) = match &entry.body {
+    let (from, text): (&str, &str) = match &entry.body {
         // The Start's own folder: a backfill's summary has none.
         Body::Start { cwd, thread, .. } => {
             let t = thread.as_deref();
@@ -58,7 +58,7 @@ pub(super) fn line(entry: &Entry, s: &Summary) -> Option<String> {
             ("", &s.name)
         }
         Body::Name { .. } => ("", &s.name),
-        Body::Text { text } => ("agent", text),
+        Body::Text { text } => ("agent", super::reply(text).text),
         Body::Input(input) => match &input.from {
             Origin::Person | Origin::Answer { .. } => ("person", &input.text),
             Origin::Mail { from, .. } if from.is_empty() => ("mail", &input.text),

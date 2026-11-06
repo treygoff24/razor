@@ -364,7 +364,13 @@ pub struct Server {
     pub(crate) shared: bool,
     /// It takes `ClientInput::video`.
     pub(crate) video: bool,
+    /// Its `ui.suggestions` is on: clients offer its sessions' suggested next messages.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) suggestions: bool,
     pub(crate) load: Option<Load>,
+    /// A newer selected release, ready for the person to restart this server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) release_ready: Option<String>,
     /// Locally stored saved-views version; absent until a paired server reports it.
     pub(crate) views_version: Option<u64>,
     /// Its residents by name; left out when it has none.
@@ -430,6 +436,10 @@ pub struct AgentView {
     /// Bounded first sentence of the latest reply, reconstructed from the record.
     #[serde(default)]
     pub(crate) last_reply: String,
+    /// The reply entry whose `suggestion` a client may offer now: its turn ended well answering
+    /// the person, with nothing waiting, working or asked since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) suggestion: Option<EntryId>,
     /// When any reader of the session's stream last opened or closed it, or reported `seen`,
     /// since this server started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -444,6 +454,10 @@ pub struct AgentView {
     pub(crate) changed_files: Vec<PathBuf>,
     /// Unresolved tool calls, running now.
     pub(crate) calls: Vec<EntryId>,
+    /// The newest call while it is unresolved: its tool's name, what it acts on (as a recap
+    /// names it) and when it started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) doing: Option<(String, String, Millis)>,
     /// Tool calls recorded over the whole session.
     pub(crate) calls_made: u32,
     /// Calls whose result was an error.
@@ -526,28 +540,34 @@ impl Default for Brand {
     }
 }
 
-/// How a person's clients draw, from the config's `[ui]`; passed through like `Brand`, and
-/// nothing in the core reads it.
+/// How a person's clients draw, from the config's `[ui]`; passed through like `Brand`. The core
+/// reads only `suggestions`, at admission.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Ui {
     /// Whether clients draw motion; false draws each moving thing in the settled form its
     /// times lead to.
     pub(crate) motion: bool,
-    /// The block glyphs for pictures: octants, or half blocks for fonts without them.
+    /// The block glyphs for pictures: automatic, octants, or half blocks.
     pub(crate) blocks: Blocks,
     /// The workshop's stage at the status pane's foot, or `off` to give its rows to the pane.
     pub(crate) stage: Stage,
     /// Terminal action keys; absent names inherit their shipped defaults.
     pub(crate) keys: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    /// What the terminal's second quit key does to the addressed session.
+    pub(crate) quit: Quit,
+    /// Ask each person's input for a suggested next message.
+    pub(crate) suggestions: bool,
 }
 impl Default for Ui {
     fn default() -> Self {
         Self {
             motion: true,
-            blocks: Blocks::Octant,
+            blocks: Blocks::Auto,
             stage: Stage::Workshop,
             keys: BTreeMap::new(),
+            quit: Quit::Detach,
+            suggestions: false,
         }
     }
 }
@@ -571,10 +591,19 @@ pub(crate) enum Stage {
     Workshop,
     Off,
 }
+/// `detach` leaves it running, as `/detach` does; `end` closes it first, as `/end` does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Quit {
+    #[default]
+    Detach,
+    End,
+}
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Blocks {
     #[default]
+    Auto,
     Octant,
     Half,
 }

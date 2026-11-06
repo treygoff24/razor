@@ -8,6 +8,7 @@ scripts/speech.py
 scripts/notify.sh
 packs/starter
 README.md
+CHANGELOG.md
 SPEC.md
 RULES.md
 AGENTS.md

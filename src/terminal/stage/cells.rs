@@ -270,16 +270,13 @@ fn names(sc: &Scene, row: &mut [Cell]) {
 fn encode_half(s: &Sprite, grid: &mut [Vec<Cell>]) {
     for (y, row) in grid.iter_mut().enumerate() {
         for (x, c) in row.iter_mut().enumerate() {
-            (c.ch, c.fg, c.bg) = match (
+            let (top, bottom) = (
                 s.get(x as i64, y as i64 * 2),
                 s.get(x as i64, y as i64 * 2 + 1),
-            ) {
-                (Some(t), Some(b)) if t == b => (' ', t, t),
-                (Some(t), Some(b)) => ('▀', t, b),
-                (Some(t), None) => ('▀', t, c.bg),
-                (None, Some(b)) => ('▄', b, c.bg),
-                _ => continue,
-            };
+            );
+            if let Some(cell) = super::super::pictures::half(top, bottom, c.bg) {
+                (c.ch, c.fg, c.bg) = cell;
+            }
         }
     }
 }

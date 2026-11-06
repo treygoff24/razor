@@ -12,7 +12,10 @@ mod clipboard;
 mod commands;
 mod composer;
 mod data;
+mod editor;
 mod gauge;
+mod goto;
+mod image_codec;
 mod inputs;
 mod keys;
 mod markdown;
@@ -21,6 +24,7 @@ mod motion;
 mod output;
 mod panel;
 mod picker;
+mod pictures;
 mod questions;
 mod recap;
 mod screen;
@@ -37,13 +41,14 @@ mod topbar;
 mod transcript;
 mod tty;
 mod view;
+mod writer;
 
 use crate::protocol::{AgentView, Ask, Brand, ClientInput, EntryId, Event as ApiEvent};
 use crate::protocol::{Live, MailId, Models, SessionId, State, now};
 use api::{Api, Incoming, Line};
 use composer::Composer;
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
-use std::{collections::BTreeMap, future::Future, path::PathBuf, pin::Pin, sync::Arc};
+use std::{collections::BTreeMap, future::Future, io::Write, path::PathBuf, pin::Pin, sync::Arc};
 use tokio::{
     sync::{Semaphore, mpsc, oneshot},
     task::JoinHandle,
@@ -56,31 +61,26 @@ type Done = Box<dyn FnOnce(&mut App) + Send>;
 type Job = Pin<Box<dyn Future<Output = Done> + Send>>;
 
 /// Renders a session and one opened child through the versioned API, never a record file.
-/// Main supplies the socket-bound or remote client, first input and the Razor home whose machine
-/// settings name the audio programs; a session is made on admission. A second Ctrl-C in a row, or
-/// a hangup, restores the terminal and quits without stopping a session or its jobs.
+/// Main supplies the socket-bound or remote connection, first input and the Razor home whose
+/// machine settings name the audio programs; a session is made on admission. A second Ctrl-C in
+/// a row, or a hangup, restores the terminal and quits without stopping a session or its jobs.
 pub async fn run(
-    client: reqwest::Client,
-    server: reqwest::Url,
-    device_key: String,
+    server: crate::api::Connection,
     session: Option<SessionId>,
     initial: ClientInput,
     home: PathBuf,
     agents: bool,
 ) -> Result<(), Error> {
-    let unreadable =
-        "The working directory could not be read; start Razor in an existing directory.";
-    let cwd = tokio::task::spawn_blocking(std::env::current_dir).await;
-    let cwd = cwd.map_err(fail(unreadable))?.map_err(fail(unreadable))?;
     let (done, mut finished) = mpsc::channel(16);
     // At most 16 lines in flight and 8 MiB of their bytes, or one larger whole entry alone.
     let (lines, mut incoming) = mpsc::channel(16);
     let (api, budget) = (
-        Api::new(client, server, device_key),
+        Api::new(server.http, server.url, server.key),
         Arc::new(Semaphore::new(api::BYTES)),
     );
     api.stream(None, 0, lines.clone(), budget.clone());
-    let mut app = App::new(api, done, lines, budget, cwd);
+    let mut app = App::new(api, done, lines, budget, server.cwd);
+    app.remote = server.remote;
     // At most eight audio effects wait; a recording's levels skip a draw rather than wait.
     let (sender, mut audio) = mpsc::channel(8);
     #[cfg(target_os = "macos")]
@@ -106,48 +106,78 @@ pub async fn run(
     let mut recent = agents && app.focus.is_none() && app.composer.is_empty();
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .map_err(Error::Terminal)?;
-    let mut modes = Some(screen::Modes::enter()?);
+    let mut modes = Some(screen::Modes::enter(screen::QUERY)?);
+    // Probe once after the first frame; tmux keeps the answer to itself.
+    let mut probe = !app.tmux;
+    let (mut kept, mut events) = (None, tty::Events::default());
     let ran = async {
-        let backend = CrosstermBackend::new(std::io::stdout());
-        let terminal = &mut Terminal::new(backend).map_err(Error::Terminal)?;
+        let backend = CrosstermBackend::new(writer::Writer::new().map_err(Error::Terminal)?);
+        let terminal = kept.insert(Terminal::new(backend).map_err(Error::Terminal)?);
         // A terminal under 30 rows starts with the gauge folded.
         app.gauge_folded = terminal.size().is_ok_and(|size| size.height < 30);
         if !app.composer.is_empty() {
             inputs::send(&mut app);
         }
-        let mut events = tty::Events::default();
         let mut last_draw = Instant::now() - motion::FRAME;
         loop {
             if app.leaving {
                 return app.quit(finished).await;
             }
-            if std::mem::take(&mut app.list.editor) {
-                drop(events);
-                drop(modes.take());
-                let edited = agents::edit(&mut app).await;
-                modes = Some(screen::Modes::enter()?);
-                *terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))
-                    .map_err(Error::Terminal)?;
-                app.painted = Default::default();
+            if let Some(editing) = app.editing.take() {
+                finish(terminal, &mut app, &mut events).await;
+                // A new stream reads nothing until the editor has returned.
                 events = tty::Events::default();
+                drop(modes.take());
+                let edited = match editing {
+                    editor::Editing::Views => agents::edit(&mut app).await,
+                    editor::Editing::Reply(text) => editor::read(&text).await.map_err(|e| {
+                        error(format!("The reply did not open in your editor: {e}"))
+                    }),
+                };
+                modes = Some(screen::Modes::enter("")?);
+                let backend = CrosstermBackend::new(writer::Writer::new().map_err(Error::Terminal)?);
+                *terminal = Terminal::new(backend).map_err(Error::Terminal)?;
+                app.painted = Default::default();
                 if let Err(e) = edited {
                     app.say(&e.to_string());
                 }
                 app.dirty = true;
             }
             stage::remember(&mut app);
-            clipboard::write(&mut app, terminal.backend_mut())?;
+            // A frame, a clipboard write or a picture's row is queued only once the terminal has
+            // taken everything before it, so the queue holds one of them at most.
+            if terminal.backend().writer().idle() {
+                clipboard::write(&mut app, terminal.backend_mut())?;
+            }
+            let idle = terminal.backend().writer().idle();
             let pace = motion::pace(app.cost, app.moving.is_some());
-            if app.dirty && (app.immediate || last_draw.elapsed() >= pace) {
+            if app.dirty && idle && (app.immediate || last_draw.elapsed() >= pace) {
                 let start = Instant::now();
                 screen::draw(terminal, &mut app)?;
                 (last_draw, app.cost) = (Instant::now(), start.elapsed());
+                if std::mem::take(&mut probe) {
+                    let query = app.pictures.query();
+                    let out = terminal.backend_mut().writer_mut();
+                    out.write_all(query.as_bytes())
+                        .and_then(|_| out.flush())
+                        .map_err(Error::Terminal)?;
+                }
                 children::read_visible(&mut app, now());
                 output::read_visible(&mut app);
                 transcript::read_visible(&mut app);
+                pictures::read_visible(&mut app);
                 (app.dirty, app.immediate) = (false, false);
             }
-            let wake = app.wake(last_draw);
+            // A picture's next row, which the next frame places.
+            if terminal.backend().writer().idle()
+                && let Some(row) = app.pictures.row()
+            {
+                let out = terminal.backend_mut().writer_mut();
+                out.write_all(&row).and_then(|_| out.flush()).map_err(Error::Terminal)?;
+                app.dirty = true;
+            }
+            let idle = terminal.backend().writer().idle();
+            let wake = app.wake(last_draw, idle);
             tokio::select! {
                 event = events.next() => {
                     let Some(event) = event else { return Ok(()) };
@@ -172,6 +202,9 @@ pub async fn run(
                     done(&mut app);
                     app.dirty = true;
                 }
+                written = terminal.backend_mut().writer_mut().drain(), if !idle => {
+                    written.map_err(Error::Terminal)?;
+                }
                 _ = tokio::time::sleep_until(wake) => app.tick(),
             }
         }
@@ -179,11 +212,40 @@ pub async fn run(
     .await;
     drop(audio);
     audio::close(&mut app).await;
+    if let Some(terminal) = &mut kept {
+        finish(terminal, &mut app, &mut events).await;
+    }
     drop(modes);
     if let (Ok(()), Some(line)) = (&ran, app.farewell()) {
         println!("{line}");
     }
     ran
+}
+
+// Writes what the queue holds and deletes every picture the terminal holds, waiting as long as
+// the terminal takes, then for the answer to a row on its way until it is due to be given up on,
+// which would otherwise reach the shell or the editor as keys: before the modes leave the
+// alternate screen, which write past the queue. Answers already read count after that too.
+async fn finish(
+    terminal: &mut Terminal<CrosstermBackend<writer::Writer>>,
+    app: &mut App,
+    events: &mut tty::Events,
+) {
+    let out = terminal.backend_mut().writer_mut();
+    let mut bytes = app.pictures.forget().into_bytes();
+    while out.write_all(&bytes).and_then(|_| out.finish()).is_ok() {
+        app.pictures.taken();
+        let Some(due) = app.pictures.due() else {
+            return;
+        };
+        match tokio::time::timeout_at(due.max(Instant::now()), events.next()).await {
+            Ok(Some(Ok(tty::Event::Picture(text)))) => app.pictures.answer(&text),
+            Ok(Some(Ok(_))) | Err(_) => {}
+            Ok(_) => return,
+        }
+        // With no picture left to send, the deletes an answer or giving up leaves.
+        bytes = app.pictures.row().unwrap_or_default();
+    }
 }
 
 /// A terminal failure, or another cause retained with a sentence of context.
@@ -250,6 +312,7 @@ fn error(context: impl Into<String>) -> Error {
 /// streams; drafts and emoji history belong to the API, and the rest is disposable.
 #[derive(Default)]
 struct App {
+    remote: bool,
     // At most one voice note and one player, and their programs' newest task.
     audio: audio::Audio,
     bindings: bindings::Bindings,
@@ -276,6 +339,10 @@ struct App {
     models_at: u64,
     picker: Option<picker::Picker>,
     composer: Composer,
+    // The draft the stash key set aside, until it brings it back.
+    stash: Option<Composer>,
+    // What the loop hands the terminal to the person's editor for, between draws.
+    editing: Option<editor::Editing>,
     menu: composer::completion::Menu,
     // The emoji table, the open grid, the shortcode strip, and the person's emoji history as
     // last read: at most 32 emoji and their tones.
@@ -309,8 +376,8 @@ struct App {
     // When the main session's place and headline last changed while attached.
     changed: [Option<u64>; 2],
     lights: tools::rim::Lights,
-    // The frame moving between a child's card and the split, while one does.
-    moving: Option<split::Move>,
+    // The frame moving, while one does.
+    moving: Option<motion::Moving>,
     stage: stage::Stage,
     // The focused folder's branch (empty when detached) and uncommitted files, read by the
     // project route on a focus change and on the focused session's turn ends.
@@ -342,6 +409,8 @@ struct App {
     // The ask whose one-row band the person opened to its options, by a click or a first digit.
     ask_open: Option<MailId>,
     notice: Option<(String, u64)>,
+    // A ready release is announced once per terminal launch, including after reconnecting.
+    release_noticed: bool,
     // A first Ctrl-C and no key or paste since: the notice row says so and the next Ctrl-C quits.
     quitting: bool,
     // `/detach` was typed, or the session `/done` or `/quit` closed has ended: the loop quits as a
@@ -350,7 +419,10 @@ struct App {
     // The session `/done` or `/quit` closed, until its status row reads it closed.
     closing: Option<SessionId>,
     panel: Option<panel::Panel>,
+    goto: Option<goto::Goto>,
     panel_scroll: usize,
+    // The words typed after `/` in the key list, commands or tasks, until Esc ends the search.
+    panel_search: Option<String>,
     login: Option<tokio::task::AbortHandle>,
     pane_open: Option<bool>,
     // The archived children are listed in full; the children strip is open.
@@ -381,6 +453,7 @@ struct App {
     // At most one link per visible cell; destinations share the parsed paragraph's bytes.
     links: Vec<(Rect, Arc<str>)>,
     painted: screen::Painted,
+    pictures: pictures::Pictures,
     hits: Vec<view::Hit>,
     // Launch choices ride on the first admitted input, never on a bare launch.
     initial: Option<ClientInput>,
@@ -542,18 +615,27 @@ impl App {
             self.draft_at = None;
             self.save();
         }
+        goto::tick(self);
     }
 
     /// Marks the editor changed; its words are saved half a second after the last change.
     fn edited(&mut self) {
+        self.dismiss_suggestion();
         self.edits += 1;
         self.draft_at = Some(Instant::now() + Duration::from_millis(500));
         composer::completion::edited(self, now());
     }
 
+    /// Leaves browsing click targets, redrawing the mark; false when nothing was selected.
+    fn unselect(&mut self) -> bool {
+        let selected = self.selected.take().is_some();
+        self.revision = self.revision.wrapping_add(selected.into());
+        selected
+    }
+
     // The drawn screen's next change, paced; while anything works, the clocks' seconds, of the wall
     // and of the focused turn; a draft save and the notice's end; else the minute.
-    fn wake(&self, last_draw: Instant) -> Instant {
+    fn wake(&self, last_draw: Instant, drawable: bool) -> Instant {
         let now = now();
         let working = self.agents.values().any(|a| a.state == State::Working);
         let seconds = [Some(0), self.busy_at].map(|since| {
@@ -567,16 +649,22 @@ impl App {
         let at = (asks.into_iter().flatten().min()).unwrap_or(now + 60_000 - now % 60_000);
         let moving = self.moving.is_some();
         let mut wake = motion::deadline(at, now, last_draw, self.cost, moving);
-        if self.dirty {
+        // A frame waiting for the terminal to take the last is drawn once it has.
+        if self.dirty && drawable {
             wake = wake.min(last_draw + motion::pace(self.cost, moving));
         }
-        if let Some(at) = self.draft_at {
+        let search = self.goto.as_ref().and_then(|g| g.due);
+        for at in [self.draft_at, search].into_iter().flatten() {
             wake = wake.min(at);
         }
         if let Some((_, until)) = self.notice.as_ref().filter(|(_, until)| *until > now) {
             wake = wake.min(Instant::now() + Duration::from_millis(until - now));
         }
-        wake
+        // A picture's row unanswered is given up on when due.
+        self.pictures
+            .due()
+            .filter(|_| drawable)
+            .map_or(wake, |due| wake.min(due))
     }
 
     /// The model and effort the next input would carry: a staged choice, the agent's row,
@@ -616,12 +704,12 @@ impl App {
     fn split_view(&self) -> bool {
         self.split() && !self.list.open
     }
-    /// Octant pictures only from `PHONE` columns and outside tmux: a phone reaches Razor
-    /// through mosh and tmux, which drop or mismeasure a glyph their host's width table lacks
-    /// (macOS's lacks the octants), and a phone font may not draw them.
+    /// A narrow phone uses half blocks; in tmux auto does too because its width table may not
+    /// know octants. An explicit octant setting overrides the tmux default.
     fn octant(&self) -> bool {
-        let plain = self.columns < view::PHONE || self.tmux;
-        self.ui.blocks == crate::protocol::Blocks::Octant && !plain
+        use crate::protocol::Blocks;
+        self.columns >= view::PHONE
+            && (self.ui.blocks == Blocks::Octant || self.ui.blocks == Blocks::Auto && !self.tmux)
     }
     fn transcript(&self) -> Option<&Transcript> {
         self.transcripts.get(self.focus.as_ref()?)

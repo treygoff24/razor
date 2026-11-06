@@ -74,7 +74,7 @@ The controller's status snapshot starts with the brand of the config `Controller
 4. The person's table is laid over the pack's: each top-level table key by key, each value whole.
 5. The layered table becomes `Config`; today's checks run; a failure keeps the last good config and its notice says why.
 6. Residents: the residents task reads `config.residents` at each wake; a pack's residents start, change and stop like any other.
-7. Skills: at the next admitted turn `Tools::configure` gets the skill folders in lookup order: `<pack>/skills`, the project's `.agents/skills` and `.claude/skills` (Codex's and Claude Code's places), then the `skills` key's folders (2026-10-29, Trey: "i like the config key and project skill ideas"). The first folder holding a `SKILL.md` under a name wins, so a project's skill never replaces the pack's, as in Claude Code (personal over project); a library named in `skills` comes after the project, since a repository's own copy of a skill is the tailored one. A new conversation's first input lists only the pack's and project's skills with descriptions, up to 100. Library skills remain available through `skill` and the full catalog endpoint used by slash-command search. `skills` is a machine key; its relative paths count from its file.
+7. Skills: at the next admitted turn `Tools::configure` gets the skill folders in lookup order: `<pack>/skills`, the project's `.agents/skills` and `.claude/skills` (Codex's and Claude Code's places), the person's `~/.agents/skills`, `~/.claude/skills` and `~/.codex/skills` (where Codex and Claude Code keep personal skills; Codex's own installer still writes to the last), then the `skills` key's folders (2026-10-29, Trey: "i like the config key and project skill ideas"; the home folders 2026-11-05, Trey: "we should totally auto import users claude code/codex/.agents skills"). The first folder holding a `SKILL.md` under a name wins, so a project's skill never replaces the pack's, as in Claude Code (personal over project); the person's folders and a library named in `skills` come after the project, since a repository's own copy of a skill is the tailored one, and since the opening's list fills in this order, a large personal library never pushes the project's skills out of it. A new conversation's first input lists the pack's, the project's and the person's skills with descriptions, up to 100. Library skills remain available through `skill` and the full catalog endpoint used by slash-command search. `skills` is a machine key; its relative paths count from its file.
 8. Connections (`[mcp.*]`, `[tools.*]`, `[web]`) reach `Tools::configure` as if the person had written them.
 9. Brand: the status snapshot starts with the startup config's brand and is sent again when a read changes it.
 10. Memory: two tables of at most 1 MiB, for one read; between reads only the controller's `Config`.
@@ -106,3 +106,8 @@ No new crate: `toml` 1.1.8 already gives `Table` and `Table::try_into`. A pack i
 - Packs can link their `skills/` directory and name additional skill folders in `skills`.
 
 Glossary lines proposed: **brand**: the product name and colours a pack gives every client. **pack**, amended: a directory whose `config.toml` sits beneath the person's config and whose `skills/` the `skill` action searches.
+
+## Changing settings from the command line
+
+See [configuration.md](../configuration.md) for the commands and their file scopes. For example,
+`razor config set ui.blocks half` changes the person's settings without starting a server.

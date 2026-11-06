@@ -69,8 +69,20 @@ with flow(replies, config='[[plugins]]\nfile = "rewrite.py"\nbefore = ["input"]\
     assert first["id"] and "signal" in killed["end"], (first, killed)
     assert not (f.home / ".razor/live" / session).exists(), "the closed session is still live"
     quit = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
-    server.post(f, f"/sessions/{quit}/quit", {})
+    # Set to end, a terminal's second Ctrl-C ends the session it addresses, as /quit does.
+    with (f.home / ".razor/config.toml").open("a") as config:
+        config.write('[ui]\nquit = "end"\n')
+    with Terminal(f, "--resume", quit) as t:
+        t.shown("Message the agent")
+        t.quit("PRESS CTRL-C AGAIN TO END THIS SESSION")
     server.until(f, quit, lambda es: es[-1].get("closed"))
+    # /exit leaves the terminal app as /detach does: the session stays open, to resume.
+    left = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    with Terminal(f, "--resume", left) as t:
+        t.shown("Message the agent")
+        t.send("/exit\r")
+        t.leaves("/exit did not leave the app")
+    assert not any(e.get("closed") for e in f.record(left)), "/exit ended the session"
     closed = {s: list(f.record(s)) for s in (session, quit)}
     # After a restart, read unloaded as a phone does (its project), both rows read done and
     # their activity stays.

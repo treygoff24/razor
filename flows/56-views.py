@@ -217,7 +217,7 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
             assert request(a, "GET", "/views")["version"] == 4
             # One arrow from Atlas's first agent to its second moves only the highlight, Escape
             # stops nothing, and Enter opens it.
-            t.send("\x1b[D")
+            t.send("`h")  # the prefix and h give the list the keys
             y = lambda name: next(y for y, line in enumerate(t.screen.display) if f" {name} " in line[:52])
             t.send(("\x1b[B" if y(names[here]) > y(names[there]) else "\x1b[A") + "\x1b")
             conversation = lambda: "\n".join(line[53:] for line in t.screen.display)

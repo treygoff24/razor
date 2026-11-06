@@ -57,7 +57,8 @@ pub(super) async fn speech(
     // Dropping the request detaches this task; the paid generation still finishes and is kept.
     let made = tokio::spawn(async move {
         let (session, name) = &claim.0;
-        let made = run(command, Stdio::piped(), Some(text), AUDIO, LIMIT).await?;
+        let text = Some(crate::record::reply(&text).text.to_owned());
+        let made = run(command, Stdio::piped(), text, AUDIO, LIMIT).await?;
         if let Err(why) = controller.keep(session, name, made).await {
             eprintln!("razor: speech failed on {session} at {name}: {why}");
         }

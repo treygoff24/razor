@@ -5,7 +5,9 @@ mod replies;
 use self::replies::{card, input_rows, limit_words, reply, thought, unsaved};
 use super::{Action, Row, Transcript};
 use crate::protocol::{Body, End, Entry, EntryId, Input, MailKind, Origin, ReportStatus, Trigger};
-use crate::terminal::{markdown, motion::progress, text::*, tools, tools::Next, view::PHONE};
+use crate::terminal::{
+    markdown, motion::progress, pictures, text::*, tools, tools::Next, view::PHONE,
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -74,7 +76,22 @@ impl Transcript {
             match count.filter(|count| rows.range.end <= first || first + count <= rows.range.start)
             {
                 Some(count) => rows.total += count,
-                None => self.entry_rows(entry, place, columns, model, [follows, mused], &mut rows),
+                None => {
+                    self.entry_rows(entry, place, columns, model, [follows, mused], &mut rows);
+                    // A visible entry asks for the pictures nobody has read.
+                    if first < rows.range.end && rows.total > rows.range.start {
+                        let images = match &entry.body {
+                            Body::Input(input) => &input.images[..],
+                            Body::Call { .. } => (self.result(entry))
+                                .and_then(|r| self.decoded.get(&r.id))
+                                .map_or(&[][..], |d| &d.images[..]),
+                            _ => &[],
+                        };
+                        let names = images.iter().filter_map(|i| pictures::name(&i.path));
+                        rows.unread
+                            .extend(names.filter(|n| !self.pictures.contains_key(n)));
+                    }
+                }
             }
             follows = matches!(entry.body, Body::Text { .. });
             mused = matches!(entry.body, Body::Thinking { .. });
@@ -154,11 +171,11 @@ impl Transcript {
                     let worn = (worn && self.takes).then_some(e.id);
                     rows.push(Row::plain(""));
                     rows.extend(crate::terminal::audio::note(input, e.id, columns));
-                    input_rows(input, model, columns, worn, rows)
+                    input_rows(input, model, columns, worn, self.room(), rows)
                 }
             },
             Body::Notice { text } => reply(text, columns, None, rows, None),
-            Body::Text { text } => {
+            Body::Text { text } if !text.is_empty() => {
                 let sign = (!follows).then_some((model, self.name.as_str()));
                 let open = self.expanded.contains(&e.id);
                 reply(text, columns, sign, rows, Some((e.id, open)));
@@ -512,6 +529,8 @@ pub(super) struct Rows {
     pub(super) rows: Vec<Row>,
     pub(super) look: u64,
     pub(super) size: u64,
+    /// The unread pictures of the entries in `range`.
+    pub(super) unread: Vec<std::sync::Arc<str>>,
 }
 impl Rows {
     // Folds the next changes of the rows pushed since `first`.

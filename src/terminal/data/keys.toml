@@ -1,17 +1,20 @@
 [keys.global]
 "quit" = ["Ctrl-C"]
 "record" = ["Ctrl-R"]
-"new" = ["Ctrl-S"]
+"new" = []
 "emoji" = ["Ctrl-G"]
 "stop" = ["Ctrl-X"]
 "status" = ["Ctrl-T"]
 "copy" = ["Ctrl-Shift-C", "Super-C"]
 "cut" = ["Ctrl-Shift-X", "Super-X"]
-"prefix" = []
+"prefix" = ["`", "Ctrl-B"]
+"overview" = ["F3"]
 
 [keys.transcript]
 "page_up" = ["PageUp", "Shift-PageUp"]
 "page_down" = ["PageDown", "Shift-PageDown"]
+"half_page_up" = ["Ctrl-U"]
+"half_page_down" = ["Ctrl-D"]
 "top" = ["Ctrl-Home"]
 "bottom" = ["Ctrl-End"]
 "expand" = ["Ctrl-O"]
@@ -30,26 +33,81 @@
 "open" = ["F2"]
 
 [keys.prefix]
-"next_project" = ["n"]
-"previous_project" = ["p"]
+"next_project" = ["j"]
+"previous_project" = ["k"]
+"project_1" = ["!"]
+"project_2" = ["@"]
+"project_3" = ["#"]
+"project_4" = ["$"]
+"project_5" = ["%"]
+"project_6" = ["^"]
+"project_7" = ["&"]
+"project_8" = ["*"]
+"project_9" = ["("]
+"next_agent" = ["n"]
+"previous_agent" = ["p"]
+"agent_1" = ["1"]
+"agent_2" = ["2"]
+"agent_3" = ["3"]
+"agent_4" = ["4"]
+"agent_5" = ["5"]
+"agent_6" = ["6"]
+"agent_7" = ["7"]
+"agent_8" = ["8"]
+"agent_9" = ["9"]
+"global.new" = ["c"]
+"rename" = ["T", ","]
+"done" = ["X"]
+"split" = ["v", "-"]
+"close_split" = ["x"]
 "left" = ["h"]
-"down" = ["j"]
-"up" = ["k"]
 "right" = ["l"]
+"switch" = ["Tab", "BackTab"]
+"wider" = ["L"]
+"narrower" = ["H"]
+"list.open" = ["w", "b", "s"]
+"waiting" = ["o"]
+"keys" = ["?"]
+"detach" = ["q", "d"]
+"browse" = ["["]
+"previous_reply" = ["Up"]
+"next_reply" = ["Down"]
+"goto" = ["g"]
+"cancel" = ["Esc"]
+
+[keys.goto]
+"up" = ["Up", "k"]
+"down" = ["Down", "j"]
+"left" = ["Left", "h"]
+"right" = ["Right", "l"]
+"search" = ["/"]
+"erase" = ["Backspace", "Shift-Backspace"]
+"accept" = ["Enter"]
 "cancel" = ["Esc"]
 
 [keys.composer]
 "send" = ["Enter"]
 "back" = ["Esc"]
+"clear" = ["Ctrl-C"]
+"stash" = ["Ctrl-S"]
 
 [keys.line_start]
-"list" = ["Left"]
+"outward" = ["Left"]
+
+[keys.draft_end]
+"inward" = ["Right"]
 
 [keys.targets]
 "next" = ["Tab"]
 "previous" = ["BackTab"]
-"down" = ["Down"]
-"up" = ["Up"]
+"down" = ["Down", "j"]
+"up" = ["Up", "k"]
+"quote" = ["\""]
+"copy" = ["y"]
+"read" = ["Enter"]
+
+[keys.suggestion]
+"accept" = ["Tab"]
 
 [keys.children]
 "next" = ["Ctrl-N"]
@@ -84,22 +142,26 @@
 
 [keys.picker]
 "speed" = ["Tab"]
-"up" = ["Up"]
-"down" = ["Down"]
-"left" = ["Left"]
-"right" = ["Right"]
+"up" = ["Up", "k"]
+"down" = ["Down", "j"]
+"left" = ["Left", "h"]
+"right" = ["Right", "l"]
 "accept" = ["Enter"]
 "cancel" = ["Esc"]
 "keep" = ["1"]
 "handover" = ["2"]
 
 [keys.panel]
-"up" = ["Up"]
-"down" = ["Down"]
+"up" = ["Up", "k"]
+"down" = ["Down", "j"]
 "page_up" = ["PageUp", "Shift-PageUp"]
 "page_down" = ["PageDown", "Shift-PageDown"]
-"top" = ["Home"]
-"bottom" = ["End"]
+"half_page_up" = ["Ctrl-U"]
+"half_page_down" = ["Ctrl-D"]
+"top" = ["Home", "g"]
+"bottom" = ["End", "G"]
+"search" = ["/"]
+"erase" = ["Backspace", "Shift-Backspace"]
 "cancel" = ["Esc"]
 
 [keys.mcp]
@@ -208,7 +270,7 @@
 "9" = ["Alt-9"]
 
 [descriptions]
-"global.quit" = "Quit after pressing twice; sessions keep running"
+"global.quit" = "Quit after pressing twice; the addressed session keeps running unless [ui] quit is end"
 "global.record" = "Record or review a voice note"
 "global.new" = "Choose a project and server for a new agent"
 "global.emoji" = "Open the emoji picker"
@@ -216,37 +278,87 @@
 "global.status" = "Open or close the status pane"
 "global.copy" = "Copy the selection, draft, or shown question"
 "global.cut" = "Copy and remove the selected draft text"
-"global.prefix" = "Start a prefix action; unset by default"
+"global.prefix" = "Start a prefix action with an empty draft; pressed twice, the key itself"
+"global.overview" = "Open the agents overview, or go back to the addressed session"
 "transcript.page_up" = "Scroll the transcript up one page"
 "transcript.page_down" = "Scroll the transcript down one page"
+"transcript.half_page_up" = "Scroll the transcript up half a page with an empty draft"
+"transcript.half_page_down" = "Scroll the transcript down half a page with an empty draft"
 "transcript.top" = "Read the beginning of the transcript"
 "transcript.bottom" = "Jump to the newest transcript entries"
 "transcript.expand" = "Expand all long replies and calls, or fold them all"
 "list.close" = "Close an opened question's options; never stops the agent"
 "list.up" = "Select the previous list row"
 "list.down" = "Select the next list row"
-"list.left" = "Move to the parent agent or heading"
-"list.right" = "Unfold or move into a heading"
+"list.left" = "Move to the parent agent or heading; nothing in the overview"
+"list.right" = "Unfold or move into a heading; in the overview, open the selected agent or unfold the selected group"
 "list.accept" = "Open the selected agent or toggle the selected heading"
-"list.fold" = "Fold or unfold the selected heading"
+"list.fold" = "Fold or unfold the selected heading; in the overview, the selected agent's group"
 "list.thread" = "Start a fresh thread with the selected resident"
 "list.wider" = "Widen the agents list"
 "list.narrower" = "Narrow the agents list"
 "list.open" = "Open or close the agents list"
-"prefix.next_project" = "Open the next root in the current project"
-"prefix.previous_project" = "Open the previous root in the current project"
-"prefix.left" = "Move left in the agents list"
-"prefix.down" = "Move down in the agents list"
-"prefix.up" = "Move up in the agents list"
-"prefix.right" = "Move right in the agents list"
+"prefix.next_project" = "Open the next project's first top-level agent"
+"prefix.previous_project" = "Open the previous project's first top-level agent"
+"prefix.project_1" = "Open project 1's first top-level agent"
+"prefix.project_2" = "Open project 2's first top-level agent"
+"prefix.project_3" = "Open project 3's first top-level agent"
+"prefix.project_4" = "Open project 4's first top-level agent"
+"prefix.project_5" = "Open project 5's first top-level agent"
+"prefix.project_6" = "Open project 6's first top-level agent"
+"prefix.project_7" = "Open project 7's first top-level agent"
+"prefix.project_8" = "Open project 8's first top-level agent"
+"prefix.project_9" = "Open project 9's first top-level agent"
+"prefix.next_agent" = "Open the next top-level agent in this project"
+"prefix.previous_agent" = "Open the previous top-level agent in this project"
+"prefix.agent_1" = "Open top-level agent 1 in this project"
+"prefix.agent_2" = "Open top-level agent 2 in this project"
+"prefix.agent_3" = "Open top-level agent 3 in this project"
+"prefix.agent_4" = "Open top-level agent 4 in this project"
+"prefix.agent_5" = "Open top-level agent 5 in this project"
+"prefix.agent_6" = "Open top-level agent 6 in this project"
+"prefix.agent_7" = "Open top-level agent 7 in this project"
+"prefix.agent_8" = "Open top-level agent 8 in this project"
+"prefix.agent_9" = "Open top-level agent 9 in this project"
+"prefix.rename" = "Type /name to rename the addressed session"
+"prefix.done" = "Type /done; Enter closes the addressed session after its last turn"
+"prefix.split" = "Open the selected child card, or the first child, in a split"
+"prefix.close_split" = "Close the child's split, back to its parent"
+"prefix.left" = "Give the keys to the agents list, opening it"
+"prefix.right" = "Give the keys to the conversation"
+"prefix.switch" = "Move the keys between the agents list and the conversation"
+"prefix.wider" = "Widen the agents list, or open it"
+"prefix.narrower" = "Narrow the agents list, or open it"
+"prefix.waiting" = "Open the oldest question waiting for you, else what the status chip opens"
+"prefix.keys" = "List every key"
+"prefix.detach" = "Leave the terminal; sessions keep running"
+"prefix.browse" = "Browse the click targets from the first, as Tab does; Enter opens one"
+"prefix.goto" = "Open Go to: find any agent or past conversation and open it"
+"prefix.previous_reply" = "Select the reply above, as browsing does; Enter reads it in your editor"
+"prefix.next_reply" = "Select the reply below, as browsing does; Enter reads it in your editor"
 "prefix.cancel" = "Cancel the prefix"
+"goto.up" = "Highlight the previous row in Go to"
+"goto.down" = "Highlight the next row in Go to"
+"goto.left" = "Go to the previous project's first row"
+"goto.right" = "Go to the next project's first row"
+"goto.search" = "Type into Go to's search line"
+"goto.erase" = "Erase the last search character"
+"goto.accept" = "Open the highlighted agent or conversation"
+"goto.cancel" = "Clear the search, or close Go to"
 "composer.send" = "Send, queue, answer, or open the selected card"
 "composer.back" = "Leave the current card, answer, split, pane, or pin; otherwise stop"
-"line_start.list" = "Move into the agents list at the start of an editor line"
+"composer.clear" = "Empty the draft while it holds words or images, as one undo step"
+"composer.stash" = "Set the draft aside and empty the box; with an empty draft, bring it back"
+"suggestion.accept" = "Put the suggested next message in the draft for editing"
+"line_start.outward" = "At the start of a line: a helper's parent, else the agents list beside the session, else the overview"
+"draft_end.inward" = "At the end of the draft with the agents list open: close it, leaving the session alone"
 "targets.next" = "Select the next click target with an empty draft"
 "targets.previous" = "Select the previous click target with an empty draft"
-"targets.down" = "Select the next click target while browsing"
-"targets.up" = "Select the previous click target while browsing"
+"targets.down" = "Select the click target below while browsing"
+"targets.up" = "Select the click target above while browsing"
+"targets.quote" = "Quote the selected reply into the draft while browsing"
+"targets.copy" = "Copy the selected reply, link or copy line while browsing"
+"targets.read" = "Open the selected reply read-only in your editor while browsing"
 "children.next" = "Open the next child card or sibling split"
 "children.previous" = "Open the previous child card or sibling split"
 "input_history.previous" = "Recall the previous input above the first editor row"
@@ -279,9 +391,13 @@
 "panel.down" = "Scroll the panel down one row"
 "panel.page_up" = "Scroll the panel up one page"
 "panel.page_down" = "Scroll the panel down one page"
+"panel.half_page_up" = "Scroll the panel up half a page"
+"panel.half_page_down" = "Scroll the panel down half a page"
+"panel.search" = "Search the key list, commands or tasks: show the rows holding every typed word"
+"panel.erase" = "Erase the last search character"
 "panel.top" = "Scroll to the panel beginning"
 "panel.bottom" = "Scroll to the panel end"
-"panel.cancel" = "Close the panel"
+"panel.cancel" = "End the search, else close the panel"
 "mcp.up" = "Select the previous MCP server"
 "mcp.down" = "Select the next MCP server"
 "mcp.accept" = "Open the chosen server or confirm an import"

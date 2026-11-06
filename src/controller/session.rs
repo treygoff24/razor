@@ -124,6 +124,8 @@ struct Conversation {
     thoughts: u64,
     /// A finished child's parent and report, admitted once the batch settles.
     closing: Option<(SessionId, Input)>,
+    /// The live words of the reply being streamed that may be its suggestion.
+    hold: crate::record::Hold,
 }
 
 /// A finished action: its answer to the model, whether the batch must settle, a finished
@@ -432,7 +434,7 @@ impl Session {
     /// to the model, so it goes back to the front of `pending`, in record order, for the next
     /// turn. This turn's jobs leave the foreground, those already ended queueing their notices.
     async fn unknown_results(&mut self) -> Result<(), Error> {
-        for (call, _) in self.record.summary().unresolved.clone() {
+        for (call, ..) in self.record.summary().unresolved.clone() {
             let unknown = Body::Result {
                 call,
                 outcome: Outcome::Unknown,
@@ -476,7 +478,7 @@ impl Session {
         let s = self.record.summary();
         let at =
             |ids: &[(CallId, EntryId)], id: &str| ids.iter().find(|c| c.0.0 == id).map(|c| c.1);
-        let own = at(&s.unresolved, &call.0)?;
+        let own = s.unresolved.iter().find(|c| c.0 == *call)?.1;
         // A call a cell made has its exec's id, a colon and a number; its news moves to the cell.
         let cell = call.0.rsplit_once(':').and_then(|(e, _)| at(&s.cells, e));
         let reads = s.reads(&call.0).unwrap_or(own);

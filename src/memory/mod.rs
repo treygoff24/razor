@@ -132,7 +132,9 @@ pub(crate) async fn cited(record: &Record, id: EntryId) -> Option<Cited> {
             for at in (1..id.0).rev() {
                 match (record.entry(EntryId(at)).await.map(|e| e.body), ended) {
                     (Ok(Body::TurnEnd { .. }), false) => ended = true,
-                    (Ok(Body::Text { text }), true) => asked.insert(0, text),
+                    (Ok(Body::Text { text }), true) => {
+                        asked.insert(0, crate::record::reply(&text).text.to_owned())
+                    }
                     (Ok(Body::Thinking { .. }), true) | (Ok(Body::Job(_)), false) => {}
                     _ => break,
                 }
@@ -218,6 +220,18 @@ impl Memory {
     pub(crate) fn new(home: &Path) -> Memory {
         let (home, lock, owed) = (home.into(), tokio::sync::Mutex::new(()), true.into());
         Memory { home, lock, owed }
+    }
+
+    /// Whether the folder's state note belongs to a different resident session.
+    pub(crate) async fn state_owner(
+        &self,
+        c: &Controller,
+        cwd: &Path,
+        session: &SessionId,
+    ) -> Result<Option<SessionId>, Error> {
+        let session = session.clone();
+        self.files(c, cwd, move |p| Ok(p.resident.filter(|r| r != &session)))
+            .await
     }
 
     /// The startup page for `session` in `cwd`: the project's state note (at most 1,500 bytes);
@@ -673,8 +687,16 @@ impl Memory {
         // In a resident's folder only its home session keeps the state note.
         self.files(controller, c.cwd, move |p| {
             match (w.replaces.clone(), w.text.is_empty()) {
-                _ if w.kind == Kind::State && p.resident.is_some_and(|r| r != session) => {
-                    Err(refuse(&TEXT.thread))
+                _ if w.kind == Kind::State
+                    && p.resident.as_ref().is_some_and(|r| r != &session) =>
+                {
+                    let state = files::state(&p.memory).unwrap_or_else(|| TEXT.no_state.clone());
+                    Err(refuse(&format!(
+                        "{} {}.\n\n{}\n\n{state}",
+                        TEXT.thread,
+                        p.resident.unwrap(),
+                        TEXT.state
+                    )))
                 }
                 (Some(old), true) => files::retire(&p.memory, &old, false),
                 (None, true) => Err(refuse(&TEXT.no_text)),

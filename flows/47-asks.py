@@ -202,6 +202,9 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN + '[server]\nname="box"\nre
         assert [e["from"] for e in inputs(a)][1:] == [{"answer": {"ask": ask}}], inputs(a)
         server.until(f, a, lambda es: any(e.get("text") == "a-answered" for e in es))
         server.until(f, b, lambda es: any(e.get("text") == "b-answered" for e in es))
+        # With words in the draft, Ctrl-C empties it; the two that quit follow.
+        t.send("\x03")
+        t.until(lambda t: "WORDS_FOR_A" not in t.text())
 
 # Each bash call runs until the flow makes its file, so the checks between run mid-turn.
 until = "until [ -e {} ]; do sleep 0.05; done".format

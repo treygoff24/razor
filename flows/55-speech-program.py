@@ -20,12 +20,8 @@ requests = []
 class Vendor(BaseHTTPRequestHandler):
     def do_GET(self):
         assert self.headers["xi-api-key"] == "flow-key"
-        if self.path == "/v1/user":
-            body = {"subscription":{"character_limit":100000,"character_count":0}}
-        else:
-            assert self.path.startswith("/v2/voices?"),self.path
-            body = {"voices":[{"voice_id":"iris","name":"Iris","labels":{"accent":"American"}}],"has_more":False}
-        self.send(body)
+        assert self.path.startswith("/v2/voices?"),self.path
+        self.send({"voices":[{"voice_id":"iris","name":"Iris","labels":{"accent":"American"}}],"has_more":False})
 
     def do_POST(self):
         assert self.path == "/v1/text-to-speech/chosen/with-timestamps?output_format=mp3_44100_64"

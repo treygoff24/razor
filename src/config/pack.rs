@@ -17,13 +17,16 @@ use toml::{Table, Value};
 const STARTER: &str = "packs/starter/config.toml";
 
 /// Keys only the person's file and the pack may set.
-const MACHINE: [&str; 22] = [
+const MACHINE: [&str; 25] = [
     "models",
+    "remote",
     "call_model",
     "call_effort",
     "server",
     "claude",
     "skills",
+    "skill_updates",
+    "release_updates",
     "startup",
     "residents",
     "pack",
@@ -54,7 +57,7 @@ pub(crate) struct Settings {
     person: File,
     /// The project's `config.toml` and `config.local.toml`, when there is a project.
     local: Vec<File>,
-    values: Table,
+    pub(super) values: Table,
     /// Why the merged values do not make a Config, when each file alone does.
     invalid: Option<String>,
 }
@@ -135,8 +138,26 @@ impl File {
 }
 
 impl Settings {
+    /// Updater-owned skill versions in this Razor home, before every other skill folder.
+    pub(crate) fn skill_overrides(&self) -> PathBuf {
+        self.person.path.with_file_name("skills")
+    }
+
+    /// The effective pack's skill folder; never includes project settings.
+    pub(crate) fn pack_skills(&self) -> Option<PathBuf> {
+        self.config.pack.as_ref().map(|pack| pack.join("skills"))
+    }
+
     /// The machine files; an invalid one refuses startup, and a missing person's file is empty.
     pub(crate) fn open(home: PathBuf) -> Result<Self, Error> {
+        let settings = Self::for_edit(home)?;
+        match settings.errors.first() {
+            Some(error) => Err(Error::Invalid(error.clone())),
+            None => Ok(settings),
+        }
+    }
+
+    pub(super) fn for_edit(home: PathBuf) -> Result<Self, Error> {
         let home = std::path::absolute(home).map_err(io)?;
         let mut settings = Self {
             config: Config::default(),
@@ -150,10 +171,36 @@ impl Settings {
             invalid: None,
         };
         settings.read();
-        match settings.errors.first() {
-            Some(error) => Err(Error::Invalid(error.clone())),
-            None => Ok(settings),
+        Ok(settings)
+    }
+
+    /// Shared project settings never take entries from the person's file or the pack.
+    pub(super) fn inherited(
+        &self,
+        scope: McpScope,
+        keys: &[&str],
+    ) -> Result<Option<toml_edit::Item>, Error> {
+        let sources: Vec<_> = match scope {
+            McpScope::Global => self.pack.iter().collect(),
+            McpScope::Private => self
+                .local
+                .first()
+                .into_iter()
+                .chain([&self.person])
+                .chain(self.pack.iter())
+                .collect(),
+            _ => Vec::new(),
+        };
+        for source in sources {
+            let text = text(&source.path, source.kind != Kind::Pack)?;
+            let document: toml_edit::DocumentMut = text.parse().map_err(|e| {
+                Error::Invalid(format!("{} does not parse: {e}.", source.path.display()))
+            })?;
+            if let Some(item) = document.get(keys[0]).and_then(|v| v.get(keys[1])) {
+                return Ok(Some(item.clone()));
+            }
         }
+        Ok(None)
     }
 
     /// The same machine files with a project's, which a linked worktree reads at its main
@@ -250,6 +297,35 @@ impl Settings {
         };
     }
 
+    /// Check a prospective replacement against the same file and merged-value rules as a read.
+    pub(super) fn check_edit(&self, path: &Path, text: &str, project: bool) -> Result<(), Error> {
+        let (table, _) = parse(text, path, project)?;
+        let mut candidate = self.clone();
+        if path == candidate.person.path {
+            candidate.person.good = table;
+            let named = candidate.person.good.get("pack").and_then(Value::as_str);
+            let pack = named
+                .map(|dir| Path::new(dir).join("config.toml"))
+                .or_else(|| super::shipped(STARTER));
+            if pack.as_ref() != candidate.pack.as_ref().map(|f| &f.path) {
+                candidate.pack = pack.map(|path| File::new(path, Kind::Pack));
+                if let Some(file) = &mut candidate.pack {
+                    file.read();
+                    if let Some(error) = &file.error {
+                        return Err(Error::Invalid(error.clone()));
+                    }
+                }
+            }
+        } else if let Some(file) = candidate.local.iter_mut().find(|file| file.path == path) {
+            file.good = table;
+        }
+        candidate.merge();
+        match candidate.invalid {
+            Some(error) => Err(Error::Invalid(error)),
+            None => Ok(()),
+        }
+    }
+
     /// The file a scope writes, and whether it is a project's: with no project files (see
     /// `project`), every scope is the person's file.
     pub(super) fn destination(&self, scope: McpScope) -> Result<(PathBuf, bool), Error> {
@@ -321,6 +397,27 @@ pub(super) fn parse(
     let mut table: Table = text.parse().map_err(|e: toml::de::Error| {
         Error::Invalid(format!("{shown} does not parse: {}.", e.message()))
     })?;
+    for (name, default) in [
+        (
+            "brand",
+            serde_json::to_value(crate::protocol::Brand::default()),
+        ),
+        ("ui", serde_json::to_value(crate::protocol::Ui::default())),
+        (
+            "phone",
+            serde_json::to_value(crate::protocol::Phone::default()),
+        ),
+    ] {
+        if let (Some(fields), Ok(default)) = (table.get(name).and_then(Value::as_table), default) {
+            for key in fields.keys() {
+                if default.get(key).is_none() {
+                    return Err(Error::Invalid(format!(
+                        "{shown}: unknown field {name}.{key}."
+                    )));
+                }
+            }
+        }
+    }
     // Only the person names where a project's tasks go, so a repository cannot send them away.
     if table.contains_key("tasks") && !(project && path.ends_with("config.local.toml")) {
         let only = "only a project's .razor/config.local.toml names where its tasks go";
@@ -341,10 +438,8 @@ pub(super) fn parse(
             return Err(Error::Invalid(why));
         }
     }
-    let (dir, home) = (
-        path.parent().unwrap_or(Path::new("/")),
-        std::env::var_os("HOME"),
-    );
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    let home = std::env::var_os("HOME");
     let absolute = |value: Option<&mut Value>| {
         if let Some(Value::String(path)) = value {
             let full = match (path.strip_prefix("~/"), &home) {
@@ -374,6 +469,10 @@ pub(super) fn parse(
     }
     if let Some(claude) = table.get_mut("claude").and_then(Value::as_table_mut) {
         absolute(claude.get_mut("usage_file"));
+    }
+    // The key file is this machine's; the folder is the other's, so it is taken as written.
+    if let Some(remote) = table.get_mut("remote").and_then(Value::as_table_mut) {
+        absolute(remote.get_mut("key"));
     }
     for key in ["development", "production"] {
         let push = table.get_mut("push").and_then(Value::as_table_mut);

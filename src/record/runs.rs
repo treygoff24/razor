@@ -86,7 +86,7 @@ impl Runs {
             Body::Withdrawn { inputs } => {
                 self.close(inputs, entry, &End::Stopped, "");
             }
-            Body::Text { text } if self.running() => self.reply = preview(text),
+            Body::Text { text } if self.running() => self.reply = preview(super::reply(text).text),
             Body::Call { name, input, .. } if self.running() => {
                 if let Some(input) = said(name, input) {
                     self.said = Some(preview(input["text"].as_str().unwrap_or_default()));

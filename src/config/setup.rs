@@ -7,10 +7,18 @@
 
 use super::{Config, Error, mcp::replace, pack};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use serde_json::Value;
 use std::io::{self, IsTerminal};
+use std::net::{IpAddr, SocketAddr};
+use std::ops::RangeInclusive;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 use toml_edit::DocumentMut;
+
+/// The ports setup gives a tailnet address and `razor devices find` looks for servers on, besides the
+/// server's own.
+pub(crate) const PORTS: RangeInclusive<u16> = 7433..=7442;
 
 /// The variables keys.toml may set: the web providers' keys and ElevenLabs' for voice. A model's
 /// sign-in is never one of them; each provider's own login keeps it.
@@ -57,7 +65,9 @@ pub fn keys(home: &Path) -> Result<(), Error> {
     terminal("keys")?;
     let path = home.join("keys.toml");
     let (before, mut keys) = saved(&path)?;
-    eprintln!("Web search and voice keys are optional; typing is hidden, Enter keeps a saved one.");
+    eprintln!(
+        "Web search and voice keys are optional; typing is hidden, Enter keeps a saved one. An ElevenLabs key needs Text to Speech and Voices (read) permissions."
+    );
     for name in names() {
         let key = secret(name)?;
         if !key.is_empty() {
@@ -77,14 +87,14 @@ pub fn keys(home: &Path) -> Result<(), Error> {
 /// sign-in; console selects Claude's Console billing rather than its subscription.
 pub async fn run(home: &Path, console: bool) -> Result<bool, Error> {
     terminal("setup")?;
-    let sign_in = Config::load(home).await?.claude.sign_in;
+    let loaded = Config::load(home).await?;
     let (claude, chatgpt) = loop {
-        let answer = line("Use Claude, ChatGPT or both [Claude]")?.to_lowercase();
-        match answer.as_str() {
-            "" | "claude" => break (true, false),
-            "chatgpt" => break (false, true),
-            "both" => break (true, true),
-            _ => eprintln!("Answer Claude, ChatGPT or both."),
+        let typed = line("Use Claude, ChatGPT or both [Claude]")?;
+        match letters(&typed).to_lowercase().as_str() {
+            "" | "c" | "claude" => break (true, false),
+            "g" | "gpt" | "chatgpt" | "openai" | "codex" => break (false, true),
+            "b" | "both" => break (true, true),
+            _ => eprintln!("Razor read {typed:?}; type claude, chatgpt or both, then Enter."),
         }
     };
     super::make_home(home)?;
@@ -94,6 +104,7 @@ pub async fn run(home: &Path, console: bool) -> Result<bool, Error> {
     if !claude && !pack::parse(&config, &file, false)?.0.contains_key("model") {
         replace(&file, &config, &format!("model = \"sol\"\n{config}"))?;
     }
+    reach(&file, &loaded.server).await?;
     let razor = std::env::current_exe().map_err(|e| {
         Error::Invalid(format!(
             "Cannot find the Razor executable ({e}); reinstall Razor, then run razor setup."
@@ -102,7 +113,7 @@ pub async fn run(home: &Path, console: bool) -> Result<bool, Error> {
     if yes("Run Razor in the background when you log in")? {
         ran(Command::new(&razor).arg("install"));
     }
-    let check = (claude && sign_in.is_empty()).then_some(&[][..]);
+    let check = (claude && loaded.claude.sign_in.is_empty()).then_some(&[][..]);
     let missing = crate::api::ready::credentials(home, check, None).await;
     if claude && (console || missing.get("Claude").is_some_and(Option::is_some)) {
         let signed = crate::claude::login(console).await;
@@ -117,7 +128,7 @@ pub async fn run(home: &Path, console: bool) -> Result<bool, Error> {
         ran(Command::new(&razor).arg("login"));
     }
     // A release ships agent-browser beside razor, a folder only `serve` puts on PATH.
-    let browser = browser();
+    let browser = tool("agent-browser");
     if !ran(Command::new(&browser).arg("install")) && cfg!(target_os = "linux") {
         eprintln!(
             "Missing system libraries? Run '{}' install --with-deps; it uses sudo.",
@@ -131,9 +142,144 @@ pub async fn run(home: &Path, console: bool) -> Result<bool, Error> {
     yes("Open Razor for your first message")
 }
 
-/// The shipped browser tool, with PATH as the fallback for source builds.
-pub fn browser() -> std::path::PathBuf {
-    super::shipped("agent-browser").unwrap_or("agent-browser".into())
+/// Names this server, and with Tailscale running gives it an address other machines reach, where
+/// the settings set neither; says what it wrote and where to change it.
+async fn reach(file: &Path, server: &super::Server) -> Result<(), Error> {
+    let before = pack::text(file, true)?;
+    let shown = file.display();
+    let parsed = before.parse::<DocumentMut>();
+    let mut settings = parsed.map_err(|e| Error::Invalid(format!("{shown}: {e}")))?;
+    let name = device_name(&crate::profiles::machine());
+    if settings.get("server").and_then(|s| s.get("name")).is_none()
+        && server.name.is_empty()
+        && !name.is_empty()
+    {
+        settings["server"]["name"] = toml_edit::value(&name);
+        eprintln!(
+            "This server is named {name}: other machines pair with it under that name, and new sessions here start with it. To change it, edit name under [server] in {shown}."
+        );
+    }
+    if settings
+        .get("server")
+        .and_then(|s| s.get("address"))
+        .is_none()
+        && server.address.is_none()
+    {
+        match address().await {
+            Some(address) => {
+                settings["server"]["address"] = toml_edit::value(&address);
+                eprintln!(
+                    "Other machines on your tailnet reach this server at {address}. To change it, edit address under [server] in {shown}, then run razor restart."
+                );
+            }
+            None => eprintln!(
+                "No Tailscale address is available here, so other machines cannot reach this server yet. To pair two machines, put both on one tailnet (tailscale.com) and run razor setup on each, or set address under [server] in {shown} to an address the other can reach."
+            ),
+        }
+    }
+    let after = settings.to_string();
+    match after == before {
+        true => Ok(()),
+        false => replace(file, &before, &after),
+    }
+}
+
+/// `host`'s first label as a device name: lowercase letters, digits and single hyphens, at most 32.
+fn device_name(host: &str) -> String {
+    let mut name = String::new();
+    for c in host.split('.').next().unwrap_or_default().chars() {
+        let c = if c.is_ascii_alphanumeric() {
+            c.to_ascii_lowercase()
+        } else {
+            '-'
+        };
+        if name.len() < 32 && !(c == '-' && (name.is_empty() || name.ends_with('-'))) {
+            name.push(c);
+        }
+    }
+    name.trim_end_matches('-').into()
+}
+
+/// This machine's tailnet address with the first port of `PORTS` free on it: its MagicDNS name
+/// when that resolves here to its Tailscale IPv4, else that IPv4.
+async fn address() -> Option<String> {
+    let status = tailnet().await?;
+    let ip: IpAddr = status["Self"]["TailscaleIPs"]
+        .as_array()?
+        .iter()
+        .filter_map(|ip| ip.as_str()?.parse::<IpAddr>().ok())
+        .find(IpAddr::is_ipv4)?;
+    let mut ports = PORTS.clone();
+    let mut port = None;
+    for candidate in &mut ports {
+        if tokio::net::TcpListener::bind((ip, candidate)).await.is_ok() {
+            port = Some(candidate);
+            break;
+        }
+    }
+    let port = port?;
+    let name = status["Self"]["DNSName"].as_str().unwrap_or_default();
+    let named = format!("{}:{port}", name.trim_end_matches('.'));
+    let found = tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host(&named)).await;
+    Some(
+        match found.is_ok_and(|found| found.is_ok_and(|mut found| found.any(|a| a.ip() == ip))) {
+            true => named,
+            false => SocketAddr::new(ip, port).to_string(),
+        },
+    )
+}
+
+/// `tailscale status --json`, from PATH or the macOS app, within 5 seconds; None when Tailscale is
+/// absent, fails or is not running.
+pub(crate) async fn tailnet() -> Option<Value> {
+    for program in [
+        "tailscale",
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    ] {
+        let mut command = tokio::process::Command::new(program);
+        // The macOS app's program opens its window unless told it is a command.
+        command
+            .args(["status", "--json"])
+            .env("TAILSCALE_BE_CLI", "1");
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let Ok(Ok(output)) = tokio::time::timeout(Duration::from_secs(5), command.output()).await
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let status: Value = serde_json::from_slice(&output.stdout).ok()?;
+        return (status["BackendState"] == "Running").then_some(status);
+    }
+    None
+}
+
+/// What the person typed, as letters and digits: a terminal's escape sequence (a focus report,
+/// a pasted bracket) is dropped whole, and a backspace or delete a remote tty passed through
+/// literally removes the character before it.
+fn letters(typed: &str) -> String {
+    let (mut out, mut chars) = (String::new(), typed.chars());
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' if matches!(chars.next(), Some('[' | 'O')) => {
+                _ = chars.find(|n| n.is_ascii_alphabetic() || *n == '~')
+            }
+            '\x08' | '\x7f' => _ = out.pop(),
+            c if c.is_ascii_alphanumeric() => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A shipped tool, with PATH as the fallback for source builds.
+pub fn tool(name: &str) -> std::path::PathBuf {
+    super::shipped(name).unwrap_or(name.into())
 }
 
 fn terminal(command: &str) -> Result<(), Error> {
@@ -164,7 +310,8 @@ fn line(prompt: &str) -> Result<String, Error> {
     }
 }
 
-fn yes(question: &str) -> Result<bool, Error> {
+/// A [y/N] question: whether the answer starts with y.
+pub fn yes(question: &str) -> Result<bool, Error> {
     Ok(line(&format!("{question} [y/N]"))?.starts_with(['y', 'Y']))
 }
 

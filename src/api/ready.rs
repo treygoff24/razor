@@ -47,7 +47,7 @@ pub async fn credentials(
                 ));
             }
             if !command.is_empty() {
-                let signed = claude::shared::env(command, &dir).await;
+                let signed = claude::shared::env(command, &dir, "").await;
                 return signed.map(drop).map_err(|e| {
                     format!("{e} Check claude.sign_in in your settings, then run razor doctor.")
                 });

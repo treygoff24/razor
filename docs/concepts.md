@@ -42,7 +42,7 @@ Everything earlier stays in the record, one recall away. Razor calls this a rebu
 
 ## Closing a session
 
-`/done` asks the agent for one last turn: it brings the project's notes up to date and writes the project's state note, a short note on where the work stands that the next session in the project starts with. The session closes when that turn ends. `/end` (or `/quit`) closes it at once, with no last turn. A closed session reopens when you send it a message.
+`/done` asks the agent for one last turn: it brings the project's notes up to date and writes the project's state note, a short note on where the work stands that the next session in the project starts with. The session closes when that turn ends. `/end` (or `/quit`) closes it at once, with no last turn. `/detach` (or `/background` or `/exit`) leaves the terminal app with the session still running, as Ctrl-C pressed twice does unless [`[ui] quit`](configuration.md#the-terminal-app) says to end it. A closed session reopens when you send it a message.
 
 ## Helpers, and merging or discarding their work
 
@@ -118,6 +118,7 @@ More tools appear as you set them up:
 
 - `search`, `fetch` and `answer` for the web, while a provider key is set ([Browser, voice and search](browser-voice-search.md#web-search-page-reading-and-answers));
 - a real browser, through the `agent-browser` command in the shell ([Browser, voice and search](browser-voice-search.md#the-browser));
+- desktop apps, through the `agent-desktop` command, on a machine with a desktop that allows it ([Browser, voice and search](browser-voice-search.md#desktop-apps));
 - MCP servers' tools; when a server has many, agents find them with `mcp_search` instead of seeing them all at the start ([Configuration](configuration.md#mcp-servers));
 - your own scripts as tools, and tools that JavaScript plugins add ([Configuration](configuration.md#script-tools)).
 
@@ -126,7 +127,7 @@ More tools appear as you set them up:
 The words you meet in Razor's screens, settings and these pages. Words used only inside the code are in [Contributing](contributing.md#words-used-in-the-code).
 
 - **account**: the Claude or ChatGPT subscription a conversation signs in to; the usage panel shows that account's plan usage.
-- **agents view**: the terminal app's list of agents beside the open session, opened with F2 or `/agents`.
+- **agents view**: the terminal app's list of agents beside the open session, opened with F2, `/agents` or Left at the composer, and its full-screen overview of every agent, opened with a second Left or F3.
 - **ask**: a question from an agent that waits for your answer.
 - **brief**: what a child starts from: its task and pointers. A **shared brief** is a file whose text goes ahead of several children's own briefs.
 - **channel**: the one conversation shared by a session and all the children under it. A **mention** of an agent's name is what wakes it there.

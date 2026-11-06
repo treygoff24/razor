@@ -15,6 +15,8 @@ use tokio::{
 /// A native line retains its share of the bridge budget through controller admission.
 pub(crate) type Output = (Line, Option<OwnedSemaphorePermit>);
 type Route = (u64, mpsc::Sender<Output>);
+/// A conversation's sign-in: the variables its CLI starts with, and its account.
+type Signed = (Value, Value);
 /// How long after its close a resume may reuse a conversation's sign-in: the prompt cache's
 /// lifetime (the bridge asks for an hour), which is the account's, so a resume on another account
 /// writes the whole conversation to the cache again.
@@ -35,7 +37,7 @@ struct State {
     routes: HashMap<SessionId, Route>,
     /// Each closed conversation's variables and account, and when it closed, oldest first: one per
     /// session, at most KEPT.
-    signed: VecDeque<(SessionId, (Value, Value), Instant)>,
+    signed: VecDeque<(SessionId, Signed, Instant)>,
 }
 
 impl SharedBridge {
@@ -71,7 +73,7 @@ impl SharedBridge {
         let signed = match kept.filter(|(.., closed)| resumed && closed.elapsed() < KEEP) {
             Some((_, signed, _)) => signed,
             // Outside the lock: an account pick may take a second, and every line waits on it.
-            None => env(&claude.sign_in, &self.1).await?,
+            None => env(&claude.sign_in, &self.1, session.as_str()).await?,
         };
         (wire["env"], wire["account"]) = signed.clone();
         if child {
@@ -92,7 +94,7 @@ impl SharedBridge {
         drop(state);
         let shared = self.clone();
         tokio::spawn(async move {
-            task::serve(
+            let refused = task::serve(
                 bridge.clone(),
                 (session.clone(), open),
                 dir,
@@ -103,7 +105,7 @@ impl SharedBridge {
             )
             .await;
             let mut state = shared.0.lock().await;
-            if !signed.0.is_null() {
+            if !refused && !signed.0.is_null() {
                 let kept = &mut state.signed;
                 kept.retain(|(id, ..)| *id != session);
                 if kept.len() == KEPT {
@@ -152,18 +154,19 @@ impl SharedBridge {
     }
 }
 
-/// The variables one conversation's CLI starts with, and its account: none, or the token on the
-/// first line `command` prints in place of every other sign-in, with the CLI's files in `folder`,
-/// and the account its optional second line names. The token goes only to the bridge, never into
-/// a protocol message or the record.
-pub(crate) async fn env(command: &[String], folder: &Path) -> Result<(Value, Value), Error> {
+/// The sign-in of one conversation in `session`: none, or the token on the first line `command`
+/// prints in place of every other sign-in, with the CLI's files in `folder`, and the account its
+/// optional second line names. The command finds the session in RAZOR_SESSION, so it may pick an
+/// account per session; the readiness check, for no session, leaves it empty. The token goes only
+/// to the bridge, never into a protocol message or the record.
+pub(crate) async fn env(command: &[String], folder: &Path, session: &str) -> Result<Signed, Error> {
     let Some((program, args)) = command.split_first() else {
         return Ok((Value::Null, Value::Null));
     };
     let mut run = Command::new(program);
     // Its stderr (an account pick, a failure) reaches the server's log.
     run.args(args).stdin(Stdio::null()).stdout(Stdio::piped());
-    run.kill_on_drop(true);
+    run.kill_on_drop(true).env("RAZOR_SESSION", session);
     let read = async {
         let mut child = run.spawn()?;
         // Invariant: stdout is piped above. A token is one line; past 64 KiB the pipe closes.

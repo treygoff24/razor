@@ -8,6 +8,7 @@ import socket
 import socketserver
 import tempfile
 import threading
+from dataclasses import replace
 from pathlib import Path
 from driver import flow
 from terminal import Terminal
@@ -104,13 +105,102 @@ class Proxy(socketserver.ThreadingUnixStreamServer):
 
 
 mode.write_text('quiet')
-with flow([], config=config(), env={'SSH_CONNECTION': 'flow'}) as f:
+failed_speech = dict(commands, speech=['/bin/sh', '-c', 'echo speech-broken >&2; exit 3'])
+with flow([reply(text='speech source'), reply(text='typed reply')], config=config(failed_speech)) as f:
+    with Terminal(f) as t:
+        t.shown('Message the agent')
+        t.send('hello\r')
+        t.shown('speech source', '▶')
+        session = next((f.home / '.razor/sessions').iterdir()).name
+        t.send('/listen\r')
+        t.shown('speech-broken', 'Enter tries again')
+        before = len(t.output)
+        t.send('\x1b[99;6u')  # Ctrl-Shift-C, as sent by a terminal supporting modified keys.
+        t.until(lambda t: b'\x1b]52;c;' in t.output[before:])
+        encoded = t.output[before:].split(b'\x1b]52;c;', 1)[1].split(b'\x07', 1)[0]
+        assert b'speech-broken' in base64.b64decode(encoded)
+        t.shown('COPIED')
+        t.send('/not-a-command\r')
+        t.shown('UNKNOWN COMMAND', 'speech-broken', 'Enter tries again')
+        t.send('\x15')
+        t.send('typed after error')
+        t.shown('typed after error')
+        before = len(t.output)
+        t.send('\x1b[99;6u')
+        t.until(lambda t: b'\x1b]52;c;' in t.output[before:])
+        encoded = t.output[before:].split(b'\x1b]52;c;', 1)[1].split(b'\x07', 1)[0]
+        assert base64.b64decode(encoded) == b'typed after error'
+        t.send('\r')
+        t.shown('typed reply')
+        assert any(e.get('kind') == 'input' and e.get('text') == 'typed after error' for e in f.record(session))
+        assert 'Enter tries again' not in t.text()
+
+with flow([reply(text='ssh spoken reply')], config=config(), env={'SSH_CONNECTION': 'flow'}) as f:
     with Terminal(f) as t:
         t.shown('Message the agent')
         assert 'Voice' not in t.text()
         t.send('\x12')
         t.shown('RECORDING IS UNAVAILABLE OVER SSH')
-        assert not list((f.home / 'tmp').glob('razor-audio-*'))
+        before = len(t.output)
+        t.send('\x1b[99;6u')
+        t.until(lambda t: b'\x1b]52;c;' in t.output[before:])
+        encoded = t.output[before:].split(b'\x1b]52;c;', 1)[1].split(b'\x07', 1)[0]
+        assert b'Recording is unavailable over SSH' in base64.b64decode(encoded)
+        # Read-aloud names the machine that would play it and plays nothing; the reply's ▶ lights
+        # once its turn has ended, which /listen needs.
+        t.send('hello\r')
+        t.shown('ssh spoken reply', '▶')
+        t.send('/listen\r')
+        t.shown(f'OVER SSH, AUDIO WOULD PLAY ON {socket.gethostname().upper()}, NOT YOUR MACHINE')
+        assert not played.exists() and not list((f.home / 'tmp').glob('razor-audio-*'))
+
+# A light client: [remote] names another server and the key it enrolled, so this home starts no
+# server of its own, its own play and capture run, and new sessions start in [remote] folder.
+there = config({k: commands[k] for k in ('speech', 'transcribe')}) + '\n[server]\naddress = "127.0.0.1:0"'
+with flow([reply(text='printed remotely'), reply(text='heard here'), reply(text='launch folder')], config=there) as f:
+    server.start(f)
+    light, elsewhere = f.home / '.light', f.home / 'elsewhere'
+    light.mkdir(), elsewhere.mkdir()
+    (light / 'mac.key').write_text(f.run('devices', 'add', 'mac').stdout.splitlines()[1])
+    remote = {'address': json.loads((f.home / '.razor/server.json').read_text())['address'], 'key': 'mac.key', 'folder': str(f.cwd)}
+    here = config({k: commands[k] for k in ('capture', 'play')})
+    (light / 'config.toml').write_text(f'{here}\n[server]\nname = "lightmac"\n[remote]\n{config(remote)}\n')
+    mac = replace(f, cwd=elsewhere, env={**f.env, 'RAZOR_HOME': str(light)})
+    remote['address'] += '/wrong'
+    (light / 'config.toml').write_text(f'{here}\n[remote]\n{config(remote)}\n')
+    bad = mac.run('--print', 'not sent')
+    assert bad.returncode != 0 and 'without a path' in bad.stderr, bad
+    remote['address'] = remote['address'].removesuffix('/wrong')
+    (light / 'config.toml').write_text(f'{here}\n[server]\nname = "lightmac"\n[remote]\n{config(remote)}\n')
+    printed = json.loads(mac.run('--print=json', 'from the mac').stdout)
+    assert printed['message'] == 'printed remotely' and list(f.record(printed['session'])), printed
+    with Terminal(mac, '--continue') as t:
+        t.shown('printed remotely')
+        t.send('/mcp import ~/missing.json\r')
+        t.shown('USE AN ABSOLUTE PATH ON THE SERVER')
+        t.send('\x15')  # clear the refused draft
+        t.send('hello\r')
+        t.shown('heard here', '▶')
+        t.send('/listen\r')
+        t.until(lambda _: heard.exists() and bytes.fromhex(heard.read_text().split()[-1]) == b'heard here')
+        t.send('\x12')
+        t.shown('Recording on lightmac')
+        t.send('\x1b')
+        t.shown('Esc discards')
+        t.send('\x1b')
+        t.until(lambda t: 'Esc discards' not in t.text())
+    with Terminal(mac, '--resume', printed['session']) as t:
+        t.shown('heard here')
+    del remote['folder']
+    (light / 'config.toml').write_text(f'{here}\n[server]\nname = "lightmac"\n[remote]\n{config(remote)}\n')
+    at_server_folder = replace(mac, cwd=f.cwd)
+    fallback = json.loads(at_server_folder.run('--print=json', 'folder fallback').stdout)
+    assert fallback['message'] == 'launch folder' and list(f.record(fallback['session'])), fallback
+    (light / 'mac.key').write_text('0' * 64)
+    refused = mac.run('--print', 'wrong key')
+    assert refused.returncode == 1 and 'needs a device key that works' in refused.stderr, refused
+    assert not {'server.sock', 'server.json', 'server.log', 'server.lock'} & {p.name for p in light.iterdir()}
+    heard.unlink()
 
 # Quiet, nonzero PCM is valid; failed transcription keeps the same uploaded file for Enter.
 with flow([reply(text=['first spoken reply', 'second spoken reply']), reply(text='uncached reply')], config=config()) as f:
@@ -145,6 +235,7 @@ with flow([reply(text=['first spoken reply', 'second spoken reply']), reply(text
         played.write_text('')
         t.send('\x15/listen\r')
         t.until(lambda _: len(played.read_text().splitlines()) == 2)
+        t.until(lambda _: heard.exists() and len(heard.read_text().splitlines()) == 2)
         calls = [json.loads(line) for line in played.read_text().splitlines()]
         assert [bytes.fromhex(line) for line in heard.read_text().splitlines()] == [b'first spoken reply', b'second spoken reply']
         assert [call[1] for call in calls] == ['1.2', '1.2'], calls
@@ -237,7 +328,8 @@ with flow([], config=config()) as f:
 # A dropped/paired-style answer re-asks one id/file, while drafts and quit stay responsive.
 mode.write_text('quiet')
 hold.touch()
-with flow([reply(text='late note admitted')], config=config()) as f:
+# Ctrl-C quits with words in the draft, which it would empty were the clear key bound.
+with flow([reply(text='late note admitted')], config=config() + '\n[ui.keys.composer]\nclear = []\n') as f:
     server.start(f)
     session = server.post(f, '/sessions', {'cwd': str(f.cwd)})['session']
     proxy = Proxy(f)
