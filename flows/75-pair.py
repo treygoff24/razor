@@ -59,7 +59,7 @@ with flow([], config='[server]\nname = "alpha"\naddress = "127.0.0.1:0"') as f, 
     requests = []
     class Identity(BaseHTTPRequestHandler):
         def do_GET(self):
-            requests.append((self.path, self.headers.get("Authorization")))
+            requests.append((self.path, self.headers.get("Authorization"), self.headers.get("User-Agent")))
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b'{"name":"another-server"}')
@@ -79,7 +79,11 @@ with flow([], config='[server]\nname = "alpha"\naddress = "127.0.0.1:0"') as f, 
             settings.write_text(original)
             trap.shutdown()
             worker.join()
-    assert requests == [("/v1/pair", None)], "doctor sent credentials or probed a protected route"
+    # A program that probes every listening port here (Go-http-client's GET /) names itself;
+    # doctor's request names none. No request may carry a credential.
+    doctors = [(path, key) for path, key, agent in requests if agent is None]
+    assert doctors == [("/v1/pair", None)] and not any(key for _, key, _ in requests), \
+        f"doctor sent credentials, probed a protected route or none: {requests}"
 
     # Tailscale is other people's software; the discovered HTTP server is the real binary.
     peer_ip, peer_port = b.rsplit(":", 1)
@@ -126,6 +130,13 @@ with flow([], config='[server]\nname = "alpha"\naddress = "127.0.0.1:0"') as f, 
     assert caller["address"] == b and caller.get("key") is None and "push" not in caller, caller
     assert send(first, "GET", "/devices", key=bb[0]["key"]).status == 200
     assert send(second, "GET", "/devices", key=aa[0]["key"]).status == 200
+    # Every status stream opens with the agents snapshot, even while a paired row keeps changing.
+    remote_session = post(second, "/sessions", {"cwd": str(beta.cwd)})["session"]
+    wait(lambda: remote_session in send(first, "GET", "/status").readline().decode(), why="peer row")
+    churn = Thread(target=lambda: [send(second, "PUT", f"/sessions/{remote_session}/seen?entry={n % 2 * 99}").read() for n in range(3000)])
+    churn.start()
+    while churn.is_alive():
+        assert json.loads(send(first, "GET", "/status").readline())["kind"] == "agents"
 
     stop(f)
     settings.write_text(settings.read_text().replace("127.0.0.1:0", "invalid-address"))

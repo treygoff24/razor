@@ -7,7 +7,6 @@ use crate::{
     protocol::*,
 };
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use tokio::sync::{mpsc, watch};
 
@@ -75,7 +74,7 @@ pub(super) async fn serve(
                         task.emit(FromBridge::Entry { body: Body::Call { call: run.call.clone(), name: run.name.clone(), input: run.input.clone() }, native: None }).await?;
                         task.nested.insert(run.call.0.clone(), run);
                     } else {
-                        let _ = run.reply.send(Err(code_mode::Error::Refused("The turn ended before this call was admitted.".into())));
+                        run.late();
                     }
                 },
             }
@@ -150,26 +149,19 @@ impl Task {
                 if let Some(run) = self.nested.remove(&call.0) {
                     self.settle |= settle;
                     self.images.extend(Image::named(&output));
-                    self.emit(FromBridge::Entry {
-                        body: Body::Result {
-                            call,
-                            outcome: if error {
-                                Outcome::Error
-                            } else {
-                                Outcome::Success
-                            },
-                            output: output.clone(),
-                            inputs: Vec::new(),
-                        },
-                        native: None,
-                    })
-                    .await?;
-                    let _ = run.reply.send(if error {
-                        Err(code_mode::Error::Refused(output))
+                    let outcome = if error {
+                        Outcome::Error
                     } else {
-                        // An object or a string, as exec's description says.
-                        Ok(serde_json::from_str::<Value>(&output).unwrap_or(Value::String(output)))
-                    });
+                        Outcome::Success
+                    };
+                    let body = Body::Result {
+                        call,
+                        outcome,
+                        output: output.clone(),
+                        inputs: Vec::new(),
+                    };
+                    self.emit(FromBridge::Entry { body, native: None }).await?;
+                    run.answer(output, error);
                 }
                 return Ok(true);
             }
@@ -200,29 +192,17 @@ impl Task {
                     self.start();
                 }
                 let mapped = profile.input(tool, input.clone());
-                let (code, call, stop, nested) = (
-                    self.code.clone(),
-                    call.clone(),
-                    self.stop.subscribe(),
-                    Arc::from(profile.nested.clone()),
-                );
+                let (code, call, stop) = (self.code.clone(), call.clone(), self.stop.subscribe());
                 // Keep the native byte permit through the local result, rather than queue unbudgeted calls.
                 self.locals.push(
                     async move {
                         let _held = held;
-                        let result = async {
-                            let (action, input) =
-                                mapped.map_err(|e| code_mode::Error::Refused(e.to_string()))?;
-                            if action == "exec" {
-                                let source = input.as_str().ok_or_else(|| {
-                                    code_mode::Error::Refused("exec needs source text.".into())
-                                })?;
-                                code.exec(call.clone(), source.into(), nested, stop).await
-                            } else {
-                                code.wait(input).await
+                        let result = match mapped {
+                            Ok(mapped) => {
+                                code.call(call.clone(), mapped, &profile.nested, stop).await
                             }
-                        }
-                        .await;
+                            Err(error) => Err(code_mode::Error::Refused(error.to_string())),
+                        };
                         (call, result)
                     }
                     .boxed(),

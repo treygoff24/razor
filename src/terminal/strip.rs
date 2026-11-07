@@ -16,9 +16,9 @@ fn fleet(app: &App) -> Vec<&AgentView> {
     (app.root.as_ref()).map_or(Vec::new(), |root| super::cards::children(app, root))
 }
 
-/// The main session's children as cards: those kept, then the ended ones.
-fn cards(app: &App, now: u64) -> (Vec<Card<'_>>, Vec<Card<'_>>) {
-    let all = fleet(app).into_iter().map(|a| Card::of(app, a, now));
+/// `fleet` as cards: those kept, then the ended ones.
+fn cards<'a>(app: &App, fleet: &[&'a AgentView], now: u64) -> (Vec<Card<'a>>, Vec<Card<'a>>) {
+    let all = fleet.iter().map(|a| Card::of(app, a, now));
     all.partition(|c| c.kept(now))
 }
 
@@ -26,13 +26,15 @@ fn cards(app: &App, now: u64) -> (Vec<Card<'_>>, Vec<Card<'_>>) {
 /// outside a split; one folded; open, one more per kept child, one for the ended ones' line and
 /// one for each of them while the archive is open, six at most.
 pub fn rows(app: &App, now: u64) -> u16 {
-    if fleet(app).is_empty() || app.columns >= PHONE && !app.split_view() {
+    let shown = app.columns < PHONE || app.split_view();
+    let fleet = if shown { fleet(app) } else { Vec::new() };
+    if fleet.is_empty() {
         return 0;
     }
     if !app.strip {
         return 1;
     }
-    let (kept, ended) = cards(app, now);
+    let (kept, ended) = cards(app, &fleet, now);
     let archive = if app.archive { ended.len() } else { 0 };
     1 + (kept.len() + usize::from(!ended.is_empty()) + archive).min(6) as u16
 }
@@ -46,24 +48,20 @@ pub fn draw(app: &App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit>) {
     fill(b, r, style(DATA, BEZEL));
     let mark = if app.strip { " ▾ " } else { " ▸ " };
     let x = put(b, r.x, r.y, mark, 3, style(CYAN, BEZEL));
-    let glyphs = glyphs(app, now);
-    let used: usize = glyphs.iter().map(|s| width(&s.content)).sum();
-    let words = words(app, usize::from(r.width).saturating_sub(4 + used));
+    let fleet = fleet(app);
+    let glyphs = glyphs(app, &fleet, now);
+    let used = spans_width(&glyphs);
+    let words = words(app, &fleet, usize::from(r.width).saturating_sub(4 + used));
     let words = Line::from([glyphs, words].concat());
-    line(
-        b,
-        Rect::new(x, r.y, r.width.saturating_sub(3), 1),
-        r.y,
-        &words,
-        style(DATA, BEZEL),
-    );
+    let head = Rect::new(x, r.y, r.width.saturating_sub(3), 1);
+    line(b, head, r.y, &words, style(DATA, BEZEL));
     hits.push((Rect::new(r.x, r.y, r.width, 1), Action::Strip));
     if !app.strip {
         return;
     }
     // The kept children, then the ended ones folded behind one line, `▸ 2 finished`, which opens
     // and folds them with the pane's archive.
-    let (kept, ended) = cards(app, now);
+    let (kept, ended) = cards(app, &fleet, now);
     let open: Vec<&Card> = kept
         .iter()
         .chain(ended.iter().filter(|_| app.archive))
@@ -89,8 +87,8 @@ pub fn draw(app: &App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit>) {
 }
 
 // Folded, one glyph per child in launch order as its card draws it, eight at most, then `+N`.
-fn glyphs(app: &App, now: u64) -> Vec<Span<'static>> {
-    let all = if app.strip { Vec::new() } else { fleet(app) };
+fn glyphs(app: &App, fleet: &[&AgentView], now: u64) -> Vec<Span<'static>> {
+    let all = if app.strip { &[][..] } else { fleet };
     let cards = all.iter().take(8).map(|a| Card::of(app, a, now));
     let mut glyphs: Vec<_> = cards
         .map(|c| Span::styled(c.glyph, style(c.tone, BEZEL)))
@@ -121,11 +119,10 @@ fn lines(cards: &[&Card], room: usize) -> Vec<Line<'static>> {
     let widest_model = |level: usize| forms.iter().map(|f| width(&f[level])).max().unwrap_or(0);
     let tokens =
         |c: &Card| (c.agent.context).map_or("no usage".into(), |t| format!("{} tok", kilo(t)));
-    let widest = |of: &dyn Fn(&Card) -> String| cards.iter().map(|c| width(&of(c))).max();
-    let widest = |of: &dyn Fn(&Card) -> String| widest(of).unwrap_or(0);
-    let id = widest(&|c| c.agent.name.clone()).min(10);
-    let (word, used) = (widest(&|c| c.word.into()), widest(&tokens));
-    let took = widest(&|c| c.clock.clone());
+    let widest = |of: &dyn Fn(&Card) -> usize| cards.iter().map(|c| of(c)).max().unwrap_or(0);
+    let id = widest(&|c| width(&c.agent.name)).min(10);
+    let (word, used) = (widest(&|c| width(c.word)), widest(&|c| width(&tokens(c))));
+    let took = widest(&|c| width(&c.clock));
     let room = room.saturating_sub(id + word + took + used + 4).max(4);
     let level = (0..2)
         .find(|&level| widest_model(level) <= room)
@@ -164,7 +161,7 @@ fn lines(cards: &[&Card], room: usize) -> Vec<Line<'static>> {
 /// The strip's words for the main session's children within `room` columns, fullest first:
 /// `main agent waiting on 2 of 3 agents · 1 done` while it waits on them, then shorter; else
 /// `3 agents · 1 working · 1 done`, then `3 · …`; the counts in their states' colours.
-fn words(app: &App, room: usize) -> Vec<Span<'static>> {
+fn words(app: &App, all: &[&AgentView], room: usize) -> Vec<Span<'static>> {
     let mut counts: [(usize, &str, Color); 5] = [
         (0, "working", GREEN),
         (0, "idle", CYAN),
@@ -172,8 +169,7 @@ fn words(app: &App, room: usize) -> Vec<Span<'static>> {
         (0, "done", WHITE),
         (0, "stopped", AMBER),
     ];
-    let all = fleet(app);
-    for agent in &all {
+    for agent in all {
         let group = match (agent.state, &agent.report) {
             (State::Working, _) => 0,
             (State::NeedsYou, _) if !agent.asks.is_empty() => 0,
@@ -211,7 +207,7 @@ fn words(app: &App, room: usize) -> Vec<Span<'static>> {
     for sep in [" · ", " "] {
         for lead in &leads {
             let row = words(lead, sep);
-            if row.iter().map(|s| width(&s.content)).sum::<usize>() <= room {
+            if spans_width(&row) <= room {
                 return row;
             }
         }

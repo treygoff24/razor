@@ -46,10 +46,8 @@ impl Table {
             let room = columns.saturating_sub(widths.len() + 1);
             fit(&mut widths, room);
             // The table spans the reply: spare columns are shared, the first taking the rest.
-            let (n, spare) = (
-                widths.len().max(1),
-                room.saturating_sub(widths.iter().sum()),
-            );
+            let n = widths.len().max(1);
+            let spare = room.saturating_sub(widths.iter().sum());
             for (i, w) in widths.iter_mut().enumerate() {
                 *w += spare / n + usize::from(i < spare % n);
             }
@@ -80,7 +78,7 @@ impl Table {
         }
         let range =
             out.range.start.saturating_sub(out.total)..out.range.end.saturating_sub(out.total);
-        let cells: Vec<_> = (0..self.widths.len())
+        let mut cells: Vec<_> = (0..self.widths.len())
             .map(|j| {
                 let mut cell = Lines {
                     range: range.clone(),
@@ -102,13 +100,13 @@ impl Table {
             let border = Style::default().fg(GRAY);
             let mut spans = vec![Span::styled("│", border)];
             let (mut links, mut column, mut bars) = (Vec::new(), 1, vec![0]);
-            for (j, cell) in cells.iter().enumerate() {
+            for (j, cell) in cells.iter_mut().enumerate() {
                 let line = y
                     .checked_sub(range.start)
-                    .and_then(|at| cell.lines.get(at))
-                    .cloned()
+                    .and_then(|at| cell.lines.get_mut(at))
+                    .map(std::mem::take)
                     .unwrap_or_default();
-                let used: usize = line.words.spans.iter().map(|s| width(&s.content)).sum();
+                let used = spans_width(&line.words.spans);
                 links.extend(line.links.into_iter().map(|link| Link {
                     columns: link.columns.start + column..link.columns.end + column,
                     url: link.url,

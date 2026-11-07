@@ -11,6 +11,7 @@ from claude import reply as claude
 from driver import flow
 from responses import PLAIN, reply as gpt
 import server
+from terminal import Terminal
 
 said = lambda route, words: claude(text=words) if route == "claude" else gpt(None, words)
 note = lambda route, words: claude((None, "mcp__razor__handover", {"note": words})) if route == "claude" else gpt(None, "handover", note=words)
@@ -35,9 +36,9 @@ for route, other, start, near, far in (("claude", "gpt", "sonnet", "opus", "gpt-
         (bin / "git").write_text(f'#!/bin/sh\ncase "$*" in *status*) touch {f.home}/status;; esac\nexec {shutil.which("git")} "$@"\n')
         (bin / "git").chmod(0o755)
         f.env["PATH"] = f"{bin}:{f.env['PATH']}"
-        bodies = lambda: [json.loads(p.read_bytes()) for p in sorted(f.requests.glob("[0-9]*.body"))]
+        bodies = lambda: [json.loads(body) for body in f.sent()]
         ended = lambda n: lambda es: sum(e["kind"] == "turn_end" for e in es) == n
-        session = json.loads(f.run("--print=json", "First words.").stdout)["session"]
+        session = f.ask("First words.")["session"]
         switches = lambda: json.loads(server.send(f, "GET", f"/models?session={session}").read())["switch"]
         # Under the floor a switch keeps the conversation without asking; the other family hands over.
         seen = switches()
@@ -64,11 +65,12 @@ for route, other, start, near, far in (("claude", "gpt", "sonnet", "opus", "gpt-
         assert next(e for e in entries if e.get("text") == "Fresh start.")["handover"] is True, entries
 
 # A note turn cut off by its model path's end or by a restart: the switch still opens the new model
-# behind its words, with the abandoned note request left out and all held words in its first request.
+# behind its words, with the abandoned note request left out and all held words in its first request;
+# the old model's words keep its name.
 for cut in ("path", "restart"):
-    wait = claude((None, "Bash", {"command": "until [ -e never ]; do sleep 0.05; done"}))
+    wait = claude((None, "Bash", {"command": "until [ -e never ]; do sleep 0.05; done"}), text="CUT_NOTE")
     with flow([big(said("claude", "GROWN")), wait, said("gpt", "OPENED")], model="sonnet", config=PLAIN) as f:
-        session = json.loads(f.run("--print=json", "First words.").stdout)["session"]
+        session = f.ask("First words.")["session"]
         words = server.post(f, f"/sessions/{session}/input", {"text": "Cut words.", "model": "gpt-6.1-sol"})["entry"]
         server.until(f, session, lambda es: any(e["kind"] == "job" for e in es))
         later = server.post(f, f"/sessions/{session}/input", {"text": "Later words."})["entry"]
@@ -80,13 +82,17 @@ for cut in ("path", "restart"):
             server.stop(f, signal.SIGKILL)
             server.start(f)
         ends = [e["end"] for e in server.until(f, session, lambda es: any(later in e.get("inputs", []) for e in es)) if words in e.get("inputs", [])]
-        bodies = [json.loads(p.read_bytes()) for p in sorted(f.requests.glob("[0-9]*.body"))]
+        bodies = [json.loads(body) for body in f.sent()]
         opened = bodies[-1]
         assert len(bodies) == 3 and ends == ["done"] and opened["model"] == "gpt-6.1-sol", (cut, ends, texts(opened))
         assert texts(opened)[-2:] == ["Cut words.", "Later words."], (cut, texts(opened))
         assert "switching to another model" not in json.dumps(opened), (cut, texts(opened))
         counted = [i for e in f.record(session) if e["kind"] == "turn_end" for i in e["inputs"]]
         assert counted.count(words) == counted.count(later) == 1, counted
+        with Terminal(f, "--resume", session) as t:
+            t.shown("CUT_NOTE", "OPENED")
+            sign = lambda words: next(row for row in t.screen.display[t.find(words)[0]::-1] if "❖" in row)
+            assert "Sonnet ❖" in sign("CUT_NOTE") and "Gpt 6.1 sol ❖" in sign("OPENED"), (cut, t.text())
 
 # Effort takes effect without input, including at a busy Claude boundary after an in-place
 # model switch; a later staged model waits for its input, and a repeated effort adds nothing.
@@ -99,9 +105,9 @@ with flow([claude(text="FIRST"), claude((None, "Bash", {"command": "IFS= read -r
     change = server.post(f, effort, {"effort": "medium"})["entry"]
     before = list(f.record(session))
     assert before[-1]["id"] == change and before[-1]["kind"] == "effort" and before[-1]["effort"] == "medium", before
-    assert not list(f.requests.glob("[0-9]*.body")) and not any(e["kind"] == "input" for e in before), before
+    assert not f.sent() and not any(e["kind"] == "input" for e in before), before
     assert server.post(f, effort, {"effort": "medium"}) == {} and list(f.record(session)) == before, "repeated effort appended an entry"
-    assert (first := f.run("--resume", session, "--print=json", "First words.")).returncode == 0, first.stderr
+    f.ask("--resume", session, "First words.")
     with server.send(f, "GET", f"/sessions/{session}/events?after={list(f.record(session))[-1]['id']}") as events:
         active = server.post(f, f"/sessions/{session}/input", {"text": "Keep working.", "model": "opus"})["entry"]
         for line in iter(events.readline, b""):
@@ -116,7 +122,7 @@ with flow([claude(text="FIRST"), claude((None, "Bash", {"command": "IFS= read -r
             end = json.loads(line)
             if end["kind"] == "turn_end" and later in end["inputs"]:
                 break
-    bodies = [json.loads(p.read_bytes()) for p in sorted(f.requests.glob("[0-9]*.body"))]
+    bodies = [json.loads(body) for body in f.sent()]
     assert len(bodies) == 3 and [b["output_config"]["effort"] for b in bodies] == ["medium", "medium", "xhigh"], bodies
     assert ["opus" in b["model"] for b in bodies] == [False, True, True], [b["model"] for b in bodies]
     assert any(m.get("output_config", {}).get("effort") == "xhigh" for m in bodies[2]["messages"] if m["role"] == "system"), bodies[2]
@@ -143,7 +149,7 @@ for restart, heartbeat in ((False, True), (True, False), (True, True)):
         server.until(f, "ember", lambda es: any(e["kind"] == "call" for e in es))
         choice = server.post(f, path, {"text": "CHOICE_68", "model": "gpt-6-sol", "handover": True})["entry"]
         server.until(f, "ember", lambda es: any(e["kind"] == "turn_end" and choice in e["inputs"] for e in es))
-        joined = json.loads((f.requests / "002.body").read_bytes())
+        joined = f.request(2)
         assert joined["model"] == "gpt-6.1-sol" and json.dumps(joined).count("CHOICE_68") == 1, joined
         if restart:
             server.stop(f, signal.SIGKILL)
@@ -154,6 +160,6 @@ for restart, heartbeat in ((False, True), (True, False), (True, True)):
         entries = server.until(f, "ember", lambda es: any(e["kind"] == "turn_end" and later in e["inputs"] for e in es))
         rebuilds = [e for e in entries if e["kind"] == "rebuild"]
         assert [e["trigger"] for e in rebuilds] == ["change"] and rebuilds[0]["id"] > later, entries
-        bodies = [json.loads(p.read_bytes()) for p in sorted(f.requests.glob("[0-9]*.body"))]
+        bodies = [json.loads(body) for body in f.sent()]
         assert [b["model"] for b in bodies] == ["gpt-6.1-sol"] * (3 if heartbeat else 2) + ["gpt-6-sol"], bodies
         assert all(sum(e.get("inputs", []).count(i) for e in entries if e["kind"] == "turn_end") == 1 for i in (first, choice, later)), entries

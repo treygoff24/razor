@@ -176,8 +176,7 @@ fn complete(
         items: done.into_values().collect(),
         usage,
         end_turn,
-        turn_state: None,
-        windows: Vec::new(),
         tier: completed["service_tier"].as_str().map(str::to_owned),
+        ..Response::default()
     })
 }

@@ -9,9 +9,9 @@ import shutil
 import socket
 import subprocess
 import sys
-import time
 from pathlib import Path
 from driver import AUTH, BINARY, flow
+import server
 
 with flow([]) as f:
     fresh, home = f.home.parent / "fresh", f.home.parent / "fresh/home"
@@ -127,9 +127,8 @@ with flow([]) as f:
         (shipped / "cua-driver").chmod(0o755)
         assert subprocess.run([shipped / "razor", "devices"], env={**f.env, "DISPLAY": ":0", "EXA_API_KEY": planted[2]},
                               capture_output=True, timeout=30).returncode == 0
-        args, deadline = shipped / "cua-driver.args", time.monotonic() + 10
-        while not args.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
+        args = shipped / "cua-driver.args"
+        server.wait(args.exists, 10, "the shipped driver never started")
         pid, *args = args.read_text().split()
         state = f.home / ".razor"
         assert args == ["serve", "--embedded", "--parent-liveness-stdio", "--socket",

@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 import claude
 from driver import flow
-from model import agent, message, reply
+from model import agent, message, reply, tool
 import mcp
 import server
 from terminal import Terminal
@@ -31,11 +31,12 @@ with flow([claude.reply(text='alpha beta gamma delta epsilon zeta')], env={'SSH_
     with Terminal(f) as t:
         t.shown('Message the agent')
         t.send('hello\r')
-        t.shown('alpha beta gamma delta epsilon zeta', '▶')
-        y, x = next((y, wcswidth(line[:line.index('alpha')])) for y, line in enumerate(t.screen.display) if 'alpha beta' in line)
+        # The reply and its play mark draw a frame before the idle layout moves them down.
+        t.shown('alpha beta gamma delta epsilon zeta', '▶', 'agent idle')
+        y, x = t.find('alpha beta')
         t.send(f'\x1b[<0;{x+1};{y+1}M\x1b[<32;{x+5};{y+1}M\x1b[<0;{x+5};{y+1}m')
         t.shown('❝ quote')
-        cy, cx = next((y, wcswidth(line[:line.index('❝ quote')])) for y, line in enumerate(t.screen.display) if '❝ quote' in line)
+        cy, cx = t.find('❝ quote')
         t.send(f'\x1b[<0;{cx+1};{cy+1}M\x1b[<32;{x+10};{y+1}M\x1b[<0;{x+10};{y+1}m')
         t.until(lambda t: t.output.count(b'\x1b]52;c;') >= 2)
         assert '> alpha' not in t.text(), t.text()
@@ -145,7 +146,7 @@ replies = [agent(ROOT, "start", name="oak", brief="Read the brief and reply."),
            reply("FAIL_ROOT", "Bash", {"command": "seq 1 9000; echo LAST_REAL_LINE; exit 1"}),
            claude.reply((None, "Bash", {"command": "seq 3 | sed 's/^/SMALL_/'"}),
                         text="Checking a small one.", match="FAIL_ROOT"),
-           reply("FAIL_ROOT", "mcp__razor__status", {}), reply("FAIL_ROOT", "Bash", {"command": "sleep 600"})]
+           tool("FAIL_ROOT", "status"), reply("FAIL_ROOT", "Bash", {"command": "sleep 600"})]
 # One stdio server, which the /mcp panel lists and disables.
 local = f"[mcp.local]\ncommand = {json.dumps(sys.executable)}\nargs = [{json.dumps(str(Path(mcp.__file__).resolve()))}]\n"
 with flow(replies, config=local + '[server]\nname="box"\nrealm="work"\n') as f:
@@ -340,7 +341,7 @@ with flow(replies, config=local + '[server]\nname="box"\nrealm="work"\n') as f:
         t.send("TITLE_ROOT\r")
         t.shown("title-turn-visible")
         # A list nested in a tight item starts its own row, indented under its item's words.
-        at = next(y for y, line in enumerate(t.screen.display) if "LIST_26" in line)
+        at = t.find("LIST_26")[0]
         assert "  - NESTED_26" in t.screen.display[at + 1], t.text()
         t.until(lambda t: t.screen.title == f"✓ {f.cwd.name} · done")
         t.until(lambda t: t.records().get("", {}).get("state") == "done")
@@ -368,7 +369,7 @@ with flow(replies, config=local + '[server]\nname="box"\nrealm="work"\n') as f:
         # One wheel event moves the view one row; output arriving below leaves a held view still.
         # The rows compared reach the turn's last ones, so no step over its alternating call rows
         # passes for one row.
-        n = next(y for y, line in enumerate(t.screen.display) if "▁▁▁" in line) - 5
+        n = t.find("▁▁▁")[0] - 5
         rows = lambda t, first: [line[17:118] for line in t.screen.display[first:first + n]]
         shown = rows(t, 4)
         t.send("\x1b[<64;60;20M")
@@ -441,7 +442,7 @@ with flow(replies, config=local + '[server]\nname="box"\nrealm="work"\n') as f:
         t.shown("✗ exit 1", "› LAST_REAL_LINE", "3 lines", "Esc stops")
         assert "</persisted-output>" not in t.text() and "whole output is in" not in t.text(), t.text()
         # A reply between calls ends in a blank row before the line resumes, as Loom draws it.
-        y = next(y for y, line in enumerate(t.screen.display) if "Checking a small one." in line)
+        y = t.find("Checking a small one.")[0]
         assert not t.screen.display[y + 1][17:].strip(), t.text()
         def tick(t):
             y, line = next((y, line) for y, line in enumerate(t.screen.display) if "┼   status" in line)
@@ -495,6 +496,12 @@ with flow(replies, model="gpt-6.1-sol", config='[server]\nname="box"\nrealm="wor
         t.send("USAGE_ROOT\r")
         t.shown("flow done", "cwd · main", "idle", "14%", "81%", "60% reused")
         bars(t, [("5-hour", 14, "3ee56d"), ("7-day", 81, "ffb319")])
+        # The agents list's servers line names, by its word in the servers table, the server
+        # whose window is fullest: the peer's, on this one.
+        t.send("\x1bOQ")
+        t.shown("servers · all 1 answer · box 7-day 100%")
+        t.send("\x1bOQ")
+        t.until(lambda t: "‹ F2" not in t.text() and "60% reused" in t.text())
         for at in (reset, reset + 86400):
             reset_at = datetime.fromtimestamp(at)
             form = "%-I:%M%p" if reset_at.date() == datetime.now().date() else "%a %-I:%M%p"
@@ -505,11 +512,10 @@ with flow(replies, model="gpt-6.1-sol", config='[server]\nname="box"\nrealm="wor
         # The draft lights a known skill's name; the mouse selects in it as the cockpit's did.
         t.send("use /plan now")
         t.shown("use /plan now")
-        y, line = next((y, l) for y, l in enumerate(t.screen.display) if "use /plan now" in l)
-        x = wcswidth(line[:line.index("use /plan now")])
+        y, x = t.find("use /plan now")
         cell = lambda dx: t.screen.buffer[y][x + dx]
         t.until(lambda t: all(cell(dx).fg == "ecd48c" and cell(dx).bold for dx in range(4, 9)))
-        assert cell(3).fg != "ecd48c" and cell(9).fg != "ecd48c", line
+        assert cell(3).fg != "ecd48c" and cell(9).fg != "ecd48c", t.text()
         # A drag reverses what it passes over and copies it when the button comes up.
         t.send(f"\x1b[<0;{x + 1};{y + 1}M\x1b[<32;{x + 4};{y + 1}M\x1b[<0;{x + 4};{y + 1}m")
         t.until(lambda t: all(cell(dx).reverse for dx in range(3)) and not cell(3).reverse)
@@ -554,9 +560,7 @@ with flow(replies, model="gpt-6.1-sol", config='[server]\nname="box"\nrealm="wor
 
 # A removed peer's background preview never keeps renewing its failure toast.
 with flow([done()], model="gpt-6.1-sol") as f:
-    result = f.run("--print=json", "USAGE_GHOST")
-    assert result.returncode == 0, result.stderr
-    root = json.loads(result.stdout)["session"]
+    root = f.ask("USAGE_GHOST")["session"]
     ghost = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
     folder = f.home / ".razor/sessions" / ghost
     assert (folder / "record.jsonl").is_file(), folder
@@ -611,20 +615,37 @@ replies = [start("KIDS", ["kid2"]), reply("KIDS", "Bash", {"command": "sleep 1.1
            reply("You are kid2,", "Bash", {"command": "until grep -q 'sleep 6[0]' \"$RAZOR_HOME\"/sessions/*/record.jsonl; do sleep .1; done"}), message("ASK26", "question", text="Choose 26", options=["one", "two"]), reply("ASK26"), reply("ASK26", text="answered26"),
            *[r for k in ["kid2", *kids, *grand] for r in (
                reply(f"You are {k},", "Bash", {"command": "echo work > work; git add work && git -c user.name=Flow -c user.email=flow@example.invalid commit -m Work"}), agent(f"You are {k},", "finish", status="finished", report="ok"))]]
-with flow(replies, config='[ui.keys.goto]\nsearch = ["s"]\n[ui.keys.prefix]\n"attached_images.focus" = ["i"]\n') as f:
+with flow(replies, config='[ui.keys.goto]\nsearch = ["s"]\n[ui.keys.panel]\nsearch = []\n[ui.keys.prefix]\n"attached_images.focus" = ["i"]\n') as f:
     f.base()
-    root = json.loads(f.run("--print=json", "KIDS", timeout=120).stdout)["session"]
+    root = f.ask("KIDS", timeout=120)["session"]
     server.until(f, root, lambda es: sum(e["kind"] == "turn_end" for e in es) == 2)  # and the reports'
     server.post(f, f"/sessions/{root}/input", {"text": "NAP"})
     (f.cwd / "other").mkdir()
-    other = json.loads(replace(f, cwd=f.cwd / "other").run("--print=json", "OTHER").stdout)["session"]
+    other = replace(f, cwd=f.cwd / "other").ask("OTHER")["session"]
     with Terminal(f, "--resume", other, columns=160) as t:
+        # A panel's last line leaves out the hint of a key the settings unbound.
+        t.shown("Message the agent")
+        t.send("/keys\r")
+        t.shown("┌─ keys", "Esc back")
+        foot = next(line for line in t.screen.display if "Esc back" in line)
+        assert "scroll" in foot and "unbound" not in foot and "search" not in foot, foot
+        t.send("\x1b")
+        t.until(lambda t: "┌─ keys" not in t.text())
         t.send("\x1bOQ")
         kid = lambda t: [line[:52] for line in t.screen.display if re.search(r" kid\d ", line[:52])]
         kids = lambda t: len(kid(t)) == 3 and all("waiting for merge" in line for line in kid(t)) and "kid1" not in t.text()
         # Slid fully open; kid1's stopped child leaves the list too.
         t.until(lambda t: "✓ 2 done" in t.text() and t.screen.display[0][52] == "╮" and kids(t) and "EARLIER" not in t.text() and "1 AGENT" in t.text())
         assert t.screen.display[0].startswith("╭─ RAZOR") and " move " in t.screen.display[-1][:52], t.text()
+        # Go to a helper's helper, kid2's g1, with kid2 folded into the done line opens the line
+        # and selects its row.
+        assert not any(" kid2 " in line for line in kid(t)), t.text()
+        t.send("`gsg1")
+        t.shown("1 of")
+        t.send("\r")
+        t.until(lambda t: len(kid(t)) == 5 and any("❯" in row and " g1 " in row[:52] for row in t.screen.display))
+        t.click("✓ 2 done")
+        t.until(lambda t: len(kid(t)) == 3)
         t.click("✓ 2 done")
         t.until(lambda t: len(kid(t)) == 5)
         y = next(y for y, line in enumerate(t.screen.display) if " cwd " in line[:52])
@@ -635,6 +656,10 @@ with flow(replies, config='[ui.keys.goto]\nsearch = ["s"]\n[ui.keys.prefix]\n"at
         t.until(lambda t: not kid(t))
         t.send(" ")  # Space unfolds it again
         t.until(lambda t: len(kid(t)) == 5)
+        t.send("\r")  # Enter opens the selected agent, the addressed one here, closing the list
+        t.until(lambda t: not t.screen.display[0].startswith("╭─ RAZOR"))
+        t.send("\x1bOQ")
+        t.until(lambda t: len(kid(t)) == 5 and t.screen.display[0][52] == "╮")
         t.send("\x14")
         t.shown(" STATUS ")
         t.send(f"\x1b[<0;6;{y + 1}M\x1b[<0;6;{y + 1}m\x14")  # the click hands the keys back

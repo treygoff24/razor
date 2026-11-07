@@ -87,7 +87,8 @@ with flow(replies,
         # A closed thread leaves its resident for the folded Earlier, as a closed root does.
         assert not any(n in t.text() for n in (*named[:4], "fresh ·")), t.text()
         # Closed sessions' rows arrive in the background after a restart; click once all are in.
-        t.until(lambda t: any("EARLIER" in line and "4 AGENTS" in line for line in t.screen.display))
+        # With them is the root nobody wrote to, which --agents therefore left unopened.
+        t.until(lambda t: any("EARLIER" in line and "5 AGENTS" in line for line in t.screen.display))
         t.click("EARLIER")
         t.shown(*named[:4])
         assert {recent, oldest} <= set(agents := server.agents(f)) and not {old, rest[-1]} & set(agents)
@@ -126,3 +127,94 @@ with flow(replies,
             # A selected parent's fold arrow turns cyan; any other selected row shows ❯.
             cells = [t.screen.buffer[y][x] for y in range(t.rows) for x in range(54)]
             assert any(c.data == "❯" or c.data in "▾▸" and c.fg == "3fd9f2" for c in cells), t.text()
+
+# A close moves on only a person still on that session: one who went on to type a new thread keeps
+# it, and the words come back after a visit elsewhere (Trey, 2026-11-06: "I lost everything I was typing").
+closing = "The person asked for `/done`"
+rs = [f"r{n}" for n in range(1, 8)]
+replies = [reply("CLOSE_64_A"), reply("CLOSE_64_B"),
+           reply(closing, "Bash", {"command": "until [ -e closed ]; do sleep .05; done"}), reply(closing)]
+with flow(replies, config='[server]\naddress = "127.0.0.1:0"') as f:
+    with (f.home / ".razor/config.toml").open("a") as config:
+        config.write("".join(f"\n[residents.{r}]\ncwd = {json.dumps(str(f.cwd))}\n" for r in ("ember", "fir", *rs)))
+    server.start(f)
+    a, b = (post(f, "/sessions", {"resident": "ember"})["session"] for _ in "ab")
+    for s, name in ((a, "close-a"), (b, "close-b")):
+        post(f, f"/sessions/{s}/input", {"text": name.replace("close-", "CLOSE_64_").upper()})
+        until(f, s, lambda es: es[-1]["kind"] == "turn_end")
+        send(f, "PUT", f"/sessions/{s}/name", name).read()
+    with Terminal(f, "--agents", columns=160, rows=40) as t:
+        t.shown("RESIDENTS")
+        t.click("RESIDENTS")
+        t.shown("close-a", "close-b")
+        t.click("○ close-a ")
+        t.until(lambda t: "close-a" in t.screen.display[2][54:])
+        t.send("/done\r")
+        t.shown("closing after this turn")
+        t.click("+ New thread")
+        t.send("UNSENT WORDS")
+        t.shown("New thread · ember", "UNSENT WORDS")
+        (f.cwd / "closed").touch()
+        until(f, a, lambda es: es[-1].get("closed"))
+        t.pump(2)
+        t.shown("New thread · ember", "UNSENT WORDS")
+        t.click("○ close-b ")
+        t.until(lambda t: "UNSENT WORDS" not in t.text())
+        # Go to, opening the closed one, opens the folded Earlier to select its row.
+        t.send("/goto\r/close-a")
+        t.shown("1 of")
+        t.send("\r")
+        t.until(lambda t: "┌─ Go to" not in t.text() and any("❯" in row and "close-a" in row[:54] for row in t.screen.display))
+        # Going to a thread in the open Residents keeps them open, its row selected.
+        t.send("/goto\r/close-b")
+        t.shown("1 of")
+        t.send("\r")
+        t.until(lambda t: "close-b" in t.screen.display[2][54:] and any("❯" in row and "close-b" in row[:54] for row in t.screen.display))
+        t.click("+ New thread")
+        t.shown("New thread · ember", "UNSENT WORDS")
+        # They reach only that destination: another resident's new thread starts empty, from a
+        # session or straight from this one, and its own words wait the same way.
+        t.click("○ close-b ")
+        t.send("/thread fir\r")
+        t.shown("New thread · fir")
+        assert "UNSENT WORDS" not in t.text(), t.text()
+        t.send("FIR WORDS")
+        t.shown("FIR WORDS")
+        t.click("+ New thread")
+        t.shown("New thread · ember", "UNSENT WORDS")
+        assert "FIR WORDS" not in t.text(), t.text()
+        # Eight new agents' words wait at most: with eight waiting, leaving a ninth's is refused,
+        # but going back to one that waits is not; quitting names where they wait.
+        for r in rs:
+            t.click("○ close-b ")
+            t.until(lambda t: "close-b" in t.screen.display[2][54:])
+            t.send(f"/thread {r}\r")
+            t.shown(f"New thread · {r}")
+            t.send(f"WORDS-{r}")
+            t.shown(f"WORDS-{r}")
+        t.click("○ close-b ")
+        t.shown("WORDS FOR 8 NEW AGENTS ALREADY WAIT", "New thread · r7", "WORDS-r7")
+        t.click("+ New thread")
+        t.shown("New thread · ember", "UNSENT WORDS")
+        # At 80 columns the armed quit shows every waiting destination and the way back whole,
+        # under its instruction; Ctrl-C first empties ember's draft, so it is no longer listed.
+        t.resize(40, 80)
+        t.send("\x03")
+        t.until(lambda t: "UNSENT WORDS" not in t.text())
+        t.send("\x03")
+        lost = "Quitting loses the unsent words for " + ", ".join(f"a thread with {r}" for r in ["fir", *rs])
+
+        def band(t):
+            """The screen from the armed quit notice's column, right of the list, as one line
+            without spaces, since a row may end after a slash."""
+            x = next((row.index("PRESS CTRL-C") - 1 for row in t.screen.display if "PRESS CTRL-C" in row), 0)
+            return "".join("".join(row[x:] for row in t.screen.display).split())
+
+        t.until(lambda t: "PRESS CTRL-C AGAIN TO QUIT" in t.text() and
+                "".join(f"{lost}; /new or /thread there keeps them.".split()) in band(t))
+        # Its wrapped rows start under its first word.
+        y, x = next((y, row.index("Quitting loses")) for y, row in enumerate(t.screen.display) if "Quitting loses" in row)
+        assert t.screen.display[y + 1][x - 1] == " " != t.screen.display[y + 1][x], t.text()
+        t.quit_said = lost
+        t.send("\x03")
+        t.leaves("the second Ctrl-C did not quit")

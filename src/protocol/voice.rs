@@ -51,7 +51,8 @@ pub(crate) struct Quiet {
     pub(crate) from: String,
     pub(crate) to: String,
 }
-/// One person's settings, owned by one home; usage is read-only to clients.
+/// One person's settings, owned by one home; usage is read-only to clients. A daily limit the
+/// person has not set is left out rather than null, so an older paired server still reads it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct VoiceSettings {
@@ -60,13 +61,14 @@ pub(crate) struct VoiceSettings {
     pub(crate) families: BTreeMap<String, String>,
     pub(crate) gain_db: f64,
     pub(crate) expressiveness: f64,
-    pub(crate) memos: bool,
     pub(crate) quiet: Option<Quiet>,
-    pub(crate) daily_characters: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) daily_characters: Option<u32>,
     pub(crate) used_today: u32,
     /// GPT-Live's voice for calls; empty is Marin.
     pub(crate) call_voice: String,
-    pub(crate) call_daily_dollars: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) call_daily_dollars: Option<f64>,
     pub(crate) call_used_today: f64,
 }
 impl Default for VoiceSettings {
@@ -77,12 +79,11 @@ impl Default for VoiceSettings {
             families: BTreeMap::new(),
             gain_db: 9.5,
             expressiveness: 0.5,
-            memos: false,
             quiet: None,
-            daily_characters: 3000,
+            daily_characters: None,
             used_today: 0,
             call_voice: String::new(),
-            call_daily_dollars: 10.0,
+            call_daily_dollars: None,
             call_used_today: 0.0,
         }
     }

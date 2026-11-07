@@ -168,7 +168,7 @@ async fn charge(
             *paid = used;
             let (today, day) = (granted.settings.call_used_today, granted.settings);
             let line = json!({"type": "usage", "seconds": used, "today": today});
-            let _ = reports.try_send((line, today >= day.call_daily_dollars));
+            let _ = reports.try_send((line, day.call_daily_dollars.is_some_and(|c| today >= c)));
             None
         }
         Err(refusal) => Some(refusal.1),

@@ -55,8 +55,7 @@ fn fill_at(pct: f64, h: usize) -> (usize, usize, usize) {
 
 /// The row's context as a percent of its window; `None` when unmeasured.
 pub(super) fn share(row: &AgentView) -> Option<f64> {
-    let (c, w) = row.context.zip(row.window.filter(|w| *w > 0))?;
-    Some((c as f64 / w as f64 * 100.).clamp(0., 100.))
+    super::cards::fill(row).map(|f| f * 100.)
 }
 
 /// The tide a new status row starts: from the share its gauge shows at `now`, so a move during a
@@ -89,7 +88,19 @@ pub(super) fn columns(app: &App) -> u16 {
     if app.gauge_folded { 8 } else { 17 }
 }
 
-pub(super) fn context(app: &App, id: Option<&SessionId>) -> Option<(u64, u64)> {
+// What a gauge of `id` reads at `now`, zero before a session: its share, how far its tide has
+// run, and its rebuild line, in percent.
+fn reading(app: &App, id: Option<&SessionId>, now: u64) -> (Option<f64>, f64, f64) {
+    let (pct, k) = id.map_or((Some(0.), 1.), |id| shown(app, id, now));
+    let agent = id.and_then(|id| app.agents.get(id));
+    (
+        pct,
+        k,
+        agent.map_or(90., |a| a.threshold * 100.).clamp(0., 100.),
+    )
+}
+
+fn context(app: &App, id: Option<&SessionId>) -> Option<(u64, u64)> {
     match id {
         Some(id) => {
             let agent = app.agents.get(id)?;
@@ -105,10 +116,7 @@ pub(super) fn draw(app: &App, b: &mut Buffer, r: Rect, id: Option<&SessionId>, n
     if r.width < 7 || r.height == 0 {
         return;
     }
-    let agent = id.and_then(|id| app.agents.get(id));
-    let context = context(app, id);
-    let (pct, k) = id.map_or((Some(0.), 1.), |id| shown(app, id, now));
-    let threshold = agent.map_or(90., |a| a.threshold * 100.).clamp(0., 100.);
+    let (context, (pct, k, threshold)) = (context(app, id), reading(app, id, now));
     let trend = id.zip(context).and_then(|(id, (_, w))| trend(app, id, w));
     let turns = pct.zip(trend).filter(|(p, t)| *p < threshold && *t > 0.);
     let turns = turns.map(|(p, t)| ((threshold - p) / t).round().max(1.) as u64);
@@ -164,9 +172,7 @@ pub(super) fn horizontal(app: &App, b: &mut Buffer, r: Rect, id: Option<&Session
     if r.height == 0 || r.width < 20 {
         return;
     }
-    let agent = id.and_then(|id| app.agents.get(id));
-    let (pct, k) = id.map_or((Some(0.), 1.), |id| shown(app, id, now));
-    let threshold = agent.map_or(90., |a| a.threshold * 100.).clamp(0., 100.);
+    let (pct, k, threshold) = reading(app, id, now);
     let window = context(app, id).map(|(_, w)| w);
     let trend = id.zip(window).and_then(|(id, w)| trend(app, id, w));
     // Folded by a tap: no word, the lines' numbers beside their marks, no trend.
@@ -200,7 +206,6 @@ pub(super) fn horizontal(app: &App, b: &mut Buffer, r: Rect, id: Option<&Session
             put(b, x + cell as u16 + 1, r.y, &digits, 3, ink);
         }
     }
-    // The percentage in its zone's colour.
     let words = match (pct, folded) {
         (Some(p), true) => format!("{p:>4.0}"),
         (None, true) => "   —".into(),
@@ -216,9 +221,7 @@ pub(super) fn horizontal(app: &App, b: &mut Buffer, r: Rect, id: Option<&Session
 /// the empty track; beside it the percentage over the tokens.
 pub(super) fn bar(app: &App, b: &mut Buffer, r: Rect, id: Option<&SessionId>, now: u64) {
     const EIGHTHS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
-    let agent = id.and_then(|id| app.agents.get(id));
-    let (pct, k) = id.map_or((Some(0.), 1.), |id| shown(app, id, now));
-    let threshold = agent.map_or(90., |a| a.threshold * 100.).clamp(0., 100.);
+    let (pct, k, threshold) = reading(app, id, now);
     let (top, low) = match (pct, context(app, id)) {
         (Some(p), Some((c, w))) => (format!("{p:.0}%"), format!("{}/{}", kilo(c), kilo(w))),
         _ => ("—".into(), String::new()),
@@ -226,18 +229,13 @@ pub(super) fn bar(app: &App, b: &mut Buffer, r: Rect, id: Option<&SessionId>, no
     let words = width(&top).max(width(&low)) as u16;
     let cells = r.width.saturating_sub(words + 1) as usize;
     let at = |p: f64| (p / 100. * cells as f64) as usize;
-    let value = pct.unwrap_or(0.).clamp(0., 100.) / 100. * cells as f64;
-    let (whole, eighth) = (value as usize, ((value.fract()) * 8.).round() as usize);
-    let (whole, eighth) = if eighth == 8 {
-        (whole + 1, 0)
-    } else {
-        (whole, eighth)
-    };
-    let edge = if eighth > 0 {
-        whole
-    } else {
-        whole.saturating_sub(1)
-    };
+    // The fill in eighths of a cell; its edge is the last cell it touches.
+    let eighths = (pct.unwrap_or(0.).clamp(0., 100.) / 100. * cells as f64 * 8.).round() as usize;
+    let (whole, eighth, edge) = (
+        eighths / 8,
+        eighths % 8,
+        eighths.div_ceil(8).saturating_sub(1),
+    );
     for i in 0..cells {
         let zone = match i {
             _ if i >= at(threshold) => RED,
@@ -309,7 +307,7 @@ fn scale(b: &mut Buffer, r: Rect, pct: Option<f64>, threshold: f64, folded: bool
         if folded {
             let (number, tone) = match () {
                 _ if here => (format!("{:>3}", pct.unwrap_or(0.) as u64), ink),
-                _ if row == hard => (format!("{threshold:>3}"), RED),
+                _ if row == hard => (format!("{:>3}", threshold.round() as u64), RED),
                 _ if row == 0 => ("100".into(), GRAY),
                 _ if row + 1 == h && pct.is_some() => ("  0".into(), GRAY),
                 _ if row + 1 == h => ("  —".into(), GRAY),
@@ -328,11 +326,7 @@ fn scale(b: &mut Buffer, r: Rect, pct: Option<f64>, threshold: f64, folded: bool
         }
         let label = labels.get(&row);
         let number = label.map_or("   ".into(), |n| format!("{n:>3}"));
-        let (tick, tone) = if label.is_some() {
-            ("┤", WHITE)
-        } else {
-            ("│", GRAY)
-        };
+        let (tick, tone) = [("│", GRAY), ("┤", WHITE)][usize::from(label.is_some())];
         put(b, r.x, y, &number, 3, style(tone, GLASS));
         put(b, r.x + 3, y, tick, 1, style(GRAY, GLASS));
         let rest = r.width.saturating_sub(8);

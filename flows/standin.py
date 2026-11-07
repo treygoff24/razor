@@ -24,6 +24,13 @@ class Reply:
     method: str = "POST"  # a GET reply's `match` is held by the request's path
 
 
+def put(path, data):
+    """Writes `path` whole by renaming a finished copy over it: a flow never reads part of it."""
+    part = path.with_name(path.name + ".part")
+    part.write_bytes(data)
+    part.replace(path)
+
+
 @contextmanager
 def serve(replies: list[Reply], requests: Path):
     """Yields the server's URL. Each request is spooled in `requests` as <n>.json (method, path,
@@ -53,8 +60,8 @@ def serve(replies: list[Reply], requests: Path):
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             model = self.command == "POST"
             name = requests / (f"{len(used) + 1:03}" if model else f"other-{next(others):03}")
-            name.with_suffix(".json").write_text(json.dumps(meta))
-            name.with_suffix(".body").write_bytes(body)
+            put(name.with_suffix(".json"), json.dumps(meta).encode())
+            put(name.with_suffix(".body"), body)
             held = body if model else self.path.encode()
             free = [(reply.match is None, n) for n, reply in enumerate(replies) if n not in used
                     and reply.method == self.command and (reply.match is None or reply.match.encode() in held)]
@@ -73,7 +80,7 @@ def serve(replies: list[Reply], requests: Path):
                 time.sleep(reply.pause if start else 0)
                 self.wfile.write(reply.body[start:end])
             meta["sent"] = time.monotonic()
-            name.with_suffix(".json").write_text(json.dumps(meta))
+            put(name.with_suffix(".json"), json.dumps(meta).encode())
 
     with HTTPServer(("127.0.0.1", 0), Handler) as server:
         server.handle_error = lambda *_: errors.append(repr(sys.exc_info()[1]))

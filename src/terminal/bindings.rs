@@ -173,13 +173,36 @@ pub fn hint(app: &App, action: &str) -> String {
     }
 }
 
-/// Expands action names in angle brackets in a visible hint.
+fn keyed(app: &App, action: &str) -> bool {
+    (app.bindings.keys.get(action)).is_some_and(|keys| !keys.is_empty())
+}
+
+/// Whether each action a hint names in angle brackets, or one of each `|` choice, has a key.
+pub fn bound(app: &App, template: &str) -> bool {
+    let mut named = (template.split('<').skip(1)).filter_map(|part| part.split_once('>'));
+    named.all(|(choice, _)| choice.split('|').any(|action| keyed(app, action)))
+}
+
+// Of a `|` choice of actions, the first bound one, else the first.
+fn pick<'a>(app: &App, choice: &'a str) -> Option<&'a str> {
+    let action = choice.split('|').find(|a| keyed(app, a));
+    let action = action.or(choice.split('|').next());
+    action.filter(|a| app.bindings.keys.contains_key(*a))
+}
+
+/// `text` of a hint's parts split by `sep`, leaving out each part that names an unbound action.
+pub fn hints(app: &App, template: &str, sep: &str) -> String {
+    let parts = template.split(sep).filter(|part| bound(app, part));
+    text(app, &parts.collect::<Vec<_>>().join(sep))
+}
+
+/// Expands action names in angle brackets in a visible hint; of a `|` choice, the first bound one.
 pub fn text(app: &App, template: &str) -> String {
     template
         .split('<')
         .enumerate()
         .map(|(i, part)| match part.split_once('>') {
-            Some((action, tail)) if app.bindings.keys.contains_key(action) => {
+            Some((choice, tail)) if let Some(action) = pick(app, choice) => {
                 hint(app, action) + tail
             }
             _ if i > 0 => format!("<{part}"),
@@ -238,7 +261,9 @@ fn available(app: &App, context: &str, action: &str, k: KeyEvent) -> bool {
         "shortcode" => shortcodes::typed(app).is_some(),
         "suggestion" => app.suggestion().is_some(),
         "children" => empty,
-        // Tab starts browsing with an empty draft; the other keys browse once it has.
+        // Ahead of browsing, the switch takes its key unless browsing has started.
+        "switch" => action == "composer.switch" && app.selected.is_none(),
+        // Tab and Shift-Tab start browsing with an empty draft; the other keys browse once it has.
         // Enter reads only a reply; on any other target it opens it, as a click does.
         "targets" => match k.code {
             K::Tab | K::BackTab => empty,
@@ -280,7 +305,7 @@ fn available(app: &App, context: &str, action: &str, k: KeyEvent) -> bool {
 
 /// The contexts in precedence order, each looking its keys up in its scope's table, named after a
 /// colon where it is not the context's own.
-const CONTEXTS: &str = "clear:composer early:global voice goto mcp panel picker new:global start open:list list emoji global transcript skill attachments completion shortcode suggestion targets children queued_input question line_start draft_end attached_images input_history composer editor";
+const CONTEXTS: &str = "clear:composer early:global voice goto mcp panel picker new:global start open:list list emoji global transcript skill attachments completion shortcode suggestion switch:composer targets children queued_input question line_start draft_end attached_images input_history composer editor";
 
 fn contexts() -> impl Iterator<Item = (&'static str, &'static str)> {
     (CONTEXTS.split_whitespace()).map(|c| c.split_once(':').unwrap_or((c, c)))

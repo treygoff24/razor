@@ -1,7 +1,6 @@
 //! Data shared by API clients and the controller; no client owns a second definition.
 
-use super::{Ask, Decision, Effort, EntryId, JobId, Millis, Report, SessionId, State, views};
-use crate::protocol::Speed;
+use super::{Ask, Decision, Effort, EntryId, JobId, Millis, Report, SessionId, Speed, State};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -13,29 +12,6 @@ pub(crate) const IMAGE_BYTES: usize = IMAGE_BASE64 / 4 * 3;
 pub(crate) const IMAGES_PER_INPUT: usize = 20;
 pub(crate) const BODY_BYTES: usize = 32 << 20;
 pub(crate) const PAGE_BYTES: u64 = 8 << 20;
-
-/// A PNG, JPEG or WebP image's media type and file extension, from its first bytes; `None` for
-/// any other bytes, whatever the file is named.
-pub(crate) fn image_type(head: &[u8]) -> Option<(&'static str, &'static str)> {
-    match head {
-        [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', ..] => Some(("image/png", "png")),
-        [0xff, 0xd8, 0xff, ..] => Some(("image/jpeg", "jpg")),
-        _ if head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP") => {
-            Some(("image/webp", "webp"))
-        }
-        _ => None,
-    }
-}
-
-/// `video/mp4` or `video/quicktime` from a file's first bytes, an ISO media `ftyp` box (brand
-/// `qt  ` for QuickTime); `None` for any other bytes.
-pub(crate) fn video_type(head: &[u8]) -> Option<&'static str> {
-    match (head.get(4..8), head.get(8..12)) {
-        (Some(b"ftyp"), Some(b"qt  ")) => Some("video/quicktime"),
-        (Some(b"ftyp"), Some(_)) => Some("video/mp4"),
-        _ => None,
-    }
-}
 
 /// An input from a client; an outside program supplies its name in `from`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -113,11 +89,11 @@ pub(crate) struct Models {
     /// model request will succeed. Without that query this map is empty.
     pub(crate) unavailable: BTreeMap<String, String>,
     pub(crate) model: String,
-    pub(crate) effort: crate::protocol::Effort,
+    pub(crate) effort: Effort,
     /// What a session started for a call runs on.
     pub(crate) call_model: String,
-    pub(crate) call_effort: crate::protocol::Effort,
-    pub(crate) speed: crate::protocol::Speed,
+    pub(crate) call_effort: Effort,
+    pub(crate) speed: Speed,
     /// With `?session=`: each listed model other than the session's own, as a switch to it.
     pub(crate) switch: BTreeMap<String, Switch>,
 }
@@ -367,6 +343,10 @@ pub struct Server {
     pub(crate) shared: bool,
     /// It takes `ClientInput::video`.
     pub(crate) video: bool,
+    /// Its events route honours `follow=true`, so a session followed that way is not marked looked
+    /// at; an older server ignores the query and marks it, and its line has no `follow`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) follow: bool,
     /// Its `ui.suggestions` is on: clients offer its sessions' suggested next messages.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) suggestions: bool,
@@ -419,9 +399,9 @@ pub struct AgentView {
     pub(crate) launched: Option<EntryId>,
     pub(crate) name: String,
     pub(crate) model: String,
-    pub(crate) effort: crate::protocol::Effort,
+    pub(crate) effort: Effort,
     #[serde(default)]
-    pub(crate) speed: crate::protocol::Speed,
+    pub(crate) speed: Speed,
     pub(crate) state: State,
     #[serde(default)]
     pub(crate) closing: bool,
@@ -691,76 +671,16 @@ pub enum Live {
     },
     /// Presence heartbeat, emitted only when requested by a peer reader.
     Server(Box<Server>),
+    /// A session stream's sign of life after 15 seconds without a line, sent only when asked.
+    Heartbeat,
     /// Opt-in resolved views; no stored definitions travel on the stream.
-    Views(views::ViewsStatus),
+    Views(super::views::ViewsStatus),
     Agent(Box<AgentView>),
     Delivery(Box<Delivery>),
     /// A sentence about a plugin no record entry carries: a refused input, a failed observer.
     Plugin {
         text: String,
     },
-}
-
-/// Selects a writable settings file; the deployment pack is never a destination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum McpScope {
-    Global,
-    Project,
-    Private,
-}
-
-/// File changes are immediate; importing only previews additions and unresolved credentials.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub(crate) enum McpOperation {
-    List,
-    Add {
-        name: String,
-        scope: McpScope,
-        config: super::Mcp,
-    },
-    Remove {
-        name: String,
-        scope: McpScope,
-    },
-    Enable {
-        name: String,
-        scope: McpScope,
-    },
-    Disable {
-        name: String,
-        scope: McpScope,
-    },
-    Reconnect {
-        name: String,
-    },
-    SignIn {
-        name: String,
-    },
-    SignOut {
-        name: String,
-    },
-    Import {
-        source: PathBuf,
-        scope: McpScope,
-    },
-}
-
-/// Reports references, never credential bytes; connection state belongs to the session.
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct McpRow {
-    pub(crate) name: String,
-    pub(crate) file: Option<PathBuf>,
-    /// The writable file `file` is, which enable, disable and remove name; none for a pack's.
-    pub(crate) scope: Option<McpScope>,
-    pub(crate) config: super::Mcp,
-    pub(crate) state: String,
-    /// The session's tools from this server after its allow list: each one's own name and its
-    /// description's first line, cut to 120 characters. Empty without a session or connection.
-    pub(crate) tools: Vec<(String, String)>,
-    pub(crate) signed_in: bool,
-    pub(crate) error: Option<String>,
 }
 
 /// A search of the person's past conversations: `GET /v1/search`'s query, and `recall`'s input,

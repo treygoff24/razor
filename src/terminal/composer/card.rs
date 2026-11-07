@@ -55,7 +55,7 @@ impl Composer {
         );
         let cursor = self.content(b, words, app);
         // After the words, so the edge counts the rows this frame scrolled off.
-        let above = self.window.borrow().as_ref().map_or(0, |w| w.first);
+        let above = self.window.borrow().first;
         // A click on the status summary opens the pane, as Ctrl-T does.
         if let Some(tail) = header(app, b, r, now, above) {
             hits.push((tail, Action::Status));

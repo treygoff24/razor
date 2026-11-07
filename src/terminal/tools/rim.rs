@@ -163,12 +163,12 @@ impl Rim<'_> {
         for (y, row) in rows.iter_mut().enumerate() {
             let mut x: usize = 0;
             let mut cells = Vec::new();
-            for s in &row.words.spans {
+            for s in std::mem::take(&mut row.words.spans) {
                 if s.style.fg != Some(RIM)
                     && (y > 0 && y < last || self.open == 1. && self.pull == 0.)
                 {
                     x += width(&s.content);
-                    cells.push(s.clone());
+                    cells.push(s);
                     continue;
                 }
                 for g in s.content.graphemes(true) {
@@ -234,7 +234,7 @@ impl Rim<'_> {
             };
             let base = mix(GLASS, self.stitch(call), fade * (1. - 0.5 * self.pulse.dim));
             let flashed = mix(base, GREEN, self.flash);
-            let column: usize = cells[..x].iter().map(|s| width(&s.content)).sum();
+            let column = spans_width(&cells[..x]);
             let light = self.lit(column.saturating_sub(self.left) as f64, len);
             cells[x] = Span::styled("━", style(mix(flashed, rgb(0xffffff), 0.45 * light), GLASS));
         }
@@ -291,7 +291,7 @@ impl Rim<'_> {
         Span::styled(glyph.to_owned(), style(self.colour(i, len, span), GLASS))
     }
     fn stitch(&self, call: &Entry) -> Color {
-        let Body::Call { name, .. } = &call.body else {
+        let Body::Call { name, input, .. } = &call.body else {
             return GRAY;
         };
         let result = self.t.and_then(|t| t.result(call));
@@ -300,7 +300,7 @@ impl Rim<'_> {
                 outcome: Outcome::Error | Outcome::Unknown,
                 ..
             }) => AMBER,
-            _ => match super::kind(name) {
+            _ => match super::shown(name, input) {
                 "edit" | "write" | "apply_patch" => MAGENTA,
                 "shell" => GREEN,
                 "agent" => VIOLET,

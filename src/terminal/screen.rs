@@ -1,7 +1,7 @@
 //! What the app writes to the terminal itself: each frame inside a synchronized update with
 //! its links repainted in OSC 8, the tab's title, and the modes it enters at start and restores
-//! on drop.
-use super::{App, Error, text, view};
+//! on drop, and around the person's editor.
+use super::{App, Error, editor, error, text, tty, view};
 use crate::protocol::{AgentView, End, State, now};
 use aws_lc_rs::digest::{SHA256, digest};
 use base64::{
@@ -12,11 +12,18 @@ use crossterm::event::KeyboardEnhancementFlags as Flags;
 use crossterm::event::{self as term, KeyCode::Char, KeyEvent, KeyModifiers as Mods};
 use ratatui::{Terminal, backend::CrosstermBackend, buffer::Buffer, layout::Rect};
 use std::{collections::BTreeMap, io::Write, sync::Arc};
+use tokio::time::Instant;
 
-pub fn draw(
-    terminal: &mut Terminal<CrosstermBackend<super::writer::Writer>>,
-    app: &mut App,
-) -> Result<(), Error> {
+/// The terminal as the app draws on it, through the writer's queue.
+pub type Screen = Terminal<CrosstermBackend<super::writer::Writer>>;
+
+/// Opens the terminal for drawing; a new one redraws every cell.
+pub fn open() -> Result<Screen, Error> {
+    let writer = super::writer::Writer::new().map_err(Error::Terminal)?;
+    Terminal::new(CrosstermBackend::new(writer)).map_err(Error::Terminal)
+}
+
+pub fn draw(terminal: &mut Screen, app: &mut App) -> Result<(), Error> {
     app.next.take();
     app.pictures.frame += 1;
     let backend = terminal.backend_mut();
@@ -278,6 +285,54 @@ fn links(links: &[(Rect, Arc<str>)], last: &mut Painted, b: &Buffer) -> Vec<u8> 
 /// The last frame as ratatui wrote it, and the links painted over it. A new `Terminal` redraws
 /// every cell, so it starts from the default, whose empty area is a new one.
 pub type Painted = (Buffer, Vec<(Rect, Arc<str>)>);
+
+/// Hands the terminal to the person's editor and takes it back: what the queue holds and the
+/// pictures leave first, the modes around it, and a new terminal redraws every cell after.
+pub async fn edit(
+    terminal: &mut Screen,
+    app: &mut App,
+    events: &mut tty::Events,
+    modes: &mut Option<Modes>,
+    editing: editor::Editing,
+) -> Result<(), Error> {
+    finish(terminal, app, events).await;
+    // A new stream reads nothing until the editor has returned.
+    *events = tty::Events::default();
+    drop(modes.take());
+    let edited = match editing {
+        editor::Editing::Views => super::agents::edit(app).await,
+        editor::Editing::Reply(text) => (editor::read(&text).await)
+            .map_err(|e| error(format!("The reply did not open in your editor: {e}"))),
+    };
+    *modes = Some(Modes::enter("")?);
+    (*terminal, app.painted, app.dirty) = (open()?, Default::default(), true);
+    if let Err(e) = edited {
+        app.say(&e.to_string());
+    }
+    Ok(())
+}
+
+/// Writes what the queue holds and deletes every picture the terminal holds, waiting as long as
+/// the terminal takes, then for the answer to a row on its way until it is due to be given up on,
+/// which would otherwise reach the shell or the editor as keys: before the modes leave the
+/// alternate screen, which write past the queue. Answers already read count after that too.
+pub async fn finish(terminal: &mut Screen, app: &mut App, events: &mut tty::Events) {
+    let out = terminal.backend_mut().writer_mut();
+    let mut bytes = app.pictures.forget().into_bytes();
+    while out.write_all(&bytes).and_then(|_| out.finish()).is_ok() {
+        app.pictures.taken();
+        let Some(due) = app.pictures.due() else {
+            return;
+        };
+        match tokio::time::timeout_at(due.max(Instant::now()), events.next()).await {
+            Ok(Some(Ok(tty::Event::Picture(text)))) => app.pictures.answer(&text),
+            Ok(Some(Ok(_))) | Err(_) => {}
+            Ok(_) => return,
+        }
+        // With no picture left to send, the deletes an answer or giving up leaves.
+        bytes = app.pictures.row().unwrap_or_default();
+    }
+}
 
 /// Raw mode, the alternate screen, paste, mouse, focus and kitty key reports, restored on drop.
 pub struct Modes;

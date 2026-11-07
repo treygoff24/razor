@@ -6,8 +6,8 @@ use crate::protocol::McpScope;
 use serde::{Serialize, ser::SerializeStruct};
 use std::{
     collections::BTreeMap,
-    io::{ErrorKind, Read},
-    os::unix::fs::MetadataExt,
+    io::{ErrorKind, Read, Write},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -231,23 +231,15 @@ impl Settings {
         let mut changed = false;
         if let Some(old) = self.person.read() {
             changed = true;
-            let named = self.person.good.get("pack").and_then(Value::as_str);
-            let named = named.map(|dir| Path::new(dir).join("config.toml"));
-            let named = named.or_else(|| super::shipped(STARTER));
-            if named.as_ref() != self.pack.as_ref().map(|pack| &pack.path) {
-                let mut pack = named.map(|path| File::new(path, Kind::Pack));
-                if let Some(pack) = &mut pack {
-                    pack.read();
+            match self.named_pack() {
+                Some(Ok(pack)) => self.pack = pack,
+                // A person's file naming a pack that does not read keeps its whole last good
+                // table, and the old pack.
+                Some(Err(error)) => {
+                    (self.person.good, self.person.seen) = (old, None);
+                    self.person.error = Some(error);
                 }
-                match pack.as_mut().and_then(|pack| pack.error.take()) {
-                    // A person's file naming a pack that does not read keeps its whole last
-                    // good table, and the old pack.
-                    Some(error) => {
-                        (self.person.good, self.person.seen) = (old, None);
-                        self.person.error = Some(error);
-                    }
-                    None => self.pack = pack,
-                }
+                None => {}
             }
         }
         for file in self.pack.iter_mut().chain(&mut self.local) {
@@ -260,6 +252,23 @@ impl Settings {
         let errors = files.filter_map(|file| file.error.as_ref());
         self.errors = errors.chain(&self.invalid).cloned().collect();
         changed
+    }
+
+    /// The pack the person's table names, else the starter: None when it is the pack already
+    /// held, else that pack read, or why it does not read.
+    fn named_pack(&self) -> Option<Result<Option<File>, String>> {
+        let named = self.person.good.get("pack").and_then(Value::as_str);
+        let named = named.map(|dir| Path::new(dir).join("config.toml"));
+        let named = named.or_else(|| super::shipped(STARTER));
+        if named.as_ref() == self.pack.as_ref().map(|pack| &pack.path) {
+            return None;
+        }
+        let mut pack = named.map(|path| File::new(path, Kind::Pack));
+        let error = pack.as_mut().and_then(|pack| {
+            pack.read();
+            pack.error.take()
+        });
+        Some(error.map_or(Ok(pack), Err))
     }
 
     /// Later files win: a value by its key, and a table's entries one by one.
@@ -305,18 +314,10 @@ impl Settings {
         let mut candidate = self.clone();
         if path == candidate.person.path {
             candidate.person.good = table;
-            let named = candidate.person.good.get("pack").and_then(Value::as_str);
-            let pack = named
-                .map(|dir| Path::new(dir).join("config.toml"))
-                .or_else(|| super::shipped(STARTER));
-            if pack.as_ref() != candidate.pack.as_ref().map(|f| &f.path) {
-                candidate.pack = pack.map(|path| File::new(path, Kind::Pack));
-                if let Some(file) = &mut candidate.pack {
-                    file.read();
-                    if let Some(error) = &file.error {
-                        return Err(Error::Invalid(error.clone()));
-                    }
-                }
+            match candidate.named_pack() {
+                Some(Ok(pack)) => candidate.pack = pack,
+                Some(Err(error)) => return Err(Error::Invalid(error)),
+                None => {}
             }
         } else if let Some(file) = candidate.local.iter_mut().find(|file| file.path == path) {
             file.good = table;
@@ -362,6 +363,78 @@ impl Serialize for Settings {
     }
 }
 
+/// Writes `after` to `path` at mode 0600 through a rename, only if the file still holds `before`
+/// (a missing file holds nothing).
+pub(super) fn replace(path: &Path, before: &str, after: &str) -> Result<(), Error> {
+    if after.len() > 1 << 20 {
+        return Err(Error::Invalid(
+            "The changed settings would pass 1 MiB; shorten them first.".into(),
+        ));
+    }
+    let resolved = match std::fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !path.is_symlink() => {
+            path.to_path_buf()
+        }
+        Err(error) => return Err(writing(error)),
+    };
+    let path = resolved.as_path();
+    let parent = path.parent().unwrap_or(Path::new("/"));
+    let temp = parent.join(format!(".razor-{}.tmp", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let written = std::fs::create_dir_all(parent)
+        .and_then(|()| options.open(&temp))
+        .and_then(|mut file| {
+            file.write_all(after.as_bytes())?;
+            file.sync_all()
+        });
+    let replaced = written
+        .map_err(writing)
+        .and_then(|()| match text(path, true)? == before {
+            true => std::fs::rename(&temp, path).map_err(writing),
+            false => Err(Error::Invalid(format!(
+                "{} changed during the edit; retry.",
+                path.display()
+            ))),
+        });
+    if replaced.is_err() {
+        // Only this operation's create_new file, never the destination.
+        let _ = std::fs::remove_file(&temp);
+    }
+    replaced
+}
+
+/// Exclude a newly created private file at the main checkout, including linked worktrees.
+pub(super) fn exclude_private(path: &Path) -> Result<(), Error> {
+    let Some(root) = path.ancestors().nth(2) else {
+        return Ok(());
+    };
+    if !root.join(".git").is_dir() {
+        return Ok(());
+    }
+    let exclude = root.join(".git/info/exclude");
+    let before = text(&exclude, true)?;
+    let entry = ".razor/config.local.toml";
+    if !before
+        .lines()
+        .any(|line| line.trim().trim_start_matches('/') == entry)
+    {
+        let newline = if before.is_empty() || before.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(exclude)
+            .and_then(|mut file| file.write_all(format!("{newline}{entry}\n").as_bytes()))
+            .map_err(writing)?;
+    }
+    Ok(())
+}
+
 /// A settings, import or git pointer file of at most 1 MiB; a missing optional one is empty.
 pub(super) fn text(path: &Path, optional: bool) -> Result<String, Error> {
     let shown = path.display();
@@ -388,8 +461,7 @@ pub(super) fn text(path: &Path, optional: bool) -> Result<String, Error> {
 
 /// One file's table: machine keys refused in a project's, paths made absolute (`~/` against the
 /// home folder, others against its directory), and the whole checked as a Config so an error
-/// names its file; with the variant files it read. A startup list's `razor`, `project` and
-/// `about` are words, not paths.
+/// names its file; with the variant files it read.
 pub(super) fn parse(
     text: &str,
     path: &Path,
@@ -399,25 +471,28 @@ pub(super) fn parse(
     let mut table: Table = text.parse().map_err(|e: toml::de::Error| {
         Error::Invalid(format!("{shown} does not parse: {}.", e.message()))
     })?;
+    allowed(&table, path, project)?;
+    let variants = paths(&mut table, path.parent().unwrap_or(Path::new("/")))?;
+    Config::parse(table.clone()).map_err(|e| Error::Invalid(format!("{shown}: {e}")))?;
+    Ok((table, variants))
+}
+
+/// Refuses a key the file at `path` may not set: an unknown display field, `tasks` outside a
+/// project's private file, and in a project's file the person's and the machine's keys.
+fn allowed(table: &Table, path: &Path, project: bool) -> Result<(), Error> {
+    use crate::protocol::{Brand, Phone, Ui};
+    let shown = path.display();
     for (name, default) in [
-        (
-            "brand",
-            serde_json::to_value(crate::protocol::Brand::default()),
-        ),
-        ("ui", serde_json::to_value(crate::protocol::Ui::default())),
-        (
-            "phone",
-            serde_json::to_value(crate::protocol::Phone::default()),
-        ),
+        ("brand", serde_json::to_value(Brand::default())),
+        ("ui", serde_json::to_value(Ui::default())),
+        ("phone", serde_json::to_value(Phone::default())),
     ] {
-        if let (Some(fields), Ok(default)) = (table.get(name).and_then(Value::as_table), default) {
-            for key in fields.keys() {
-                if default.get(key).is_none() {
-                    return Err(Error::Invalid(format!(
-                        "{shown}: unknown field {name}.{key}."
-                    )));
-                }
-            }
+        if let (Some(fields), Ok(default)) = (table.get(name).and_then(Value::as_table), default)
+            && let Some(key) = fields.keys().find(|key| default.get(key).is_none())
+        {
+            return Err(Error::Invalid(format!(
+                "{shown}: unknown field {name}.{key}."
+            )));
         }
     }
     // Only the person names where a project's tasks go, so a repository cannot send them away.
@@ -425,22 +500,29 @@ pub(super) fn parse(
         let only = "only a project's .razor/config.local.toml names where its tasks go";
         return Err(Error::Invalid(format!("{shown} cannot set tasks; {only}.")));
     }
-    if project {
-        let nested = |name: &str, key| table.get(name).and_then(Value::as_table)?.get(key);
-        let mut keys: Vec<_> = MACHINE
-            .into_iter()
-            .filter(|key| table.contains_key(*key))
-            .collect();
-        keys.extend(nested("responses", "base_url").map(|_| "responses.base_url"));
-        keys.extend(table.get("sessions").map(|_| "sessions"));
-        keys.extend(nested("children", "startup").map(|_| "children.startup"));
-        if !keys.is_empty() {
-            let keys = keys.join(", ");
-            let why = format!("{shown} cannot set {keys}; move these keys to the person's file.");
-            return Err(Error::Invalid(why));
-        }
+    if !project {
+        return Ok(());
     }
-    let dir = path.parent().unwrap_or(Path::new("/"));
+    let nested = |name: &str, key| table.get(name).and_then(Value::as_table)?.get(key);
+    let mut keys: Vec<_> = MACHINE
+        .into_iter()
+        .filter(|key| table.contains_key(*key))
+        .collect();
+    keys.extend(nested("responses", "base_url").map(|_| "responses.base_url"));
+    keys.extend(table.get("sessions").map(|_| "sessions"));
+    keys.extend(nested("children", "startup").map(|_| "children.startup"));
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let keys = keys.join(", ");
+    let why = format!("{shown} cannot set {keys}; move these keys to the person's file.");
+    Err(Error::Invalid(why))
+}
+
+/// Makes the table's paths absolute against `dir`, `~/` against the home folder, and reads its
+/// variant files in, whose paths it returns. A startup list's `razor`, `project` and `about` are
+/// words, not paths.
+fn paths(table: &mut Table, dir: &Path) -> Result<Vec<PathBuf>, Error> {
     let home = std::env::var_os("HOME");
     let absolute = |value: Option<&mut Value>| {
         if let Some(Value::String(path)) = value {
@@ -511,8 +593,7 @@ pub(super) fn parse(
         let secret = oauth.and_then(|oauth| oauth.get_mut("client_secret")?.as_table_mut());
         absolute(secret.and_then(|secret| secret.get_mut("file")));
     }
-    Config::parse(table.clone()).map_err(|e| Error::Invalid(format!("{shown}: {e}")))?;
-    Ok((table, variants))
+    Ok(variants)
 }
 
 /// An array's values, such as `skills`'s folders.
@@ -570,5 +651,12 @@ fn io(source: std::io::Error) -> Error {
     Error::Other {
         source,
         context: "finding settings files",
+    }
+}
+
+fn writing(source: std::io::Error) -> Error {
+    Error::Other {
+        source,
+        context: "writing a settings file",
     }
 }

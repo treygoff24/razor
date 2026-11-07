@@ -29,7 +29,7 @@ Your past conversations can be searched by words, by any agent with its `recall`
 
 ## When the context fills
 
-When a session's context, what its model can hold at once, fills up, Razor starts a fresh one built from the record, with no summary written by a model. At the threshold (80% of the context by default), Razor asks the agent for a continuation note: a few lines on the work in hand and the decisions behind it. The fresh context then holds:
+When a session's context, what its model can hold at once, fills up, Razor starts a fresh one built from the record, with no summary written by a model. At the threshold (by default 80% of the context, or 450,000 tokens on a model that holds 500,000 or more), Razor asks the agent for a continuation note: a few lines on the work in hand and the decisions behind it. The fresh context then holds:
 
 - your latest requests, word for word;
 - the continuation note;

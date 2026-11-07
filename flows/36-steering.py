@@ -41,5 +41,4 @@ with flow(replies) as f:
         assert len(added) == 1 and added[0]["from"] == "person" and added[0]["text"] == "Steer only oak.", added
         t.send(b"\x1b")
         t.until(lambda t: "talking to oak" not in t.text() and "parent-visible" in t.text())
-    cleanup = f.run("--resume", parent, "--print=json", "Stop both children's pending jobs.")
-    assert cleanup.returncode == 0, cleanup.stderr
+    f.ask("--resume", parent, "Stop both children's pending jobs.")

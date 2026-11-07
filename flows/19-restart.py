@@ -79,8 +79,9 @@ with flow(replies) as f:
         for e in es))
     ends = [e for e in entries if e["kind"] == "job" and e["event"] == "ended"]
     assert [e["job"] for e in ends] == [job["job"]] and not alive(job["pid"]), (ends, job)
-    measured = {k: entries[-1][k] for k in ("context", "window")}
-    assert all(measured.values()), measured
+    # Claude Code reports 1,000,000 for opus; with no row Razor fills 500,000 and hands over at 0.9.
+    measured = {k: entries[-1][k] for k in ("context", "window", "threshold")}
+    assert measured["context"] and (measured["window"], measured["threshold"]) == (500000, 0.9), measured
     server.stop(f, signal.SIGKILL)
     server.start(f)
     server.send(f, "GET", "/sessions").read()
@@ -115,12 +116,12 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
         path = f.home / ".razor/sessions" / session / "record.jsonl"
         path.write_text("".join(json.dumps(e) + "\n" for e in entries))
         before[session] = entries
-    requests = len(list(f.requests.glob("[0-9]*.body")))
+    requests = len(f.sent())
     server.start(f)
     for session in (parent, sid):
         entries = server.until(f, session, lambda es: any(e["kind"] == "turn_end" for e in es)
-                               or len(list(f.requests.glob("[0-9]*.body"))) != requests)
-        assert len(list(f.requests.glob("[0-9]*.body"))) == requests, "a long restart sent a model request"
+                               or len(f.sent()) != requests)
+        assert len(f.sent()) == requests, "a long restart sent a model request"
         end = entries[-1]
         assert end["kind"] == "turn_end" and end["closed"] and end["inputs"] == [], end
         assert "2 hours" in end["end"]["error"], end
@@ -128,20 +129,23 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
         assert not [e for e in entries if e["kind"] == "rebuild"], entries
     assert any(e["kind"] == "job" and e["event"] == "ended" for e in f.record(sid))
     assert not [e for e in f.record(parent) if e["kind"] == "input" and e["id"] != ask], "the child woke its parent"
-    held = server.agents(f)
-    assert all(held[s]["state"] == "needs_you" and held[s]["interrupted"] for s in (parent, sid)), held
+
+    def marked():  # the status rows follow the record's closing entries
+        rows = server.agents(f)
+        return all(rows[s]["state"] == "needs_you" and rows[s].get("interrupted") for s in (parent, sid)) and rows
+    held = server.wait(marked, 10, "the restart never marked both held turns interrupted")
     assert all((f.home / ".razor/live" / s).exists() for s in (parent, sid))
     (f.cwd / "release19").touch()
     server.until(f, parent, lambda es: any(e["kind"] == "job" and e["event"] == "ended" for e in es))
     time.sleep(0.25)
-    assert len(list(f.requests.glob("[0-9]*.body"))) == requests, "a job end woke an interrupted turn"
+    assert len(f.sent()) == requests, "a job end woke an interrupted turn"
     counts = {s: len(list(f.record(s))) for s in (parent, sid)}
     server.stop(f, signal.SIGKILL)
     server.start(f)
     assert all(server.agents(f)[s].get("interrupted") for s in (parent, sid))
     time.sleep(0.25)
     assert counts == {s: len(list(f.record(s))) for s in (parent, sid)}, "a held turn ended twice"
-    assert len(list(f.requests.glob("[0-9]*.body"))) == requests, "a second restart sent a model request"
+    assert len(f.sent()) == requests, "a second restart sent a model request"
     replies += [turn(root, "agent", action="continue", child="held19", brief="Continue the held work."),
                 turn(root, "agent", action="wait", children=["held19"]),
                 turn(root, "continued19"),

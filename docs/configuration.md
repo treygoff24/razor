@@ -26,7 +26,7 @@ razor config set children.max 8 --project
 razor config set tasks.remote origin --local
 ```
 
-The same restrictions below apply to these commands. Unknown keys and invalid values are refused before saving. Comments and unrelated settings stay in the file. When changing a field inside an inherited named entry, the command may copy the entry from a lower file, preserving its written values. It never copies personal or pack settings into a shared project file, or project settings into your file. In those cases it writes only the requested field, which the loader may refuse if the entry needs other fields. These commands start no server; a running server rereads the saved file as usual.
+The same restrictions below apply to these commands. Unknown keys and invalid values are refused before saving. Comments and unrelated settings stay in the file. When changing a field inside an inherited named entry, the command may copy the entry from a lower file, preserving its written values. It never copies personal or pack settings into a shared project file, or project settings into your file. In those cases it writes only the requested field, which the loader may refuse if the entry needs other fields. These commands start no server; a running server rereads the saved file as usual. A key starting `voice.`, such as `voice.daily_characters`, is instead one of the voice settings the server keeps, outside any file, and the command asks the server ([Browser, voice and search](browser-voice-search.md#spoken-notes-from-agents) lists them).
 
 ## Where settings live
 
@@ -112,6 +112,37 @@ detach = ["q", "d", "D"]
 
 Missing actions keep their defaults; `[]` unbinds an action. `overview` in `global` (F3 by default) opens the agents overview and leaves it again; the overview takes the `list` keys, with `up` and `down` moving between agents and folded groups, `right` opening the selected agent or unfolding the selected group, `fold` folding the selected agent's group, `left` doing nothing, and `group_1` to `group_9` (the keys 1 to 9) selecting a numbered top-level group, as they do in the list. `outward` in `line_start` (Left at the start of a composer line) goes from a helper to its parent, and from any other session opens the agents list beside it, then the overview; `inward` in `draft_end` (Right at the end of the draft while the list is open) closes the list. `outward` was named `list` until November 2026, and a setting that still names `line_start.list` is refused as an unknown action, keeping the terminal's last valid keys. While more than one question waits, Left and Right at an empty draft are the `question` context's `previous` and `next` instead, stepping between the questions.
 
+### Moving between agents
+
+By default the arrows in the agents list move its highlight row by row: Up and Down (or `k` and `j`) step through every row, helpers included; Left (or `h`) moves to the parent agent or heading; Right (or `l`) unfolds a heading or an agent's helpers and moves into them; Enter opens the selected agent and closes the list. F2, or the prefix and `h`, gives the list the keys, and the prefix and Tab moves them between the list and the conversation.
+
+Unbound by default, these actions instead give a loop for moving between agents and typing to each one from the keyboard alone, the list staying open:
+
+```toml
+[ui.keys.list]
+up = []
+down = []
+left = []
+right = []
+accept = []
+previous_agent = ["Up", "k"]
+next_agent = ["Down", "j"]
+overview = ["Left", "h"]
+beside = ["Enter", "Right", "l"]
+
+[ui.keys.line_start]
+outward = []
+choose = ["Left"]
+
+[ui.keys.composer]
+switch = ["Shift-Tab"]
+```
+
+- **To the list.** `choose` in `line_start` (Left at the start of a composer line) and `switch` in `composer` (Shift-Tab anywhere in the draft) give the list the keys, opening it if it is closed, with the agent you are talking to selected. Your draft stays in its composer. In a helper's conversation, `choose` goes to its parent first; `switch` goes straight to the list. While you browse the click targets, Shift-Tab still steps back through them.
+- **In the list.** `previous_agent` and `next_agent` step through the top-level agents, resident threads and headings, passing over helpers except one that needs you. `beside` opens the selected agent beside the list, its composer taking the keys, ready to type, or folds or unfolds the selected heading. `overview` opens the overview. `switch` gives the keys back to the conversation you were in.
+
+With either set, Right at the end of the draft while the list is open (`inward` in `draft_end`) closes the list, leaving the conversation on the whole screen, as F2 does, and your draft stays where you typed it. Ctrl-N and Ctrl-P in a parent's conversation select its helpers' cards, beside the list too, and Enter opens the selected one. The list's last line names the keys of whichever of these actions are bound.
+
 ### The prefix
 
 Many actions sit behind a prefix, as in tmux: press backtick (`` ` ``) or Ctrl-B, then the action's key. The prefix works only while the draft is empty, so a backtick among your words is typed and Ctrl-B there moves the cursor left. Pressed twice, the prefix sends itself: two backticks type one. Esc cancels the prefix, and a key with no prefix action is refused with a line saying so.
@@ -150,13 +181,15 @@ An entry in `[ui.keys.prefix]` may also name any other action in full, which the
 status = []
 ```
 
-Projects follow the agents list: its top-level agents in the list's order, whatever heading holds them, grouped by the folder each runs in, leaving out NEEDS YOU, which repeats rows, and Earlier. Opening an agent this way opens the list beside it, and at either end `j`/`k` and `n`/`p` stop.
+Projects follow the agents list: its top-level agents in the list's order, whatever heading holds them, grouped by the folder each runs in, leaving out Earlier and each NEEDS YOU row that another heading lists. Opening an agent this way opens the list beside it, and at either end `j`/`k` and `n`/`p` stop.
 
 Inside tmux, Herdr or another program whose own prefix is the same key, that program takes the key first. Press its prefix twice to send it on to Razor (tmux's `send-prefix`), or give Razor another prefix in `[ui.keys.global]`.
 
 ### The draft
 
 With words or images in the draft, Ctrl-C empties it (`composer.clear`), and the undo key brings them back; with nothing to send, Ctrl-C starts quitting as before. Ctrl-S (`composer.stash`) sets the draft aside, words and images, and empties the box; Ctrl-S with an empty draft brings it back, into whichever conversation is open then. One draft is held at a time, until the terminal app quits, and stashing another while one is held is refused.
+
+Each conversation keeps your unsent words, up to 1 MiB, as its draft on the server, so they are there when you come back to it, from this terminal app or another. A draft holds words only: images in the box are dropped when you leave the conversation, and the terminal says so. Moving to another agent waits until the server has saved your words; if it cannot, you stay where you are, with your words and a sentence saying why. Words typed for a new agent or thread wait in the terminal app instead, for up to eight new agents at once, and come back when you return to start that same one. Only the terminal app holds them, so quitting it loses them; the first Ctrl-C of a quit names them.
 
 ### Vim keys
 
@@ -191,7 +224,7 @@ Durations are a number and a unit: `90s`, `3m`, `2h`, `1d`. Times of day are `HH
 | `effort` | `"high"` | How much work the model puts into each step in new sessions: `low`, `medium`, `high`, `xhigh` or `max`. |
 | `call_model` | `"terra"` | The model a session started for a voice call runs on, such as the phone app's Talk; any model Razor can run. A call to a conversation already under way keeps that conversation's model. |
 | `call_effort` | `"low"` | The effort of a session started for a voice call. The phone app can choose its own model and effort for calls, which win over these two. |
-| `[rebuild] threshold` | `0.8` | How full a context may get, as a fraction of its size, before Razor asks for a continuation note and starts a fresh one ([Concepts](concepts.md#when-the-context-fills)). |
+| `[rebuild] threshold` | `0.9` on a window of 500,000 tokens or more, else `0.8` | How full a context may get, as a fraction of its size, before Razor asks for a continuation note and starts a fresh one ([Concepts](concepts.md#when-the-context-fills)). Set, it applies to every model without its own threshold; `razor config get rebuild.threshold` reads `null` while it is unset. |
 | `[sessions] handover_minutes` | `50` | Idle minutes before requesting a continuation note on every model route, residents included. Running turns and jobs hold it off; working children do not. `0` disables it. |
 | `[sessions] handover_tokens` | `50000` | Minimum context size for an idle handover, for asking whether a model switch keeps the conversation, and for a switch's fresh note; `0` removes the floor. |
 | `[sessions] close_minutes` | `0` | Idle minutes before a top-level conversation closes without a model turn. Residents' home sessions, children and sessions with pending work stay open. The next person input resumes the same conversation. |
@@ -231,7 +264,7 @@ These change how Razor reaches Claude and GPT; most people never set them. `[pro
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `speed_ids` | empty | Chat model variants, for example `speed_ids = { fast = "accounts/fireworks/routers/kimi-k3-fast" }`. The provider, credentials, profile, effort and context limits stay the same. Missing variants are unavailable. Gemini Fast uses its priority tier directly; a conflicting `request.service_tier` is refused. |
-| `window` | the shipped or reported size | The context size in tokens. Razor does not guess one for a provider's model, so set it. |
+| `window` | the shipped or reported size, at most 500,000 | The context size in tokens. Claude Code reports 1,000,000 for Opus, Sonnet and Fable, and Razor fills 500,000 of it; set `window = 1000000` to use it all. Razor does not guess one for a provider's model, so set it. |
 | `threshold` | `[rebuild] threshold` | This model's own rebuild threshold. |
 | `replay` | `"streamed"` | How the model's earlier reasoning is sent back with the next request: `streamed` as it arrived, `reasoning` or `reasoning_content` in the field of that name, which some hosts require, or `none`. |
 | `request` | none | Extra fields sent with every request, such as an option only that host has. |

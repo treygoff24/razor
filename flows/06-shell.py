@@ -14,9 +14,7 @@ replies = [Reply((REPLIES / f"{name}.sse").read_bytes()) for name in ("shell-sho
 medium = "head -c 2560 /dev/zero | tr '\\0' m; printf %s \"$AGENT_BROWSER_SESSION $CUA_DRIVER_SOCKET\""
 replies += [reply(("toolu_medium", "Bash", {"command": medium})), Reply((REPLIES / "done.sse").read_bytes())]
 with flow(replies) as f:
-    result = f.run("--print=json", "Run the two commands, then finish.")
-    assert result.returncode == 0, result.stderr
-    answer = json.loads(result.stdout)
+    answer = f.ask("Run the two commands, then finish.")
     assert answer["message"] == "flow done", answer
     entries = list(f.record(answer["session"]))
     calls = [e for e in entries if e["kind"] == "call"]
@@ -98,6 +96,6 @@ for model in ("opus", "gpt-6.1-sol"):
         assert [e["call"] for e in calls] == ["call_sleep", "call_batch", "call_next"], calls
         assert first < steering < result["id"] < calls[-1]["id"], entries
         assert (f.cwd / "batch").read_text() == "batch" and (f.cwd / "steered").read_text() == "steered"
-        requests = [p.read_text() for p in sorted(f.requests.glob("[0-9]*.body"))]
+        requests = f.sent()
         assert len(requests) == 3 and [r.count(correction) for r in requests] == [0, 1, 1], requests
     print(f"PASS 06-shell steering {model}: input taken once at the first result, before the next action", flush=True)

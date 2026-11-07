@@ -2,8 +2,9 @@
 //! colour with its subgroups' headings, each agent on two rows with its helpers branching under
 //! it, from the server's layout with local folding only.
 use super::super::text::*;
-use super::super::{App, cards, servers, status::Row, view::Action};
+use super::super::{App, cards, view::Action};
 use super::panel::{self, Spans, Tone, on, standing};
+use super::servers;
 use crate::protocol::AgentView;
 use crate::protocol::views::{Section, SectionKind, ViewRow};
 use ratatui::style::Stylize;
@@ -41,8 +42,11 @@ pub fn rows(app: &App, width: u16, now: u64) -> Vec<Row> {
     }
     out
 }
+/// One list row, its press, and the press of the fold mark in its second and third columns.
+pub struct Row(pub Line<'static>, pub Option<Action>, pub Option<Action>);
+
 fn row(line: Line<'static>, action: Option<Action>) -> Row {
-    Row(line, action, Vec::new())
+    Row(line, action, None)
 }
 // Whether `s` is folded: Earlier opened, any other closed.
 fn folded(app: &App, s: &Section) -> bool {
@@ -95,7 +99,7 @@ fn group(app: &App, tree: &[Section], number: Option<usize>, w: usize, now: u64)
         hidden = shut.then_some(s.depth);
         if i > 0 {
             if subgroups > 0 {
-                out.push(row(framed(blank(), Vec::new(), w, tone, None), None));
+                out.push(row(framed(Span::raw(" "), Vec::new(), w, tone, None), None));
             }
             subgroups += 1;
             out.push(heading(app, subtree(&tree[i..]), shut, w, tone));
@@ -126,11 +130,11 @@ fn heading(app: &App, tree: &[Section], shut: bool, w: usize, tone: Tone) -> Row
     let roots = panel::rows(tree).filter(|r| r.depth == 0);
     let census = panel::census(roots.filter_map(|r| app.agents.get(&r.session)));
     let census = panel::counts(census, g);
-    let used = width(&mark.content) + width(&name.content) + panel::wide(&census);
+    let used = width(&mark.content) + width(&name.content) + spans_width(&census);
     let rule = format!("{} ", "─".repeat(w.saturating_sub(5 + used)));
     let rule = on(rule, mix(g, tone.hue, 0.3), g, false);
     let content = [vec![mark, name, rule], census].concat();
-    let mut line = framed(blank(), content, w, tone, None);
+    let mut line = framed(Span::raw(" "), content, w, tone, None);
     addressed(&mut line, shut && contains(app, tree));
     row(line, Some(action))
 }
@@ -150,9 +154,6 @@ pub fn framed(
     let mut out = [vec![side.clone(), lead], content].concat();
     out.push(arrow.unwrap_or(side));
     Line::from(out)
-}
-fn blank() -> Span<'static> {
-    Span::raw(" ")
 }
 
 pub(super) fn totals(sections: &[Section]) -> (usize, usize) {
@@ -179,8 +180,8 @@ pub fn addressed(line: &mut Line, here: bool) {
 pub fn here(line: &Line) -> bool {
     line.style.bg == Some(YOU_BG)
 }
-// The local fold of `a`'s folded finished siblings, closed until opened.
-fn finished(a: &AgentView) -> String {
+/// The local fold of `a`'s folded finished siblings, closed until opened.
+pub(super) fn finished(a: &AgentView) -> String {
     format!("finished/{}", a.parent.as_ref().map_or("", |p| p.as_str()))
 }
 // A row under a heading as the list shows it: the fold its Space toggles (a parent's children,
@@ -247,7 +248,7 @@ where
             .map(|f| Action::Section(f.0.clone()));
         let action = toggle.or(Some(Action::Agent(a.session.clone())));
         let lit = app.list.open && app.list.selected == action;
-        let lead = [blank(), on("❯", CYAN, tone.ground, true)][usize::from(lit)].clone();
+        let lead = [Span::raw(" "), on("❯", CYAN, tone.ground, true)][usize::from(lit)].clone();
         if r.depth == 0 {
             let s = standing(a);
             (ground, edge) = panel::ground(app, s, tone, now);
@@ -258,7 +259,7 @@ where
                 .map(|n| n.0);
             let shut = fold.as_ref().is_some_and(|f| f.1);
             let marks = if shut {
-                panel::marks(app, below, tone, now)
+                panel::marks(app, below, now)
             } else {
                 Vec::new()
             };
@@ -277,7 +278,7 @@ where
             let said = vec![lead, Span::styled(words, ink.bg(ground))];
             let said = panel::ends(said, bars.collect(), room - 1, ground);
             let said = [vec![on("▌", edge, ground, false)], said].concat();
-            out.push(row(framed(blank(), said, w, tone, None), action));
+            out.push(row(framed(Span::raw(" "), said, w, tone, None), action));
             continue;
         }
         let branch = branches.next().unwrap_or_default();
@@ -287,7 +288,7 @@ where
         match count {
             Some(n) => content.push(on(format!("✓ {n} done"), PANEL_GRAY, ground, false)),
             None => {
-                let (mark, word) = panel::helper(app, a, tone, now);
+                let (mark, word) = panel::helper(app, a, now);
                 let ink = [PANEL_GRAY, AMBER][usize::from(word.starts_with("waiting"))];
                 let name = format!(" {}  ", a.name);
                 let name = on(name, [DATA, ink][usize::from(ink == AMBER)], ground, false);

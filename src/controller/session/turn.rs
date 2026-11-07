@@ -206,11 +206,14 @@ impl Session {
             close(self.c.clone(), self.id.clone(), None);
         }
         let (window, threshold) = limits(&self.model, &self.settings.config, self.reported);
+        // A switch's note turn ran on the conversation's model, before the switch.
+        let model = self.conversation.as_ref().map_or(&self.model, |c| &c.model);
         let end = Body::TurnEnd {
             inputs,
             end,
             usage,
             context: self.context,
+            model: Some(model.clone()),
             window,
             threshold: Some(threshold),
             closed,
@@ -249,14 +252,19 @@ impl Session {
     /// The conversation ended by itself: a resumed one that never spoke is rebuilt; otherwise
     /// the turn ends with the reason.
     pub(super) async fn closed(&mut self, error: Option<String>) -> Result<(), Error> {
-        let Some(c) = self.conversation.take() else {
+        let Some(c) = &self.conversation else {
             return Ok(());
         };
-        // A switch's note turn opens the new model from the input held in `pending`.
-        let switching = matches!(c.threshold, Some((_, Trigger::Change)));
-        if switching || c.resuming && !self.record.summary().unanswered.is_empty() {
-            let trigger = [Trigger::Restart, Trigger::Change][usize::from(switching)];
-            return self.rebuild(trigger, None, Vec::new()).await;
+        // A switch's note turn ends as a finished one does, under the model that wrote it, and
+        // the new model opens from the input held in `pending`.
+        if matches!(c.threshold, Some((_, Trigger::Change))) {
+            self.end_turn(Vec::new(), End::Done, Usage::default(), None)
+                .await?;
+            return self.rebuild(Trigger::Change, None, Vec::new()).await;
+        }
+        let resuming = self.conversation.take().is_some_and(|c| c.resuming);
+        if resuming && !self.record.summary().unanswered.is_empty() {
+            return self.rebuild(Trigger::Restart, None, Vec::new()).await;
         }
         let error = error.as_deref().unwrap_or("The Claude CLI exited.");
         self.abandon(sentence(error)).await

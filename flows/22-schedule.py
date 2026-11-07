@@ -51,10 +51,9 @@ with tempfile.TemporaryDirectory() as scratch:
                          f'[residents.ember.schedules.broken]\nat = ["{at(20)}"]\ntext = "Fail."\n'
                          'model = "gpt-6.1-sol"\n'
                          '[residents.ember.schedules.fresh]\nat = []\ntext = "Fresh run."\nfresh = true\n')
-        start = f.run("--print=json", "Start the server.")
-        assert start.returncode == 0, start.stderr
+        f.ask("Start the server.")
         entries = until(f, "ember", lambda es: sum(e["kind"] == "turn_end" for e in es) >= 2, timeout=40)
-        requests = [json.loads(p.read_bytes()) for p in sorted(f.requests.glob("[0-9]*.body"))]
+        requests = [json.loads(body) for body in f.sent()]
         brief = next(r for r in requests if "Brief me." in json.dumps(r) and "Review." not in json.dumps(r))
         review = next(r for r in requests if "Review." in json.dumps(r))
         assert "sonnet" in brief["model"] and "opus" in review["model"], (brief["model"], review["model"])

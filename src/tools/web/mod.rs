@@ -51,6 +51,8 @@ fn endpoint<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> 
 }
 
 impl Provider {
+    const ALL: [Provider; 3] = [Provider::Exa, Provider::Firecrawl, Provider::Parallel];
+
     /// Its one-word name, its key's environment variable and its public endpoint.
     fn facts(self) -> (&'static str, &'static str, &'static str) {
         match self {
@@ -73,10 +75,7 @@ impl Provider {
 
 /// Each provider's key variable and whether it is set, for `razor doctor`; never a value.
 pub fn keys() -> impl Iterator<Item = (&'static str, bool)> {
-    let providers = [Provider::Exa, Provider::Firecrawl, Provider::Parallel];
-    providers
-        .map(|p| (p.facts().1, p.key().is_some()))
-        .into_iter()
+    (Provider::ALL.into_iter()).map(|p| (p.facts().1, p.key().is_some()))
 }
 
 impl Config {
@@ -305,8 +304,7 @@ fn matching(text: &str, find: &str) -> String {
 
 /// Every provider's key replaced, wherever a provider echoed one back.
 fn redact(mut text: String) -> String {
-    let providers = [Provider::Exa, Provider::Firecrawl, Provider::Parallel];
-    for key in providers.into_iter().filter_map(Provider::key) {
+    for key in Provider::ALL.into_iter().filter_map(Provider::key) {
         text = text.replace(&key, "[redacted]");
     }
     text

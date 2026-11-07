@@ -1,6 +1,6 @@
 //! The child facts shared by records and the children service.
 
-use super::{EntryId, Input, Millis, SessionId};
+use super::{Effort, EntryId, Input, Millis, SessionId, Speed};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -116,7 +116,7 @@ pub(crate) enum ChildRequest {
     StartRoot {
         cwd: PathBuf,
         model: Option<String>,
-        effort: Option<crate::protocol::Effort>,
+        effort: Option<Effort>,
         mail: Mail,
     },
     Start {
@@ -124,9 +124,9 @@ pub(crate) enum ChildRequest {
         child: Child,
         cwd: PathBuf,
         model: String,
-        effort: crate::protocol::Effort,
+        effort: Effort,
         #[serde(default)]
-        speed: crate::protocol::Speed,
+        speed: Speed,
         in_place: bool,
         input: Input,
     },

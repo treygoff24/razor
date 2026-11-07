@@ -1,0 +1,1 @@
+Send the home session `{owner}` one note of changes it should keep for the state note.

@@ -164,7 +164,7 @@ Depth comes from ground colour, not shadows. Glass is the floor; recess and stri
 
 ## Components
 
-- **State marks**, always beside a word: `◆` amber wants you (asks), `▲` red stuck or error, `●` green working, `○` gray idle, `✓` gray done, and a turning `◐◓◑◒` for a helper at work.
+- **State marks**, always beside a word: `◆` amber wants you (asks), `▲` red stuck or error, `●` green working, `○` gray idle, `✓` gray done, and for a helper at work a turning `◐◓◑◒` in the same green (a still `◐` without motion).
 - **Status labels** lead an agent's lines: `asks` amber, `stuck` and `error` red, `now` violet (the agent's latest words), `step` gray (the call running and how long), `↳` for what it is doing in a tile.
 - **Chips**: a solid ASKS, STUCK or ERROR tag in the state's colour with dark ink, at the right of an agent's name row.
 - **The needs-you tag**: ` ◆ N NEED YOU ` in bold amber on a group's top edge or the header.

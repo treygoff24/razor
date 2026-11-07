@@ -7,7 +7,7 @@ import json
 import claude
 import server
 from driver import flow
-from model import agent, message, reply
+from model import agent, message, reply, tool
 
 
 root, child = "FLOW_ROOT_16", "You are oak16,"
@@ -24,9 +24,7 @@ with flow(replies, config='startup = ["razor", "~/parent.md"]\n'
     (f.cwd / "AGENTS.md").write_text("PROJECT_STARTUP_16")
     f.base("AGENTS.md")
     f.git("remote", "add", "origin", "git@example.invalid:acme/widget16.git")
-    first = f.run("--print=json", "--model", "opus", "--speed", "fast", "--effort", "low", root)
-    assert first.returncode == 0, first.stderr
-    parent = json.loads(first.stdout)["session"]
+    parent = f.ask("--model", "opus", "--speed", "fast", "--effort", "low", root)["session"]
     children = [p.parent.name for p in (f.home / ".razor/sessions").glob("*/record.jsonl")
                 if list(f.record(p.parent.name))[0].get("child")]
     assert len(children) == 1, children
@@ -42,14 +40,13 @@ with flow(replies, config='startup = ["razor", "~/parent.md"]\n'
     branch = f"child/{sid}"
     tip = f.git("rev-parse", branch).strip()
     replies += [message(root, "note", to="oak16", text="Record this without reopening."),
-                reply(root, "mcp__razor__status", {}),
+                tool(root, "status"),
                 agent(root, "continue", child="oak16", speed="fast", brief="CONTINUE_BRIEF_16: commit the second marker."),
                 agent(root, "wait", children=["oak16"]),
                 agent(root, "settle", child="oak16", decision="discard"), reply(root),
                 reply(child, "Bash", {"command": "printf second > second16; git add -- second16 && git -c user.name=Flow -c user.email=flow@example.invalid commit -m 'Second marker'"}),
                 agent(child, "finish", status="partial", report="Second report.")]
-    second = f.run("--resume", parent, "--print=json", "Continue the child.")
-    assert second.returncode == 0, second.stderr
+    f.ask("--resume", parent, "Continue the child.")
     after = list(f.record(sid))
     assert server.agents(f)[sid]["speed"] == "fast"
     assert after[:len(before)] == before, "continue rewrote history"
@@ -68,7 +65,7 @@ with flow(replies, config='startup = ["razor", "~/parent.md"]\n'
     assert row["headline"] == "Committing the first marker.", row
     briefs = [e for e in after if e["kind"] == "input" and "CONTINUE_BRIEF_16" in e["text"]]
     assert len(briefs) == 1, briefs
-    requests = [p.read_text() for p in sorted(f.requests.glob("*.body")) if p.stem.isdigit()]
+    requests = f.sent()
     assert any(child in request and "CONTINUE_BRIEF_16" in request for request in requests), "the continuation input never reached the child"
     assert any(f"- Name: oak16 (session id {sid})" in request for request in requests), "the child's facts did not name it"
     reports = [e for e in entries if e["kind"] == "input" and isinstance(e["from"], dict) and "report" in e["from"]]
@@ -91,8 +88,7 @@ with flow(replies) as f:
                 claude.reply((None, "Bash", {"command": f"until [ -e {go} ]; do sleep 0.1; done"}),
                              (None, "mcp__razor__agent", {"action": "finish", "status": "finished", "report": "Finished."}),
                              match=child)]
-    run = f.run("--print=json", root)
-    assert run.returncode == 0, run.stderr
+    parent = f.ask(root)["session"]
     child_sid = next(p.parent.name for p in (f.home / ".razor/sessions").glob("*/record.jsonl") if list(f.record(p.parent.name))[0].get("child"))
     assert not server.listed(f, child_sid), "a finished read-only helper stayed in the agents list"
     entries = list(f.record(child_sid))
@@ -100,13 +96,11 @@ with flow(replies) as f:
     note = next(e["id"] for e in entries if e["kind"] == "input" and "UNREAD_NOTE_16" in e["text"])
     answered = [i for e in entries if e["kind"] == "turn_end" for i in e["inputs"]]
     assert note not in answered, "the finish answered a note the child never read"
-    parent = json.loads(run.stdout)["session"]
     replies += [agent(root, "continue", child="elm16", brief="CONTINUE_16B"),
                 agent(root, "wait", children=["elm16"]), reply(root, text="Again."),
                 reply(child, "Bash", {"command": "true"}), agent(child, "finish", status="finished", report="Read it.")]
-    again = f.run("--resume", parent, "--print=json", "Continue elm16.")
-    assert again.returncode == 0, again.stderr
-    requests = [p.read_text() for p in sorted(f.requests.glob("*.body")) if p.stem.isdigit()]
+    f.ask("--resume", parent, "Continue elm16.")
+    requests = f.sent()
     assert any(child in r and "CONTINUE_16B" in r and "UNREAD_NOTE_16" in r for r in requests), "the continuation lost the unread note"
     answered = [i for e in f.record(child_sid) if e["kind"] == "turn_end" for i in e["inputs"]]
     assert note in answered, "the continuation left the note unanswered"
@@ -127,8 +121,7 @@ with flow(replies) as f:
     # A cache mark moves to the newest blocks; the newest message may gain blocks at its end.
     bare = lambda v: {k: bare(x) for k, x in v.items() if k != "cache_control"} if isinstance(v, dict) \
         else [bare(x) for x in v] if isinstance(v, list) else v
-    sent = [bare(json.loads(p.read_bytes())["messages"]) for p in sorted(f.requests.glob("*.body"))
-            if p.stem.isdigit() and child.encode() in p.read_bytes()]
+    sent = [bare(json.loads(body)["messages"]) for body in f.sent() if child in body]
     assert len(sent) == 4 and all(b[:len(a) - 1] == a[:-1] for a, b in zip(sent, sent[1:])), \
         "a continuation changed the child's history before its newest message"
 

@@ -90,14 +90,8 @@ pub(super) async fn bash(tools: &Tools, at: EntryId, input: Bash) -> Result<Valu
         deadline: input.deadline_ms.map(Duration::from_millis),
     };
     let job = tools.shell.start(at, command).await?;
-    watch(
-        tools,
-        job,
-        input.wait_ms.unwrap_or(60_000),
-        input.wait,
-        clock,
-    )
-    .await
+    let timeout = input.wait_ms.unwrap_or(60_000);
+    watch(tools, job, timeout, input.wait, clock).await
 }
 
 pub(super) async fn handle(tools: &Tools, name: &str, input: Handle) -> Result<Value, Error> {
@@ -144,20 +138,15 @@ pub(super) async fn script(
     input: Value,
 ) -> Result<Value, Error> {
     let clock = Instant::now();
-    let job = tools
-        .shell
-        .start(
-            at,
-            Command {
-                text: command,
-                cwd: tools.cwd.clone(),
-                env: tools.env.clone(),
-                pty: false,
-                stdin: Stdin::Text(input.to_string()),
-                deadline: None,
-            },
-        )
-        .await?;
+    let command = Command {
+        text: command,
+        cwd: tools.cwd.clone(),
+        env: tools.env.clone(),
+        pty: false,
+        stdin: Stdin::Text(input.to_string()),
+        deadline: None,
+    };
+    let job = tools.shell.start(at, command).await?;
     watch(tools, job, 60_000, Wait::default(), clock).await
 }
 
@@ -186,17 +175,12 @@ async fn watch(
     wait: Wait,
     clock: Instant,
 ) -> Result<Value, Error> {
-    let mut output = tools
-        .shell
-        .wait(
-            job,
-            shell::Wait {
-                timeout: Duration::from_millis(timeout),
-                pattern: wait.pattern,
-                quiet: wait.quiet_ms.map(Duration::from_millis),
-            },
-        )
-        .await?;
+    let until = shell::Wait {
+        timeout: Duration::from_millis(timeout),
+        pattern: wait.pattern,
+        quiet: wait.quiet_ms.map(Duration::from_millis),
+    };
+    let mut output = tools.shell.wait(job, until).await?;
     if let Some((at, character)) = output
         .text
         .char_indices()

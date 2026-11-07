@@ -110,6 +110,11 @@ pub(super) fn width(s: &str) -> usize {
         .sum()
 }
 
+/// Terminal cells of `spans` together, each counted as `width` counts it.
+pub(super) fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|s| width(&s.content)).sum()
+}
+
 /// Writes whole graphemes from `x` within `max` cells and the buffer; returns the next column.
 pub(super) fn put(b: &mut Buffer, x: u16, y: u16, s: &str, max: u16, style: Style) -> u16 {
     if y < b.area.y || y >= b.area.bottom() {
@@ -179,14 +184,8 @@ pub(super) fn scrollbar(
             (_, true) => "▀",
             _ => "▄",
         };
-        put(
-            b,
-            x,
-            y + (half / 2) as u16,
-            glyph,
-            1,
-            style(GRAY_DIM, GLASS),
-        );
+        let row = y + (half / 2) as u16;
+        put(b, x, row, glyph, 1, style(GRAY_DIM, GLASS));
     }
     true
 }
@@ -357,6 +356,13 @@ pub(super) fn wrap(spans: Vec<Span<'static>>, columns: usize) -> Vec<Line<'stati
         true
     });
     rows
+}
+
+/// `spans` wrapped to `columns`, every row a column in from the edge.
+pub(super) fn inset(spans: Vec<Span<'static>>, columns: usize) -> Vec<Line<'static>> {
+    let rows = wrap(spans, columns.saturating_sub(1)).into_iter();
+    rows.map(|row| Line::from([vec![" ".into()], row.spans].concat()))
+        .collect()
 }
 
 pub(super) fn to_line(parts: &[Part<'_>]) -> Line<'static> {

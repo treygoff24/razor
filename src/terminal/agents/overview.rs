@@ -3,15 +3,17 @@
 //! from the list's own layout; and the fold between it and the list beside a session.
 use super::panel::{self, Standing, on, standing};
 use super::sections::{subtree, totals};
+use super::servers;
 use super::tiles::{self, Group, Overview, Placed, Roots, frame};
 use crate::protocol::views::{Section, SectionKind};
 use crate::protocol::{AgentView, SessionId, now};
 use crate::terminal::motion::{self, Moving, ease_out, progress};
 use crate::terminal::text::*;
 use crate::terminal::view::{self, Action, Hit, tint};
-use crate::terminal::{App, bindings, servers};
+use crate::terminal::{App, bindings, status};
 use ratatui::style::{Style, Stylize};
 use ratatui::{buffer::Buffer, layout::Rect};
+use std::collections::BTreeSet;
 
 /// How long the fold takes: about ten frames at `motion::MOVE`.
 const FOLD: u64 = 320;
@@ -112,11 +114,30 @@ pub(super) fn groups(app: &App) -> Vec<&[Section]> {
 fn grouped(s: &Section) -> bool {
     matches!(s.kind, SectionKind::Group | SectionKind::EverythingElse)
 }
+/// NEEDS YOU as the overview, the census and the project order read it: only its rows listed in
+/// no other section, the asking and stuck agents of a view grouped by state with their helpers.
+pub(super) fn alone(app: &App) -> Option<Section> {
+    let all = app.list.layout().map_or(&[][..], |l| &l.sections);
+    let rows = all.iter().filter(|s| s.kind != SectionKind::NeedsYou);
+    let rows = rows.flat_map(|s| &s.sessions);
+    let listed: BTreeSet<_> = rows.map(|r| &r.session).collect();
+    let needs = all.iter().find(|s| s.kind == SectionKind::NeedsYou)?;
+    let mut needs = needs.clone();
+    needs.sessions.retain(|r| !listed.contains(&r.session));
+    (!needs.sessions.is_empty()).then_some(needs)
+}
+/// What the overview draws and the census counts: `alone`, unnumbered, then the groups.
+pub(super) fn panels<'a>(app: &'a App, alone: &'a Option<Section>) -> Vec<&'a [Section]> {
+    let mut panels = groups(app);
+    panels.splice(0..0, alone.as_ref().map(std::slice::from_ref));
+    panels
+}
 
 /// Folds or unfolds the top-level group the overview lists `id` in.
 pub(super) fn group(app: &mut App, id: &SessionId) {
     let holds = |t: &&[Section]| panel::rows(t).any(|r| r.session == *id);
-    let tree = groups(app).into_iter().find(holds);
+    let alone = alone(app);
+    let tree = panels(app, &alone).into_iter().find(holds);
     let group = tree.map(|t| Action::Section(t[0].id.clone()));
     group.into_iter().for_each(|g| super::press(app, g));
 }
@@ -131,13 +152,9 @@ fn paint(app: &mut App, b: &mut Buffer, now: u64, hits: &mut Vec<Hit>) {
     let resized = std::mem::replace(&mut app.list.sized, area) != area;
     let reveal = std::mem::take(&mut app.list.reveal) | resized | !shown;
     fill(b, area, style(DATA, PANEL));
-    let trees = groups(app);
-    let roots = trees
-        .iter()
-        .flat_map(|t| panel::rows(t))
-        .filter(|r| r.depth == 0);
-    let listed: Vec<_> = roots.filter_map(|r| app.agents.get(&r.session)).collect();
-    header(app, b, &listed, now);
+    let alone = alone(app);
+    let trees = panels(app, &alone);
+    header(app, b, &trees, now);
     let room = area.height.saturating_sub(HEAD + 2) as usize;
     let o = Overview {
         groups: build(app, &trees),
@@ -154,14 +171,15 @@ fn paint(app: &mut App, b: &mut Buffer, now: u64, hits: &mut Vec<Hit>) {
     fill(&mut sheet, sight, style(DATA, PANEL));
     let seen = |r: &Rect| r.intersects(sight);
     for (i, at) in placed.groups.iter().enumerate().filter(|g| seen(&g.1.0)) {
-        let lit = selected == Some(Action::Section(o.groups[i].tree[0].id.clone()));
-        tiles::group(app, &mut sheet, (&o.groups[i], i, lit), *at);
+        let lit = matches!(&selected, Some(Action::Section(id)) if *id == o.groups[i].tree[0].id);
+        let number = i.saturating_sub(usize::from(alone.is_some()));
+        tiles::group(app, &mut sheet, (&o.groups[i], number, lit), *at);
     }
     for (r, g, j) in placed.panels.iter().filter(|p| seen(&p.0)) {
         tiles::shelf(&mut sheet, *r, o.groups[*g].tone, &o.groups[*g].panels[*j]);
     }
     for (r, g, a, below) in placed.tiles.iter().filter(|t| seen(&t.0)) {
-        let lit = selected == Some(Action::Agent(a.session.clone()));
+        let lit = matches!(&selected, Some(Action::Agent(id)) if *id == a.session);
         let look = (o.groups[*g].tone, placed.size);
         tiles::tile(app, &mut sheet, *r, (a, below), look, lit, now);
     }
@@ -261,7 +279,10 @@ fn select(app: &App, o: &Overview, placed: &Placed, scroll: usize, reveal: bool)
 }
 
 // The header: the clock's panel from 100 columns, the needs-you panel, and the fleet's from 150.
-fn header(app: &App, b: &mut Buffer, listed: &[&AgentView], now: u64) {
+fn header(app: &App, b: &mut Buffer, trees: &[&[Section]], now: u64) {
+    let rows = trees.iter().flat_map(|t| panel::rows(t));
+    let roots = rows.filter(|r| r.depth == 0);
+    let listed: Vec<_> = roots.filter_map(|r| app.agents.get(&r.session)).collect();
     let (w, census) = (b.area.width, panel::census(listed.iter().copied()));
     let day = zoned(now, app.zone.as_ref()).map(|t| t.strftime("%A|%d %b|%P").to_string());
     let day = day.unwrap_or_default().to_uppercase();
@@ -288,7 +309,7 @@ fn header(app: &App, b: &mut Buffer, listed: &[&AgentView], now: u64) {
         frame(b, Rect::new(x, 0, fleet, HEAD), ink, true, None);
         let tab = [(" FLEET ", CHIP_INK, mix(WHITE, PANEL_INK, 0.25))];
         panel::write(b, x + 2, 0, &panel::tabs(&tab, PANEL));
-        let helpers = panel::count(groups(app).iter().map(|t| totals(t).1).sum(), "HELPER");
+        let helpers = panel::count(trees.iter().map(|t| totals(t).1).sum(), "HELPER");
         let servers = panel::count(app.servers.len(), "SERVER");
         let tail = format!(" {helpers} · {servers} ");
         let at = w - 3 - width(&tail) as u16;
@@ -311,7 +332,7 @@ fn header(app: &App, b: &mut Buffer, listed: &[&AgentView], now: u64) {
         app,
         b,
         Rect::new(x, 0, right.saturating_sub(x), HEAD),
-        listed,
+        &listed,
         now,
     );
 }
@@ -338,7 +359,7 @@ fn needs(app: &App, b: &mut Buffer, r: Rect, listed: &[&AgentView], now: u64) {
         panel::write(b, r.right() - 16, HEAD - 1, &[more]);
     }
     for (i, a) in need.into_iter().take(2).enumerate() {
-        let (s, age) = (standing(a), panel::age(app, since(a), now));
+        let (s, age) = (standing(a), status::ago(app, since(a), now));
         let (ground, words) = ([s.mark().1, PANEL][i], s.said(a).2);
         let (mark, name) = (format!("{} ", s.mark().0), format!("{}  ", a.name));
         let left = match i {
@@ -380,9 +401,11 @@ fn foot(app: &App, b: &mut Buffer, now: u64) {
         true => panel::write(b, 1 + used, y, &names),
         false => used,
     };
-    let keys = "<list.group_1>-<list.group_9> group   <list.up> <list.down> move   \
-        <list.accept> open   <list.fold> fold   <list.close> back";
-    let keys = bindings::text(app, keys);
+    // The keys of the bound actions, of a `|` choice the first bound one's.
+    let keys = "<list.group_1>-<list.group_9> group   <list.previous_agent|list.up> \
+        <list.next_agent|list.down> move   <list.beside|list.accept> open   <list.fold> fold   \
+        <list.close> back";
+    let keys = bindings::hints(app, keys, "   ");
     let at = w.saturating_sub(width(&keys) as u16 + 2);
     if at > used + 10 || used == 0 {
         panel::write(b, at, y, &[on(keys, PANEL_GRAY, PANEL, false)]);

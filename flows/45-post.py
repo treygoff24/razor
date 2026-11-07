@@ -58,15 +58,12 @@ with flow(replies) as f:
         wait(lambda: any(p["id"] == participant and p["live_watch"] for p in json.loads(post("who", "--json"))["participants"]),
              15, f"{participant} has no live watch")
 
-    first = f.run("--print=json", "NOPOST_45")
-    assert first.returncode == 0, first.stderr
-    session = json.loads(first.stdout)["session"]
+    session = f.ask("NOPOST_45")["session"]
     assert "P=none" in outputs(session) and not (f.home / ".razor/post.json").exists(), outputs(session)
     stop()
 
     f.env["PATH"] = full
-    second = f.run("--resume", session, "--print=json", "JOIN_45")
-    assert second.returncode == 0, second.stderr
+    f.ask("--resume", session, "JOIN_45")
     participant = re.search(r"P=(razor-[0-9a-f]{8})", outputs(session))
     assert participant and "Q=none" in outputs(session), outputs(session)
     participant = participant[1]

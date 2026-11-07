@@ -593,19 +593,13 @@ impl Job {
     async fn output(&self) -> Result<Output, Error> {
         // Read before the file: once the end shows, every writer is gone and the file complete.
         let end = *self.end.borrow();
-        let read = async {
-            let mut file = File::open(&self.path).await?;
-            let after = file.metadata().await?.len();
-            let mut bytes = Vec::new();
-            if self.terminal.is_none() {
-                // Four bytes per character at most, plus one character a cut may have split.
-                let from = after.saturating_sub(4 * SPILL as u64 + 4);
-                file.seek(SeekFrom::Start(from)).await?;
-                file.take(after - from).read_to_end(&mut bytes).await?;
-            }
-            io::Result::Ok((after, bytes))
+        // Four bytes per character at most, plus one character a cut may have split.
+        let most = if self.terminal.is_none() {
+            4 * SPILL as u64 + 4
+        } else {
+            0
         };
-        let (after, bytes) = read
+        let (after, bytes) = last(&self.path, most)
             .await
             .map_err(other("Could not read the job's output."))?;
         let screen = self.terminal.as_ref().map(Terminal::screen);
@@ -630,16 +624,7 @@ impl Job {
     /// The output's last two lines with content, each its text after its last carriage return cut
     /// to 1 KiB, from one read of at most its last 64 KiB; none when the file cannot be read.
     async fn tail(&self) -> Vec<String> {
-        let read = async {
-            let mut file = File::open(&self.path).await?;
-            let size = file.metadata().await?.len();
-            let from = size.saturating_sub(WINDOW as u64);
-            file.seek(SeekFrom::Start(from)).await?;
-            let mut bytes = Vec::new();
-            file.take(WINDOW as u64).read_to_end(&mut bytes).await?;
-            io::Result::Ok(bytes)
-        };
-        let bytes = read.await.unwrap_or_default();
+        let (_, bytes) = last(&self.path, WINDOW as u64).await.unwrap_or_default();
         let text = String::from_utf8_lossy(&bytes);
         let lines = text.lines().rev().filter_map(|line| {
             let line = line.trim_end_matches('\r').rsplit('\r').next()?;
@@ -674,6 +659,17 @@ impl Job {
         }
         Ok(false)
     }
+}
+
+/// The file's length and at most its last `most` bytes before that length.
+async fn last(path: &Path, most: u64) -> io::Result<(u64, Vec<u8>)> {
+    let mut file = File::open(path).await?;
+    let size = file.metadata().await?.len();
+    let from = size.saturating_sub(most);
+    file.seek(SeekFrom::Start(from)).await?;
+    let mut bytes = Vec::new();
+    file.take(size - from).read_to_end(&mut bytes).await?;
+    Ok((size, bytes))
 }
 
 /// The boot and start time of process `pid`, which no later process with that pid shares; None

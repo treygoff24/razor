@@ -28,16 +28,9 @@ budgets = {name: float(limit) for name, limit in re.findall(
 def model(f, n):
     """When the stand-in got the nth model request, and when it had sent all of its reply. It
     rewrites the file with `sent` after the reply's last byte, so the turn can end first."""
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        try:
-            meta = json.loads((f.requests / f"{n:03}.json").read_text())
-        except ValueError:  # read between the rewrite's truncation and its write
-            meta = {}
-        if "sent" in meta:
-            return meta["arrived"], meta["sent"]
-        time.sleep(0.005)
-    raise AssertionError(f"model request {n} never recorded its reply as sent")
+    meta = server.wait(lambda: (m := json.loads((f.requests / f"{n:03}.json").read_text())).get("sent") and m,
+                       10, f"model request {n} never recorded its reply as sent")
+    return meta["arrived"], meta["sent"]
 
 
 def posts(f):

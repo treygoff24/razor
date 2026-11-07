@@ -18,7 +18,7 @@ use tokio::{
     sync::{RwLock, watch},
 };
 
-pub const KEY: &str = "device.key";
+pub(crate) const KEY: &str = "device.key";
 pub(crate) const HOP: &str = "x-razor-forwarded";
 pub(crate) type Gone = watch::Receiver<()>;
 const MOST: usize = 64;

@@ -227,25 +227,7 @@ async fn read(app: App, device: Device) {
                 .error_for_status()
                 .ok()?;
             // Subscribe before loading the page, closing the delivery race.
-            let page = "/v1/deliveries?local=true&limit=256";
-            if let Some(mut deliveries) = app
-                .devices
-                .fetch::<Vec<Delivery>>(&device, page, &(), BYTES)
-                .await
-                && let Some(peer) = app.peers.rows.write().await.get_mut(&device.name)
-            {
-                for d in &mut deliveries {
-                    d.session = d.session.on(&device.name);
-                }
-                peer.deliveries = deliveries;
-                peer.recount();
-                for delivery in &peer.deliveries {
-                    let _ = app
-                        .peers
-                        .changed
-                        .send(Live::Delivery(delivery.clone().into()));
-                }
-            }
+            deliveries(&app, &device).await;
             let bytes = response
                 .bytes_stream()
                 .map(|b| b.map_err(std::io::Error::other));
@@ -301,6 +283,24 @@ async fn read(app: App, device: Device) {
         .await;
         app.peers.update(&device.name, None).await;
         tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+/// Replaces the peer's cached deliveries with its newest 256, each announced.
+async fn deliveries(app: &App, device: &Device) {
+    let page = "/v1/deliveries?local=true&limit=256";
+    let fetched = app.devices.fetch::<Vec<Delivery>>(device, page, &(), BYTES);
+    if let Some(mut deliveries) = fetched.await
+        && let Some(peer) = app.peers.rows.write().await.get_mut(&device.name)
+    {
+        for d in &mut deliveries {
+            d.session = d.session.on(&device.name);
+        }
+        peer.deliveries = deliveries;
+        peer.recount();
+        for delivery in &peer.deliveries {
+            let _ = (app.peers.changed).send(Live::Delivery(delivery.clone().into()));
+        }
     }
 }
 

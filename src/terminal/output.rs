@@ -163,15 +163,13 @@ async fn scan(
     height: usize,
 ) -> Result<Window, Error> {
     let limit = usize::from(window.columns).max(1) * 4 * if window.phone() { 64 } else { 1 };
-    let (mut prefix, mut retained) = (
-        Vec::new(),
-        window.lines.iter().map(String::len).sum::<usize>(),
-    );
+    let mut prefix = Vec::new();
+    let mut retained = window.lines.iter().map(String::len).sum::<usize>();
+    let file = match window.job == STARTUP.1 {
+        true => "startup.md".into(),
+        false => format!("job-{}", window.job.0),
+    };
     loop {
-        let file = match window.job == STARTUP.1 {
-            true => "startup.md".into(),
-            false => format!("job-{}", window.job.0),
-        };
         let (bytes, size) = api
             .chunk(session, &file, window.offset, super::api::CHUNK)
             .await?;

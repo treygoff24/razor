@@ -20,6 +20,17 @@ struct Row {
     history: bool,
     place: String,
 }
+impl Row {
+    /// A row naming a group, or saying why it has none, which nothing selects.
+    fn head(words: impl Into<Line<'static>>, group: usize) -> Self {
+        let words = words.into();
+        Row {
+            words,
+            group,
+            ..Row::default()
+        }
+    }
+}
 
 #[derive(Default)]
 /// Disposable: a 200-byte query, at most 50 history hits and the status stream’s bounded rows.
@@ -116,6 +127,7 @@ fn go(app: &mut App, id: SessionId) {
         agents::press(app, Action::Agent(top));
         agents::full(app);
     }
+    agents::unfold(app, &id);
     agents::press(app, Action::Agent(id));
 }
 
@@ -262,20 +274,11 @@ fn rows(app: &App, g: &Goto, columns: usize, now: u64) -> Vec<Row> {
         let here = (server(root), &root.project);
         if place.is_none_or(|(s, _)| s != here.0) {
             let words = span(status::location(app, &root.session, columns), WHITE);
-            out.push(Row {
-                words: Line::from(words),
-                group,
-                ..Row::default()
-            });
+            out.push(Row::head(words, group));
         }
         if place != Some(here) {
             group += 1;
-            let words = Line::from(span(format!("  {}", root.project), CYAN));
-            out.push(Row {
-                words,
-                group,
-                ..Row::default()
-            });
+            out.push(Row::head(span(format!("  {}", root.project), CYAN), group));
         }
         place = Some(here);
         out.extend(
@@ -285,14 +288,19 @@ fn rows(app: &App, g: &Goto, columns: usize, now: u64) -> Vec<Row> {
         );
     }
     if out.is_empty() {
-        let empty = Line::from(span("No agents match.", GRAY));
-        out.push(Row {
-            words: empty,
-            group,
-            ..Row::default()
-        });
+        out.push(Row::head(span("No agents match.", GRAY), group));
     }
+    out.extend(history(app, g, columns, group + 1));
+    out
+}
+
+// The history group, numbered `group`, while words are typed: its head saying how the search
+// went, then a row for each conversation it found.
+fn history(app: &App, g: &Goto, columns: usize, group: usize) -> Vec<Row> {
     let words = g.query.trim();
+    if words.is_empty() {
+        return Vec::new();
+    }
     let answer = g.history.as_ref().filter(|h| h.0 == words).map(|h| &h.1);
     let said = match answer {
         None => "searching…".into(),
@@ -302,14 +310,8 @@ fn rows(app: &App, g: &Goto, columns: usize, now: u64) -> Vec<Row> {
             format!("{} found{partial}", f.hits.len())
         }
     };
-    if !words.is_empty() {
-        let head = vec![span("HISTORY", WHITE), span(format!(" · {said}"), GRAY)];
-        out.push(Row {
-            words: Line::from(head),
-            group: group + 1,
-            ..Row::default()
-        });
-    }
+    let head = vec![span("HISTORY", WHITE), span(format!(" · {said}"), GRAY)];
+    let mut out = vec![Row::head(head, group)];
     for hit in answer.into_iter().flatten().flat_map(|f| &f.hits) {
         let title = format!("    {}", cell(name(&hit.name, &hit.session), 30));
         let words = Line::from(vec![span(title, WHITE), span(hit.snippet.clone(), GRAY)]);
@@ -319,7 +321,7 @@ fn rows(app: &App, g: &Goto, columns: usize, now: u64) -> Vec<Row> {
         out.push(Row {
             words,
             session: Some(hit.session.clone()),
-            group: group + 1,
+            group,
             matched: true,
             history: true,
             place,
@@ -341,7 +343,7 @@ pub fn draw(app: &mut App, b: &mut Buffer, area: Rect, now: u64) -> Option<(u16,
     };
     let (x, y) = ((area.width - w) / 2, (area.height - h) / 2);
     let r = Rect::new(area.x + x, area.y + y, w, h);
-    let r = panel::frame_colour(b, r, "Go to", CYAN);
+    let r = panel::frame(b, r, "Go to", CYAN);
     let rows = rows(app, g, r.width as usize, now);
     let total = app.agents.values().filter(|a| a.settled.is_none()).count();
     let agent = |r: &&Row| r.matched && r.session.is_some() && !r.history;
@@ -399,7 +401,7 @@ pub fn draw(app: &mut App, b: &mut Buffer, area: Rect, now: u64) -> Option<(u16,
     put(b, r.x, r.bottom() - 2, place, r.width, gray);
     let keys = "<goto.up>/<goto.down> rows · <goto.left>/<goto.right> project · \
                 <goto.search> search · <goto.accept> open · <goto.cancel> close";
-    let keys = bindings::text(app, keys);
+    let keys = bindings::hints(app, keys, " · ");
     put(b, r.x, r.bottom() - 1, &keys, r.width, gray);
     cursor
 }

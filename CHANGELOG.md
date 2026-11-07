@@ -2,6 +2,52 @@
 
 What changed in each Razor release. [Configuration](docs/configuration.md) and the other pages in [docs](docs/README.md) describe each feature in full.
 
+## 0.2.2 (7 November 2026)
+
+### New
+
+- Keys for moving between agents and typing to each one from the keyboard alone, with the agents list staying open. They are new actions, unbound by default, so the default keys are unchanged: `choose` at the start of a composer line and `switch` anywhere in the draft give the list the keys with your current agent selected; in the list, `previous_agent` and `next_agent` step through the top-level agents, passing over helpers unless one needs you, `beside` opens the selected agent beside the list, ready to type, and `overview` opens the overview. [Moving between agents](docs/configuration.md#moving-between-agents) gives the settings that bind them to Left, Shift-Tab, the arrows and Enter.
+- The `razor` starter skill tells agents how to bring your MCP servers, skills, plugins and tools over from Claude Code, Codex, OpenCode, pi, Code Puppy or any other agent: what `razor mcp import` reads and what it leaves for you, where each agent keeps its setup, and what to do with a plugin, hook or tool that runs only inside the other agent.
+- `razor config get`, `set` and `unset` reach the voice settings the server keeps, by their names after `voice.`, such as `razor config set voice.quiet '{"from": "22:00", "to": "07:00"}'` ([Browser, voice and search](docs/browser-voice-search.md#spoken-notes-from-agents)).
+- A session's event stream sends `{"kind":"heartbeat"}` after every 15 seconds without a line when asked with `heartbeat=true`, so an app can tell a quiet session from a dropped connection ([Scripting](docs/scripting.md)).
+- The status stream's `server` object says `"follow":true`, so an app can tell that this server honours `follow=true` on a session's events, which follows the session without marking it looked at. An older server ignores that query, marks the session, and leaves `follow` out.
+
+### Changed
+
+- Models that hold 500,000 tokens or more, Claude Code's Opus, Sonnet and Fable at 1,000,000 among them, now fill at most 500,000 and hand over at 450,000 (a threshold of 0.9); smaller models keep their own window and 0.8. A `window` or `threshold` you set for a model under `[models]`, or a `[rebuild] threshold`, still wins ([Configuration](docs/configuration.md#models)).
+- Voice notes and phone calls have no daily limit unless you set one. The old defaults, 3,000 spoken characters and $10 of calls a day, are gone, including from settings that saved them: an exact 3,000 or $10 saved before this release is cleared as the old default, and any other limit stays. With paired servers, every server must update before calls have no limit, since an older one still applies its own $10 to the calls it makes.
+- Agents' voice notes have no length limit, and the `memos` voice setting is gone; a note still fits on one line, and counts against `daily_characters` if you set one. The bundled speech program speaks a long reply or voice note whole, instead of stopping at 5,000 characters with "The rest is in the app."
+- A working helper's mark in the agents list and the overview is the green of a working agent, instead of its group's muted colour, so helpers at work stand out.
+- When an agent sets its own session's title or name, the transcript labels that call `title` or `rename` in the ordinary colour, instead of the violet `agent` used for starting a helper.
+- A server reached over the network lets go of a phone or other device that vanished without closing its connection: on Linux about two minutes after the device last answered, instead of hours later; on macOS an idle connection closes the same way, and a streaming one once macOS gives up retransmitting.
+- Releases ship Cua Driver 0.41.3, Cua's newest, in place of 0.40.6: its fixes keep a macOS sheet's own focus, restore the previous foreground after typing on Linux and Windows, and decide every macOS activation undo in one place.
+
+### Fixed
+
+- Unsent words are no longer lost when you move between agents. Leaving an agent before its saved draft has loaded keeps that draft, and words and images you type before it loads go after it when it arrives; until then you stay on that agent. Moving away waits until the server has saved your words, and if it cannot, because eight saves are already waiting or the save fails, you stay with your words and the reason. Sending before the draft loads keeps the draft too, so `razor --resume <id> "words"` no longer discards it.
+- Words typed in the half second before Right closes the agents list are no longer lost.
+- When a refused message comes back to the box, the words and images you typed meanwhile stay with it, even past 1 MiB together, until you shorten them, instead of the new words going to the clipboard. If you had pasted images meanwhile, the returned message's own images are dropped, and the terminal says so; it also says so when you leave a conversation with images in the box, since a draft keeps words only.
+- Words typed for a new agent or thread are no longer lost when you look at another session: they wait, for up to eight new agents at once, and come back when you return to start that same one. Leaving words for a ninth, or words past 1 MiB, is refused with a sentence until you send, stash, clear or shorten them. The first Ctrl-C of a quit names the new agents and threads whose words would be lost, and `/new` or `/thread` back to one keeps them; closing the terminal window still loses them.
+- The terminal no longer moves you to another session when one you closed with `/done` or `/quit` finishes closing, if you had gone on to another session or started typing for a new agent or thread meanwhile.
+- A view grouped by state, the default one included, lists an agent that asks or is stuck once, under NEEDS YOU with its helpers beneath it, instead of again in an Asking or Stuck group below; the overview shows those agents as its first panel.
+- Ctrl-N and Ctrl-P select the helpers of an agent opened beside the agents list, instead of saying there is no other child.
+- The agents list's last line no longer says Left opens the overview, since Left there moves to the parent row; it names F3, and the keys of whichever list actions are bound.
+- The status stream always opens with its `agents` line, as [Scripting](docs/scripting.md) says; a line about a paired server's agent or a delivery could come first, so a script reading only the first line sometimes found no agents in it.
+- A question from an agent with a blank line in it no longer crashes the terminal app.
+- The context gauge, folded to eight columns, shows a rebuild threshold such as 0.57 as 57 instead of "56.".
+- `razor --agents` opens beside the conversation you last wrote in, instead of whichever agent last did any work, which could be someone else's busy agent.
+- When a session you closed with `/done` or `/quit` beside the agents list finishes closing, a helper goes back to its parent and any other session to the next top-level agent in the list, never to another agent's helper; with none, the closed session stays on screen. This also works when the list has already moved the closed session to Earlier, which used to send you to the top of the list.
+- Quitting the terminal beside the agents list names the session on screen in its last line, instead of one you had opened earlier.
+- The second and later lines of a quit warning, such as the one naming a new agent's unsent words, start under its first line instead of a column to the left.
+- Opening a session from Go to unfolds what hides it in the agents list, Earlier included for a closed one, and selects its row, instead of leaving no row selected.
+- `razor config get voice.<field>` on a server whose `[server] shared` names another reads that server's value, and `set` and `unset` there say which server keeps the voice settings, instead of "Use the voice settings owner shown in status."
+- A panel's last line, such as `/help`'s or `/keys`'s, and the Go to and `/mcp` panels' leave out the hint of a key your settings unbind, instead of saying "unbound".
+- The agents list's servers line names whose usage window it shows, as in `work 7-day 97%`, since it is the fullest window on any paired server and may not be the account your conversation uses.
+- Each reply's name line in the transcript says the model that wrote it. Switching models no longer relabels every earlier reply with the new model, and words sent with a model change that join a running turn no longer relabel that turn's replies; replies from before this release still show the session's current model.
+- Claude agents no longer take the line Claude Code adds after reading a large image, `[Image: original …, displayed at …]`, for a message from you: their prompt says it is the tool's scale note.
+- A helper whose turn failed or was interrupted reads `▲ error` under its parent in the agents list and wears the red `▲` in its parent's overview tile, as its own row does, instead of `idle`. An agent that has finished or closed no longer shows as an error because its last turn failed.
+- With motion off, or the terminal in the background, an age under a minute in the agents list, the overview and the status pane's inbox reads `<1m` and changes at the minute, instead of counting seconds and redrawing the screen every second.
+
 ## 0.2.1 (6 November 2026)
 
 ### New

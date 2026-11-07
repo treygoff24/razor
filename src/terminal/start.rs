@@ -4,7 +4,7 @@
 use super::{App, Composer, fail, picker, text::*, view::Action, view::Hit};
 use crate::{protocol::SessionId, terminal::bindings};
 use crossterm::event::{KeyCode as K, KeyEvent, KeyModifiers as Mods};
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{buffer::Buffer, layout::Rect, text::Line};
 use reqwest::Method;
 use serde::Deserialize;
 use std::{cmp::Reverse, collections::BTreeMap, path::PathBuf};
@@ -187,23 +187,101 @@ pub fn choose(app: &mut App, clicked: Option<(String, PathBuf)>) {
 /// Aims the new-session composer at `cwd`, or at a fresh thread of `resident` (its native name),
 /// on `server`: the next first message starts it there.
 pub fn aim(app: &mut App, server: String, cwd: PathBuf, resident: Option<SessionId>) {
-    if app.sending.is_some() || super::audio::unsent(app) {
-        return app.say("A note or input is pending; wait before starting a new agent.");
+    if app.waiting() {
+        return app.say("A note, input or draft is pending; wait before starting a new agent.");
     }
-    app.save();
+    let to = (server, cwd, resident);
+    if room(app, Some(&to)) {
+        app.save(Some(Box::new(|app: &mut App| reaim(app, to))));
+    }
+}
+
+// Aims once the server holds the addressed session's words.
+fn reaim(app: &mut App, to: Destination) {
     super::recap::leave(app);
     for id in [app.root.take(), app.focus.clone()].into_iter().flatten() {
         app.streams.remove(&id).iter().for_each(|task| task.abort());
     }
-    app.back = app.focus.take().or(app.back.take());
-    let selected = resident
-        .as_ref()
-        .map_or(Action::New, |r| Action::Thread(r.on(&server)));
-    (app.server, app.cwd, app.resident) = (server, cwd, resident);
+    let left = std::mem::take(&mut app.composer);
+    app.drafted = None;
+    let from = app.focus.take();
+    put_away(app, left, from.is_some());
+    if from.is_some() {
+        app.back = from;
+    }
+    let selected = (to.2.as_ref()).map_or(Action::New, |r| Action::Thread(r.on(&to.0)));
+    // Only words typed for this same destination come back.
+    app.composer = app.new_drafts.remove(&to).unwrap_or_default();
+    (app.server, app.cwd, app.resident) = to;
     (app.start, app.initial, app.request) = (None, None, None);
-    (app.composer, app.list.selected) = (Composer::default(), Some(selected));
+    app.list.selected = Some(selected);
     super::composer::completion::reset(app);
     picker::request(app, true);
+}
+
+/// The new agents whose words may wait at once, in the app: a person types into a handful of new
+/// destinations before sending, and each holds up to the editor's 1 MiB and its images.
+pub const NEW_DRAFTS: usize = 8;
+
+/// Where a new agent starts: server, folder and the resident it is a thread of.
+pub type Destination = (String, PathBuf, Option<SessionId>);
+
+// The new agent the editor is aimed at, while no session is addressed.
+fn aimed(app: &App) -> Destination {
+    (app.server.clone(), app.cwd.clone(), app.resident.clone())
+}
+
+/// Whether the editor's words may be left, for the new agent `to` if any: a session's are saved
+/// first, while a new agent's must fit in `App.new_drafts`, where `to`'s make room; says why not.
+pub fn room(app: &mut App, to: Option<&Destination>) -> bool {
+    let words = &app.composer;
+    let back = to.is_some_and(|to| app.new_drafts.contains_key(to));
+    let refusal = match () {
+        _ if app.focus.is_some() || words.is_empty() => return true,
+        _ if words.text.len() > super::composer::DRAFT_BYTES => {
+            "These words are past the 1 MiB cap; shorten them before leaving."
+        }
+        _ if app.new_drafts.len() >= NEW_DRAFTS && !back => {
+            "Words for 8 new agents already wait; send, stash or clear these before leaving."
+        }
+        _ => return true,
+    };
+    app.say(refusal);
+    false
+}
+
+/// Puts the words just left away. A session's are on the server already, without their images,
+/// which drafts do not keep; a new agent's wait under the destination they were typed for.
+pub fn put_away(app: &mut App, words: Composer, session: bool) {
+    if session && words.active_images().next().is_some() {
+        app.say("Drafts keep words only; the images in the words left were dropped.");
+    } else if !session && !words.is_empty() {
+        app.new_drafts.insert(aimed(app), words);
+    }
+}
+
+/// While a quit is armed, what it would lose, wrapped to `columns`: no session or file holds a
+/// new agent's words.
+pub fn unsent(app: &App, columns: usize) -> Vec<Line<'static>> {
+    let name = |(server, cwd, resident): &Destination| {
+        let to = resident.as_ref().map_or_else(
+            || format!("a new agent in {}", super::mcp::home(cwd)),
+            |r| format!("a thread with {r}"),
+        );
+        match server.is_empty() {
+            true => to,
+            false => format!("{to} on {server}"),
+        }
+    };
+    let to = aimed(app);
+    let typed = (app.focus.is_none() && !app.composer.is_empty()).then_some(&to);
+    let names = (app.new_drafts.keys().chain(typed).map(name)).collect::<Vec<_>>();
+    if !app.quitting || names.is_empty() {
+        return Vec::new();
+    }
+    let (names, back) = (names.join(", "), "/new or /thread there keeps them.");
+    let lost = format!("Quitting loses the unsent words for {names}; {back}");
+    inset(vec![span(lost, WHITE)], columns)
 }
 
 /// Draws the chooser over the foot of `area`, as the model picker draws, and records its clicks.

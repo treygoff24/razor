@@ -57,7 +57,7 @@ with flow([Reply((REPLIES / "hello.sse").read_bytes()) for _ in range(3)],
     inputs = [e for e in entries if e["kind"] == "input"]
     assert [(i["id"], i["text"], i["voice"]) for i in inputs] == [
         (entry, "hello from a voice note", voice)], inputs
-    asked = json.dumps(json.loads((f.requests / "001.body").read_bytes())["messages"])
+    asked = json.dumps(f.request(1)["messages"])
     assert json.dumps(f"{lead}\nhello from a voice note")[1:-1] in asked, asked
 
     # 2. A resend after admission answers the same entry without running the program again.

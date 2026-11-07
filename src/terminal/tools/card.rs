@@ -136,7 +136,7 @@ pub(super) fn rows(call: &Call<'_>, columns: usize, now: u64, motion: bool) -> V
     let pad = |n: usize| Span::styled(" ".repeat(n), style(DATA, face.ground));
     for i in 0..n {
         let line = i.checked_sub(1).and_then(|i| face.body.get(i));
-        let used = line.map_or(0, |spans| spans.iter().map(|s| width(&s.content)).sum());
+        let used = line.map_or(0, |spans| spans_width(spans));
         let mut spans = vec![
             span("│", light(2 * columns + 2 * n - 1 - i)),
             Span::raw(" "),
@@ -165,7 +165,6 @@ pub(super) fn rows(call: &Call<'_>, columns: usize, now: u64, motion: bool) -> V
     rows
 }
 
-// Where a card's body text starts, counted from its left edge.
 fn indent(columns: usize) -> usize {
     if columns < usize::from(PHONE) { 10 } else { 13 }
 }
@@ -257,7 +256,7 @@ fn face(call: &Call<'_>, columns: usize, now: u64) -> Face {
         face.body.push(plain(
             input["text"].as_str().unwrap_or("waiting for an answer"),
         ));
-    } else if row::waits("agent", input) && call.input().0 == "agent" {
+    } else if row::waits(kind, input) {
         // A wait's live body: what it waits for, then its limit filling, `━━╸╌╌ 0:42 of 10m`.
         let limit = input["timeout_ms"].as_u64().unwrap_or(600_000).max(1);
         let waited = call
@@ -293,9 +292,11 @@ fn face(call: &Call<'_>, columns: usize, now: u64) -> Face {
         // kept while a finished card pulls in; with none yet, how long it has run.
         let done = call.outcome().is_some();
         let tail = call.tail.filter(|(text, _)| !text.is_empty() && !done);
-        let lines: Vec<_> =
-            tail.map_or_else(|| call.lines().collect(), |(t, _)| t.lines().collect());
-        let last = &lines[lines.len().saturating_sub(3)..];
+        let mut last: Vec<_> = tail.map_or_else(
+            || call.lines().rev().take(3).collect(),
+            |(t, _)| t.lines().rev().take(3).collect(),
+        );
+        last.reverse();
         for (i, l) in last.iter().enumerate() {
             let (mark, ink) = if i + 1 == last.len() {
                 (GREEN, DATA)
@@ -421,14 +422,19 @@ fn head(call: &Call<'_>, columns: usize, now: u64, face: &Face) -> Line<'static>
         if phone { "  " } else { "   " }
     );
     let duration = dur(call.ended().unwrap_or(now).saturating_sub(call.entry.at));
-    let figure = &face.figure;
-    let figures = match (phone, figure.is_empty()) {
-        (true, _) => figure.clone(),
-        (false, true) => duration.clone(),
-        (false, false) => format!("{figure} ── {duration}"),
-    };
-    let room = columns
-        .saturating_sub(width(&prefix) + width(&figures) + if figures.is_empty() { 2 } else { 5 });
+    let mut tail = Vec::new();
+    if !face.figure.is_empty() {
+        tail.push(span(face.figure.clone(), GREEN));
+    }
+    if !phone {
+        if !tail.is_empty() {
+            tail.push(Span::raw(" ── "));
+        }
+        tail.push(span(duration, GRAY));
+    }
+    let figures = spans_width(&tail);
+    let room =
+        columns.saturating_sub(width(&prefix) + figures + if tail.is_empty() { 2 } else { 5 });
     let target = clip(&target, room);
     let rule = "─".repeat(room.saturating_sub(width(&target)));
     let mut spans = vec![
@@ -436,15 +442,9 @@ fn head(call: &Call<'_>, columns: usize, now: u64, face: &Face) -> Line<'static>
         span(target, MAGENTA),
         span(format!(" {rule}"), GRAY_DIM),
     ];
-    if !figures.is_empty() {
+    if !tail.is_empty() {
         spans.push(Span::raw(" "));
-        if !figure.is_empty() {
-            spans.push(span(figure.clone(), GREEN));
-        }
-        if !phone {
-            spans.push(Span::raw(if figure.is_empty() { "" } else { " ── " }));
-            spans.push(span(duration, GRAY));
-        }
+        spans.extend(tail);
         spans.push(Span::raw(" ─"));
     }
     spans.push(Span::raw("╮"));
@@ -535,7 +535,7 @@ pub(super) fn next(call: &Call<'_>, columns: usize, now: u64, motion: bool) -> N
     }
     let earn = call.entry.at.saturating_add(2000);
     let end = call.place.beat.or_else(|| call.ended());
-    let phases = [
+    let mut phases = [
         (end.is_none() && !call.asking()).then_some(earn),
         (end.is_none() && !call.asking()).then_some(earn.saturating_add(420)),
         (end.is_none() && call.asking()).then_some(call.entry.at.saturating_add(380)),
@@ -547,12 +547,11 @@ pub(super) fn next(call: &Call<'_>, columns: usize, now: u64, motion: bool) -> N
             .map(|at| at.saturating_add(560)),
         call.place.fixed,
         call.place.fixed.map(|at| at.saturating_add(620)),
-    ];
-    let mut phases = phases
-        .into_iter()
-        .flatten()
-        .filter(|at| *at > now)
-        .peekable();
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|at| *at > now)
+    .peekable();
     // The face is read once: its line count does not change before the record does.
     let body = phases.peek().map(|_| face(call, columns, now).body.len());
     let current = body.map(|body| height(call, body, now, motion));

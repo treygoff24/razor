@@ -15,18 +15,13 @@ handover = reply(("toolu_note", "mcp__razor__handover", {"note": note}))
 with flow([file("hello"), file("high-usage"), handover, file("done"), file("recall"), file("done")],
           config="[rebuild]\nthreshold = 0.1") as f:
     (f.cwd / "AGENTS.md").write_text("flow rules one")
-    first = f.run("--print=json", ask)
-    assert first.returncode == 0, first.stderr
-    session = json.loads(first.stdout)["session"]
+    session = f.ask(ask)["session"]
     old = list(f.record(session))[1]
     shown = f.home / ".razor/sessions" / session / "startup.md"
     assert "flow rules one" in shown.read_text(), shown.read_text()
     (f.cwd / "AGENTS.md").write_text("flow rules two")
-    filled = f.run("--resume", session, "--print=json", "Fill the context, then keep your note.")
-    assert filled.returncode == 0, filled.stderr
-    recalled = f.run("--resume", session, "--print=json", "Recall the original ask by its entry id.")
-    assert recalled.returncode == 0, recalled.stderr
-    assert json.loads(recalled.stdout) == {"session": session, "message": "flow done"}
+    f.ask("--resume", session, "Fill the context, then keep your note.")
+    assert f.ask("--resume", session, "Recall the original ask by its entry id.") == {"session": session, "message": "flow done"}
     entries = list(f.record(session))
     rebuilds = [e for e in entries if e["kind"] == "rebuild"]
     assert len(rebuilds) == 1 and rebuilds[0]["trigger"] == "threshold", rebuilds
@@ -38,7 +33,7 @@ with flow([file("hello"), file("high-usage"), handover, file("done"), file("reca
     assert len(recalled_entry) == 1 and json.loads(recalled_entry[0]["output"]) == old, recalled_entry
     assert len([e for e in entries if e["kind"] == "start"]) == 1, entries
     assert any(e["kind"] == "input" and e["from"] == "razor" for e in entries), entries
-    fresh = json.loads((f.requests / "004.body").read_bytes())
+    fresh = f.request(4)
     assert ask in json.dumps(fresh["messages"]), fresh
     assert "flow rules two" in fresh["system"][-1]["text"], fresh["system"]
     assert fresh["messages"][0]["content"][0]["text"].startswith("# This session\n"), fresh["messages"][0]
@@ -53,9 +48,7 @@ def step(id, name, arguments, large=False):
 
 def run(replies, config="[rebuild]\nthreshold = 0.5"):
     with flow(replies, model="gpt-6.1-sol", config=PLAIN + config) as f:
-        result = f.run("--print=json", ask)
-        assert result.returncode == 0, result.stderr
-        entries = list(f.record(json.loads(result.stdout)["session"]))
+        entries = list(f.record(f.ask(ask)["session"]))
         asked = [e["id"] for e in entries if e["kind"] == "input" and e["from"] == "razor"]
         return entries, asked, [e for e in entries if e["kind"] == "rebuild"]
 
@@ -90,19 +83,16 @@ for settings, large in (("[rebuild]\nthreshold = 0.9\n[models.sol]\nthreshold = 
 # next admitted turn, after the first turn has supplied an SDK window.
 with flow([file("hello"), file("high-usage"), handover, file("done"), file("hello")],
           config="[models.opus]\nwindow = 1000000\nthreshold = 1.0") as f:
-    first = f.run("--print=json", ask)
-    assert first.returncode == 0, first.stderr
-    session = json.loads(first.stdout)["session"]
+    session = f.ask(ask)["session"]
     path = f.home / ".razor/config.toml"
     path.write_text(path.read_text().replace("window = 1000000", "window = 200").replace("threshold = 1.0", "threshold = 0.5"))
-    again = f.run("--resume", session, "--print=json", "Use the edited limits.")
-    assert again.returncode == 0, again.stderr
+    f.ask("--resume", session, "Use the edited limits.")
     entries = list(f.record(session))
-    assert [e["trigger"] for e in entries if e["kind"] == "rebuild"] == ["threshold"], entries
-    later = f.run("--resume", session, "--print=json", "Continue with the SDK window already reported.")
-    assert later.returncode == 0, later.stderr
+    # The first turn's row window of 1,000,000 is Razor's, above the 500,000 a reported window gets.
+    assert [e["trigger"] for e in entries if e["kind"] == "rebuild"] == ["threshold"] and next(e["window"] for e in entries if e["kind"] == "turn_end") == 1000000, entries
+    f.ask("--resume", session, "Continue with the SDK window already reported.")
     row = agents(f)[session]
     assert row["window"] == 200 and row["threshold"] == 0.5, row
-    before, after = [json.loads((f.requests / f"{n:03}.body").read_bytes()) for n in (1, 2)]
+    before, after = [f.request(n) for n in (1, 2)]
     for key in ("model", "max_tokens", "thinking", "output_config"):
         assert before.get(key) == after.get(key), (key, before.get(key), after.get(key))

@@ -258,13 +258,13 @@ impl Session {
             return Ok(None);
         };
         let entry = self.record.entry(at).await?;
-        let Body::Call { call, name, input } = entry.body else {
+        let Body::Call { call, input, .. } = entry.body else {
             return Ok(None);
         };
         let path = self.record.dir().join(&spool);
         let ran = (self.stopped.contains(&job)).then(|| now().saturating_sub(entry.at));
         let output = json!({"ended": ended, "path": path, "call_id": call.0, "stopped_ms": ran});
-        let text = self.profile.notice(&name, &input, output);
+        let text = self.profile.notice(&input, output);
         Ok(Some(Input {
             request: Some(spool),
             ..Input::new(Origin::Razor, text)
@@ -306,7 +306,7 @@ impl Session {
                     job,
                     call,
                     text,
-                    at: crate::protocol::now(),
+                    at: now(),
                 });
             }
         }
@@ -337,7 +337,6 @@ struct Run {
 }
 
 impl Run {
-    /// Runs the action.
     async fn act(mut self) -> Ran {
         // An MCP operation since this call was admitted applies before it runs.
         if self.revision != self.c.inner.mcp_revision.load(Ordering::Acquire) {

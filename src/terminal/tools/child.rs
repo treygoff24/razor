@@ -219,12 +219,14 @@ impl Card<'_> {
             if let Some((at, line)) = window.get(from + i) {
                 spans.extend(line.spans.clone());
                 if let Some(at) = at.as_ref().filter(|_| wide) {
-                    let used: usize = spans.iter().map(|s| width(&s.content)).sum();
+                    let used = spans_width(&spans);
                     spans.push(Span::raw(" ".repeat(n.saturating_sub(used + 5))));
-                    spans.push(Span::styled(
-                        format!("{:>4} ", age(secs(now, *at))),
-                        style(rgb(0x3d464f), WELL),
-                    ));
+                    let age = match secs(now, *at) {
+                        0 => "now".into(),
+                        s => crate::terminal::status::age(s * 1000),
+                    };
+                    let age = Span::styled(format!("{age:>4} "), style(rgb(0x3d464f), WELL));
+                    spans.push(age);
                 }
             }
             rows.push(self.interior(Line::from(spans), WELL));
@@ -314,9 +316,7 @@ impl Card<'_> {
             (false, 0) => "───".into(),
             (false, m) => format!("{}┬───", drop.repeat(m - 1)),
         };
-        let used: usize = left.iter().map(|s| width(&s.content)).sum::<usize>()
-            + width(&inset)
-            + width(&right.content);
+        let used = spans_width(&left) + width(&inset) + width(&right.content);
         let rule = "─".repeat(n.saturating_sub(used + 5));
         spans.push(span(inset, RIM));
         spans.push(Span::raw(" "));
@@ -335,7 +335,7 @@ impl Card<'_> {
         let (count, slot) = (self.pipes, self.slot);
         let n = self.columns.saturating_sub(count * 2 + 1);
 
-        let used: usize = line.spans.iter().map(|s| width(&s.content)).sum();
+        let used = spans_width(&line.spans);
         let mut spans = pipes(count, slot, |i, anchor| match i {
             0 => ("│ ", self.line),
             _ if i == anchor => ("│ ", RIM),
@@ -380,7 +380,7 @@ impl Card<'_> {
         spans.extend([Span::styled(" ", style(GRAY, RECESS)), number.bg(RECESS)]);
         spans.push(Span::styled(rebuilt, style(GRAY, RECESS)));
         if wide {
-            let used: usize = spans.iter().map(|s| width(&s.content)).sum();
+            let used = spans_width(&spans);
             spans.push(Span::styled(
                 " ".repeat(n.saturating_sub(used + width(&beat.content) + 1)),
                 style(DATA, RECESS),
@@ -683,14 +683,6 @@ fn joined(words: &[&str]) -> String {
     words.join(" ")
 }
 
-fn age(s: u64) -> String {
-    match s {
-        0 => "now".into(),
-        1..60 => format!("{s}s"),
-        60..3600 => format!("{}m", s / 60),
-        _ => format!("{}h", s / 3600),
-    }
-}
 // The row count is monotone within each opening/rolling window. Find its first change, not
 // another light frame: look-only frames must never recount the mounted transcript.
 fn resize(launched: u64, ended: Option<(u64, bool)>, now: u64, motion: bool, inside: usize) -> u64 {

@@ -1,18 +1,20 @@
 //! The vocabulary the modules share (docs/design/protocol.md): ids, the record's entries,
-//! inputs, states, job events, and the lines the API server streams. Plain data; the only
-//! behaviour is making and parsing a session id, checking an MCP server's definition, and
-//! reading the clock.
+//! inputs, states, job events, and the lines the API server streams. Plain data, with the few
+//! readings of it every side makes alike: a session id's form, an MCP server's definition, an
+//! image's or video's kind and size, and the clock.
 
 mod api;
 mod children;
 mod conversation;
 mod mcp;
+mod media;
 pub(crate) mod views;
 mod voice;
 pub use api::*;
 pub(crate) use children::*;
 pub(crate) use conversation::{BridgeInput, FromBridge, Line, Resume, ToBridge};
-pub(crate) use mcp::{Connection, Mcp, OAuth, Reference};
+pub(crate) use mcp::{Connection, Mcp, McpOperation, McpRow, McpScope, OAuth, Reference};
+pub(crate) use media::{image_pixels, image_type, video_type};
 pub(crate) use voice::*;
 
 use serde::{Deserialize, Serialize};
@@ -24,56 +26,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// The length, in characters, past which a result's text spills to a file (SPEC section 3,
 /// "Tools"). The shell sizes the end of a job's output that it returns by this number.
 pub(crate) const SPILL: usize = 30_000;
-
-/// Dimensions from the first bytes and total length of a PNG, JPEG, WebP or GIF.
-/// Returns none when the bounded header is incomplete or malformed.
-pub(crate) fn image_pixels(b: &[u8], total: usize) -> Option<(u32, u32)> {
-    let int = |at: usize, n: usize, big: bool| {
-        let bytes = b.get(at..at + n)?;
-        let fold = |v: u32, x: &u8| v << 8 | u32::from(*x);
-        Some(match big {
-            true => bytes.iter().fold(0, fold),
-            false => bytes.iter().rev().fold(0, fold),
-        })
-    };
-    // A WebP chunk at least `least` bytes long and inside the file.
-    let chunk =
-        |least: u32| int(16, 4, false).is_some_and(|n| n >= least && 20 + n as usize <= total);
-    let found = match b.get(..4).zip(b.get(12..16)) {
-        Some((b"\x89PNG", b"IHDR")) if int(8, 4, true) == Some(13) => {
-            (int(16, 4, true)?, int(20, 4, true)?)
-        }
-        Some((b"RIFF", b"VP8X")) if chunk(10) => (int(24, 3, false)? + 1, int(27, 3, false)? + 1),
-        Some((b"RIFF", b"VP8 ")) if chunk(10) && b.get(23..26) == Some(b"\x9d\x01\x2a") => {
-            (int(26, 2, false)? & 0x3fff, int(28, 2, false)? & 0x3fff)
-        }
-        Some((b"RIFF", b"VP8L")) if chunk(5) && b.get(20) == Some(&0x2f) => {
-            let v = int(21, 4, false)?;
-            ((v & 0x3fff) + 1, (v >> 14 & 0x3fff) + 1)
-        }
-        _ if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") => {
-            (int(6, 2, false)?, int(8, 2, false)?)
-        }
-        // A JPEG's segments up to its frame header, which holds height then width.
-        _ if b.starts_with(b"\xff\xd8") => {
-            let mut at = 2;
-            loop {
-                let kind = *b.get(at + 1).filter(|_| b.get(at) == Some(&0xff))?;
-                let len =
-                    int(at + 2, 2, true).filter(|&n| n >= 2 && at + 2 + n as usize <= total)?;
-                if (0xc0..=0xcf).contains(&kind) && ![0xc4, 0xc8, 0xcc].contains(&kind) {
-                    break (
-                        int(at + 7, 2, true).filter(|_| len >= 8)?,
-                        int(at + 5, 2, true)?,
-                    );
-                }
-                at += 2 + len as usize;
-            }
-        }
-        _ => return None,
-    };
-    Some(found).filter(|&(w, h)| w > 0 && h > 0)
-}
 
 // ---- ids ---------------------------------------------------------------------------------
 
@@ -88,26 +40,8 @@ impl SessionId {
     /// A fresh id for a session starting now. Two sessions started in the same second share
     /// an id once in 65,536; `Record::create` refuses the second and the caller draws again.
     pub(crate) fn new() -> SessionId {
-        let secs = now() / 1000;
-        let (days, rest) = (secs / 86_400, secs % 86_400);
-        // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
-        let z = days + 719_468;
-        let doe = z % 146_097;
-        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-        let mp = (5 * doy + 2) / 153;
-        let day = doy - (153 * mp + 2) / 5 + 1;
-        let month = if mp < 10 { mp + 3 } else { mp - 9 };
-        let year = yoe + z / 146_097 * 400 + u64::from(month <= 2);
-        // RandomState is seeded from the OS's randomness; four hex digits only break ties.
-        let random = std::collections::hash_map::RandomState::new()
-            .build_hasher()
-            .finish()
-            & 0xffff;
-        let (h, m, s) = (rest / 3600, rest / 60 % 60, rest % 60);
-        SessionId(format!(
-            "{year:04}{month:02}{day:02}-{h:02}{m:02}{s:02}-{random:04x}"
-        ))
+        let second = jiff::Timestamp::now().strftime("%Y%m%d-%H%M%S");
+        SessionId(format!("{second}-{:04x}", random() & 0xffff))
     }
 
     /// Qualify a native reference for a directly paired home; native records stay unchanged.
@@ -222,6 +156,14 @@ pub struct CallId(pub(crate) String);
 /// at open the controller seeds the shell's counter from the record (highest seen, plus one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct JobId(pub(crate) u32);
+
+/// 64 bits from the OS's randomness, for names that must not collide: `RandomState` is seeded
+/// from it.
+pub(crate) fn random() -> u64 {
+    std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
+}
 
 /// Milliseconds since the Unix epoch.
 pub(crate) type Millis = u64;
@@ -354,7 +296,10 @@ pub enum Body {
         end: End,
         usage: Usage,
         context: Option<u64>,
-        /// The limits resolved when this turn ended; absent in synthetic ends.
+        /// The model the turn ran on, which wrote its replies, and the limits resolved when it
+        /// ended; absent in synthetic ends.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

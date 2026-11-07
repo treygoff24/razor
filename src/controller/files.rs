@@ -2,10 +2,9 @@
 //! validation-then-reopen race, and no symlink is ever followed.
 
 use super::{Error, invalid, other};
-use std::collections::hash_map::RandomState;
+use crate::protocol::random;
 use std::ffi::{CStr, CString};
 use std::fs::{File, OpenOptions};
-use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::OpenOptionsExt;
@@ -41,11 +40,6 @@ pub(super) fn write(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), Error> {
         unsafe { libc::unlinkat(fd, temp.as_ptr(), 0) };
     }
     Ok(written?)
-}
-
-/// 64 bits from the OS's randomness, for names that must not collide.
-pub(super) fn random() -> u64 {
-    RandomState::new().build_hasher().finish()
 }
 
 /// The directory holding `name` inside `dir` (made, with `create`), and its last component.

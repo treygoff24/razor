@@ -144,8 +144,7 @@ with flow([reply("Reply with the flow marker.", "Bash", {"command": "true"}),
     assert removed.returncode == 0, removed.stderr
     assert lines(watched) is None, "the phone's status stream outlived its key"
     assert call(remote, "GET", "/sessions", phone)[0] == 401
-    resumed = f.run("--resume", session, "--print=json", "Once more.")
-    assert resumed.returncode == 0, resumed.stderr
+    f.ask("--resume", session, "Once more.")
     line = {}
     while session not in [row.get("session") for row in line.get("agents", [line])]:
         line = lines(mine)

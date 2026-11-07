@@ -3,9 +3,9 @@
 //! last hour's bars and the Fine clock.
 use crate::protocol::views::{Colour, Section, ViewRow};
 use crate::protocol::{AgentView, State};
-use crate::terminal::{App, cards, motion, text::*, tools, topbar};
+use crate::terminal::{App, cards, motion, status, text::*, tools, topbar};
 use ratatui::style::{Color, Style};
-use ratatui::{buffer::Buffer, layout::Rect, text::Line, text::Span};
+use ratatui::{buffer::Buffer, text::Span};
 
 pub type Spans = Vec<Span<'static>>;
 
@@ -54,7 +54,8 @@ pub fn standing(a: &AgentView) -> Standing {
         _ if !a.asks.is_empty() => Standing::Asks,
         State::Stuck => Standing::Stuck,
         State::Working => Standing::Working,
-        _ if a.error.is_some() => Standing::Error,
+        // Only an agent waiting for an input stands failed: a done one's last error is behind it.
+        State::NeedsYou if a.error.is_some() => Standing::Error,
         _ => Standing::Idle,
     }
 }
@@ -193,7 +194,7 @@ pub fn over(edge: &str, ink: Color, ground: Color, parts: Vec<(usize, Spans)>) -
     for (at, spans) in parts {
         let at = at.max(x);
         out.push(base(x, at));
-        x = at + spans.iter().map(|s| width(&s.content)).sum::<usize>();
+        x = at + spans_width(&spans);
         out.extend(spans);
     }
     out.push(base(x, chars.len()));
@@ -237,19 +238,19 @@ pub fn count(n: usize, word: &str) -> String {
     format!("{n} {word}{}", plural(n).to_uppercase())
 }
 /// The columns `spans` take.
-pub fn wide(spans: &[Span]) -> usize {
-    spans.iter().map(|s| width(&s.content)).sum()
-}
 /// Writes `spans` from `x, y` within the buffer; returns the column after them.
 pub fn write(b: &mut Buffer, x: u16, y: u16, spans: &[Span]) -> u16 {
-    let r = Rect::new(x, y, b.area.right().saturating_sub(x), 1);
-    line(b, r, y, &Line::from(spans.to_vec()), Style::new());
-    x + wide(spans) as u16
+    let mut at = x;
+    for s in spans {
+        let room = b.area.right().saturating_sub(at);
+        at = put(b, at, y, &s.content, room, s.style);
+    }
+    x + spans_width(spans) as u16
 }
 /// `left` and `right` in `w` columns, `left` clipped first and the gap between them on `bg`.
 pub fn ends(left: Spans, right: Spans, w: usize, bg: Color) -> Spans {
-    let mut out = clip_spans(left, w.saturating_sub(wide(&right) + 1));
-    let gap = " ".repeat(w.saturating_sub(wide(&out) + wide(&right)));
+    let mut out = clip_spans(left, w.saturating_sub(spans_width(&right) + 1));
+    let gap = " ".repeat(w.saturating_sub(spans_width(&out) + spans_width(&right)));
     out.push(on(gap, DATA, bg, false));
     out.extend(right);
     out
@@ -280,7 +281,7 @@ pub fn head(
             marks.into_iter().map(mark).collect()
         }
     };
-    let age = format!(" {}", age(app, a.last_activity, now));
+    let age = format!(" {}", status::ago(app, a.last_activity, now));
     right.push(on(age, dark(None), bg, false));
     let (mark, ink) = [s.mark(), ("▶", CHIP_INK)][usize::from(lit)];
     let name = on(a.name.clone(), dark(Some(WHITE)), bg, true);
@@ -291,18 +292,9 @@ pub fn head(
         Span::styled(t.content, t.style.bg(bg).fg(fg))
     });
     // Words that would show fewer than six columns are left out rather than cut to a stub.
-    let room = w.saturating_sub(wide(&left) + wide(&right) + 1);
+    let room = w.saturating_sub(spans_width(&left) + spans_width(&right) + 1);
     left.extend(after.filter(|_| room >= 8));
     ends(left, right, w, bg)
-}
-/// How long ago `since` was as `12s`, `3m` or `2h`, asking a frame when that next changes.
-pub fn age(app: &App, since: u64, now: u64) -> String {
-    let ms = now.saturating_sub(since);
-    let step = [1000, 60_000, 3_600_000][usize::from(ms >= 60_000) + usize::from(ms >= 3_600_000)];
-    // Seconds turn with the wall's, so ages under a minute share one frame a second.
-    app.next
-        .at([now + step - ms % step, now + 1000 - now % 1000][usize::from(ms < 60_000)]);
-    crate::terminal::status::age(ms)
 }
 /// Bar heights from a blank to a full cell.
 const EIGHTHS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
@@ -390,31 +382,30 @@ pub fn ground(app: &App, s: Standing, tone: Tone, now: u64) -> (Color, Color) {
     (ground, edge)
 }
 
-/// A helper's mark: turning while it works, `◆` waiting on the person or for its merge, `▲`
-/// stuck, else its card's glyph; and its state in words.
-pub fn helper(app: &App, a: &AgentView, tone: Tone, now: u64) -> (Span<'static>, &'static str) {
+/// A helper's mark and its state in words, read from how it stands as its own row reads it:
+/// turning in the green every working agent wears while it works, `◆` waiting on the person or
+/// for its merge, `▲` stuck or failed, else its card's glyph and word.
+pub fn helper(app: &App, a: &AgentView, now: u64) -> (Span<'static>, &'static str) {
     let card = cards::Card::of(app, a, now);
-    let (mark, ink, word) = match card.word {
-        "working" => (card.glyph, mix(tone.hue, WHITE, 0.3), "working"),
-        "asking" | "interrupted" => ("◆", AMBER, "waiting on you"),
-        "awaiting merge" => ("◆", AMBER, "waiting for merge"),
-        "stuck" => ("▲", RED, "stuck"),
-        word => (card.glyph, PANEL_GRAY, word),
+    let (mark, ink, word) = match (standing(a), card.word) {
+        (Standing::Asks, _) => ("◆", AMBER, "waiting on you"),
+        (Standing::Error, _) => ("▲", RED, "error"),
+        (Standing::Stuck, _) => ("▲", RED, "stuck"),
+        // Still, the pulse's first frame: a helper never wears its parent's `●`.
+        (Standing::Working, _) if card.glyph == "●" => (cards::PULSE.1[0], GREEN, "working"),
+        (Standing::Working, _) => (card.glyph, GREEN, "working"),
+        (_, "awaiting merge") => ("◆", AMBER, "waiting for merge"),
+        (_, word) => (card.glyph, PANEL_GRAY, word),
     };
     (Span::styled(mark, Style::new().fg(ink)), word)
 }
 
 /// A root's helpers' marks for its name row, from the layout's rows under it: each listed
 /// helper's, a space after each, then `✓N` for its finished ones.
-pub fn marks<'a>(
-    app: &App,
-    below: impl Iterator<Item = &'a ViewRow>,
-    tone: Tone,
-    now: u64,
-) -> Spans {
+pub fn marks<'a>(app: &App, below: impl Iterator<Item = &'a ViewRow>, now: u64) -> Spans {
     let (mut out, mut done) = (Vec::new(), 0);
     for (r, h) in below.filter_map(|r| Some((r, app.agents.get(&r.session)?))) {
-        let (mark, word) = helper(app, h, tone, now);
+        let (mark, word) = helper(app, h, now);
         match r.folded || word == "finished" {
             true => done += 1,
             false => out.extend([mark, Span::raw(" ")]),

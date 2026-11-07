@@ -328,10 +328,10 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<vie
         }
         None => Vec::new(),
     };
-    foot.push(Line::from(span(bindings::text(app, keys), GRAY)));
+    foot.push(Line::from(span(bindings::hints(app, keys, " · "), GRAY)));
     let title = open.map_or("mcp".into(), |row| format!("mcp · {}", row.name));
     let at = targets.iter().find(|t| t.1 == mcp.chosen).map(|t| t.0);
-    let words = panel::frame(b, r, &title);
+    let words = panel::frame(b, r, &title, BEZEL_HI);
     let height = words.height.saturating_sub(foot.len() as u16);
     let body = Rect::new(words.x, words.y, words.width, height);
     if let Some(at) = at {

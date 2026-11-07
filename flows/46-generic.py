@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 
+import chat
 from driver import flow
 from server import send
 from standin import Reply
@@ -13,21 +14,13 @@ HOSTS = {DEEPSEEK: "deepseek-v4-1-flash-1017", GLM: "glm-5-3-flash", GEMINI: GEM
 CONFIG = '[providers.runinfra]\nbase_url = "{standin}"\n[providers.google]\nbase_url = "{standin}"\n'
 CONFIG += f'[models."{DEEPSEEK}"]\nvariant = "plain.json"\n[models."{GLM}"]\nreplay = "reasoning"\n'
 BUSY = b'{"error": {"message": "reached its limit of 60 concurrent requests"}}'
-USAGE = {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 130,
-         "prompt_tokens_details": {"cached_tokens": 60}}
+USAGE = {**chat.USAGE, "total_tokens": 130}  # a host may count reasoning outside completion_tokens
 
 
-def reply(model, *deltas, finish="tool_calls", done=True, cut=None, match=None):
-    """A chat stream for `model`'s requests: each delta, then the finish, the usage, `[DONE]`.
-    `cut` pauses the send inside its first occurrence, as a chunk boundary in a character."""
-    chunks = [{"choices": [{"index": 0, "delta": {"role": "assistant", **d}}]} for d in deltas]
-    if finish:
-        chunks.append({"choices": [{"index": 0, "delta": {"role": None}, "finish_reason": finish}]})
-    chunks.append({"choices": [], "usage": USAGE})
-    body = "".join(f"data: {json.dumps(c, ensure_ascii=False)}\n\n" for c in chunks)
-    body = (body + ("data: [DONE]\n\n" if done else "")).encode()
-    cuts = (body.index(cut.encode()) + 1,) if cut else ()
-    return Reply(body, cuts=cuts, match=f'"model":"{HOSTS[model]}"' if match is None else match)
+def reply(model, *deltas, finish="tool_calls", match=None, **rest):
+    """A chat stream for `model`'s requests, its role repeated in every delta, as hosts send it."""
+    return chat.reply(*({"role": "assistant", **d} for d in deltas), finish=finish, usage=USAGE,
+                      match=f'"model":"{HOSTS[model]}"' if match is None else match, **rest)
 
 
 def call(index, id, name, arguments, **extra):
@@ -83,9 +76,7 @@ with flow(replies, model=DEEPSEEK, config=f'effort = "max"\n{CONFIG}', env=keys)
         return [(b, m) for b, m in pairs if b["model"] == HOSTS[model]]
 
     def turn(*argv):
-        result = f.run(*argv, "--print=json", timeout=90)
-        assert result.returncode == 0, result.stderr
-        return json.loads(result.stdout)
+        return f.ask(*argv, timeout=90)
 
     first = turn("Write notes.txt, edit it, check it.")
     assert first["message"] == "first done", first
@@ -194,9 +185,7 @@ with flow([reply(LOCAL, call(0, "local_write", "write", '{"path":"local.txt","co
            reply(OPEN, {"content": "fresh done"}, finish="stop")],
           model=LOCAL, config=config, env={"LOCAL_KEY": "flow-local-key"}) as f:
     (f.home / ".razor/keys.toml").write_text('LOCAL_KEY = "flow-saved-local-key"\n')
-    result = f.run("--print=json", "--speed", "fast", "Keep this exact local request.")
-    assert result.returncode == 0, (result.stdout, result.stderr)
-    answer = json.loads(result.stdout)
+    answer = f.ask("--speed", "fast", "Keep this exact local request.")
     assert answer["message"] == "local done" and (f.cwd / "local.txt").read_text() == "kept", answer
     entries = list(f.record(answer["session"]))
     output = next(e["output"] for e in entries if e["kind"] == "result" and e["call"] == "key_env")
@@ -204,7 +193,7 @@ with flow([reply(LOCAL, call(0, "local_write", "write", '{"path":"local.txt","co
     rebuilt = [e for e in entries if e["kind"] == "rebuild"]
     assert len(rebuilt) == 1 and rebuilt[0]["trigger"] == "threshold", rebuilt
     assert "Keep this exact local request." in rebuilt[0]["context"], rebuilt
-    first = json.loads((f.requests / "001.body").read_bytes())
+    first = f.request(1)
     assert first["model"] == HOSTS[LOCAL] and first["max_completion_tokens"] == 64, first
     assert {"read", "write", "edit", "bash"} <= {t["function"]["name"] for t in first["tools"]}, first
     assert "-generic-plain-" in entries[0]["profile_version"], entries[0]
@@ -245,7 +234,7 @@ with flow([refusal, refusal], model=OPEN, config=PROVIDERS) as f:
     rebuilds = [e for e in entries if e["kind"] == "rebuild"]
     assert len(rebuilds) == 1 and rebuilds[0]["trigger"] == "overflow", rebuilds
     assert str(len(rebuilds[0]["context"].encode())) + " bytes" in answer["error"], answer
-    assert len(list(f.requests.glob("[0-9]*.body"))) == 2, "overflow retried in a loop"
+    assert len(f.sent()) == 2, "overflow retried in a loop"
 
 # The image helper is offered only when its ChatGPT sign-in and image generation are available.
 for signed, enabled, only in ((True, True, False), (False, True, False), (True, False, False), (True, True, True)):
@@ -253,7 +242,6 @@ for signed, enabled, only in ((True, True, False), (False, True, False), (True, 
     with flow([reply(OPEN, {"content": "ready"}, finish="stop")], model=OPEN, config=settings) as f:
         if not signed:
             (f.home / ".razor/auth.json").unlink()
-        result = f.run("--print=json", "Reply on this provider.")
-        assert result.returncode == 0, result.stderr
-        prompt = json.loads((f.requests / "001.body").read_bytes())["messages"][0]["content"]
+        f.ask("Reply on this provider.")
+        prompt = f.request(1)["messages"][0]["content"]
         assert ('model `sol`' in prompt) == (signed and enabled and not only), (signed, enabled, only)

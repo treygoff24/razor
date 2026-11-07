@@ -8,6 +8,8 @@ const WEEK: Duration = Duration::from_secs(7 * 86_400);
 const RECENT: Duration = Duration::from_secs(12 * 3600);
 /// A resident's newest threads the agents list can show: the open ones and a finished line.
 const THREADS: usize = 12;
+/// The most bytes a session's draft holds.
+const DRAFT: usize = 1 << 20;
 
 impl Controller {
     /// The home whose sessions this controller runs.
@@ -162,8 +164,7 @@ impl Controller {
         .await
     }
 
-    /// Records a fact or server question; inputs always use
-    /// admission.
+    /// Records a fact or server question; inputs always use admission.
     pub(crate) async fn append(&self, session: &SessionId, body: Body) -> Result<EntryId, Error> {
         if !matches!(
             body,
@@ -256,9 +257,9 @@ impl Controller {
             .await
     }
 
-    /// The first news (mail, a child's report or a Razor notice) admitted after the call recorded at `at`, or
-    /// `None` at `timeout`; held news is taken at once. Taken news is this call's result, not
-    /// model input, and that Result answers it.
+    /// The first news (mail, a child's report or a Razor notice) admitted after the call recorded
+    /// at `at`, or `None` at `timeout`; held news is taken at once. Taken news is this call's
+    /// result, not model input, and that Result answers it.
     pub(crate) async fn wait_input(
         &self,
         session: &SessionId,
@@ -307,7 +308,7 @@ impl Controller {
         let Some((media_type, extension)) = crate::protocol::image_type(&bytes) else {
             return invalid("Send a JPEG, PNG or WebP image.");
         };
-        let path = format!("images/{:016x}.{extension}", files::random());
+        let path = format!("images/{:016x}.{extension}", crate::protocol::random());
         self.keep(session, &path, bytes).await?;
         Ok(Image {
             media_type: media_type.into(),
@@ -358,8 +359,10 @@ impl Controller {
             file => file?,
         };
         let mut text = String::new();
-        file.take((1 << 20) + 1).read_to_string(&mut text).await?;
-        if text.len() > 1 << 20 {
+        file.take(DRAFT as u64 + 1)
+            .read_to_string(&mut text)
+            .await?;
+        if text.len() > DRAFT {
             return invalid("The draft is larger than 1 MiB; shorten it.");
         }
         Ok(text)
@@ -368,7 +371,7 @@ impl Controller {
     /// Replaces the draft atomically, never writing through a symlink.
     pub(crate) async fn set_draft(&self, session: &SessionId, text: String) -> Result<(), Error> {
         self.summary(session).await?;
-        if text.len() > 1 << 20 {
+        if text.len() > DRAFT {
             return invalid("The draft is larger than 1 MiB; shorten it.");
         }
         let dir = self.dir(session);
@@ -377,9 +380,9 @@ impl Controller {
 
     /// A restart leaves idle sessions unloaded, and a row exists only for a loaded session or a
     /// summary read. This reads the summaries of the roots whose records changed within `RECENT`
-    /// and of each resident's `THREADS` most recently changed threads, whatever their age, so the agents list
-    /// after a restart holds what it held before. No session task starts; a stat of the record
-    /// decides before any of it is folded.
+    /// and of each resident's `THREADS` most recently changed threads, whatever their age, so the
+    /// agents list after a restart holds what it held before. No session task starts; a stat of
+    /// the record decides before any of it is folded.
     pub(super) async fn recent(&self) {
         let roots = record::list(&self.inner.home, None, None, false, usize::MAX).await;
         let mut roots = roots.unwrap_or_default();
@@ -476,12 +479,9 @@ impl Controller {
         child: SessionId,
         update: crate::protocol::ChildUpdate,
     ) -> Result<Value, Error> {
-        loop {
-            let space = self.inner.space.notified();
-            tokio::pin!(space);
-            space.as_mut().enable();
+        self.with_room(true, move || {
             let (child, update) = (child.clone(), update.clone());
-            let checked = self.ask(parent, |s| {
+            self.ask(parent, |s| {
                 Box::pin(async move {
                     let Some(update) = children::update(s.record.summary(), &child, update)
                         .map_err(|e| Error::Invalid(e.to_string()))?
@@ -494,15 +494,13 @@ impl Controller {
                     };
                     Ok(json!({"entry":entry}))
                 })
-            });
-            match checked.await {
-                Err(Error::Full(_)) => space.await,
-                checked => return checked,
-            }
-        }
+            })
+        })
+        .await
     }
 
-    /// Closes and reads the current outgoing report in one queue operation; a new task forbids both.
+    /// Closes and reads the current outgoing report in one queue operation; a new task forbids
+    /// both.
     pub(crate) async fn reported(&self, session: &SessionId) -> Result<Option<Input>, Error> {
         self.ask(session, |s| {
             Box::pin(async move {

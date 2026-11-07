@@ -30,9 +30,7 @@ with flow(replies, config=CONFIG) as f:
     hook.write_text(HOOK)
     hook.chmod(0o755)
     (f.home / ".razor/tools.js").write_text(PLUGIN)
-    result = f.run("--print=json", "/flow 2 and 3")
-    assert result.returncode == 0, result.stderr
-    answer = json.loads(result.stdout)
+    answer = f.ask("/flow 2 and 3")
     assert answer["message"] == "flow done", answer
     entries = list(f.record(answer["session"]))
     asked = "Run the shell, then add 2 and 3."

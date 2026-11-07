@@ -1,11 +1,10 @@
 //! Comment-preserving MCP file operations; importing previews and never copies credential bytes.
 
-use super::{Error, Settings, pack};
+use super::pack::{self, exclude_private, replace};
+use super::{Error, Settings};
 use crate::protocol::{McpOperation, McpScope};
 use serde_json::{Map, Value, json};
 use std::{
-    io::Write,
-    os::unix::fs::OpenOptionsExt,
     path::Path,
     sync::{Mutex, PoisonError},
 };
@@ -86,78 +85,6 @@ pub(super) fn edit(settings: &Settings, operation: &McpOperation) -> Result<Valu
     Ok(json!({"file": path, "name": name, "written": true}))
 }
 
-/// Writes `after` to `path` at mode 0600 through a rename, only if the file still holds `before`
-/// (a missing file holds nothing).
-pub(super) fn replace(path: &Path, before: &str, after: &str) -> Result<(), Error> {
-    if after.len() > 1 << 20 {
-        return Err(Error::Invalid(
-            "The changed settings would pass 1 MiB; shorten them first.".into(),
-        ));
-    }
-    let resolved = match std::fs::canonicalize(path) {
-        Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !path.is_symlink() => {
-            path.to_path_buf()
-        }
-        Err(error) => return Err(io(error)),
-    };
-    let path = resolved.as_path();
-    let parent = path.parent().unwrap_or(Path::new("/"));
-    let temp = parent.join(format!(".razor-{}.tmp", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true).mode(0o600);
-    let written = std::fs::create_dir_all(parent)
-        .and_then(|()| options.open(&temp))
-        .and_then(|mut file| {
-            file.write_all(after.as_bytes())?;
-            file.sync_all()
-        });
-    let replaced = written
-        .map_err(io)
-        .and_then(|()| match pack::text(path, true)? == before {
-            true => std::fs::rename(&temp, path).map_err(io),
-            false => Err(Error::Invalid(format!(
-                "{} changed during the edit; retry.",
-                path.display()
-            ))),
-        });
-    if replaced.is_err() {
-        // Only this operation's create_new file, never the destination.
-        let _ = std::fs::remove_file(&temp);
-    }
-    replaced
-}
-
-/// Exclude a newly created private file at the main checkout, including linked worktrees.
-pub(super) fn exclude_private(path: &Path) -> Result<(), Error> {
-    let Some(root) = path.ancestors().nth(2) else {
-        return Ok(());
-    };
-    if !root.join(".git").is_dir() {
-        return Ok(());
-    }
-    let exclude = root.join(".git/info/exclude");
-    let before = pack::text(&exclude, true)?;
-    let entry = ".razor/config.local.toml";
-    if !before
-        .lines()
-        .any(|line| line.trim().trim_start_matches('/') == entry)
-    {
-        let newline = if before.is_empty() || before.ends_with('\n') {
-            ""
-        } else {
-            "\n"
-        };
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(exclude)
-            .and_then(|mut file| file.write_all(format!("{newline}{entry}\n").as_bytes()))
-            .map_err(io)?;
-    }
-    Ok(())
-}
-
 /// The additions an import would make, the existing entries they replace, and the fields left
 /// for the person because they hold or need credentials. Nothing is written.
 pub(crate) fn preview(settings: &Settings, source: &Path, scope: McpScope) -> Result<Value, Error> {
@@ -195,11 +122,8 @@ pub(crate) fn preview(settings: &Settings, source: &Path, scope: McpScope) -> Re
         (vec![], vec![], vec![], vec![]);
     for (name, raw) in servers {
         let (config, fields) = imported(&raw, source.parent().unwrap_or(Path::new("/")));
-        unresolved.extend(
-            fields
-                .into_iter()
-                .map(|field| json!({"name": name, "field": field})),
-        );
+        let field = |field| json!({"name": name, "field": field});
+        unresolved.extend(fields.into_iter().map(field));
         let Ok(config) = serde_json::from_value(config) else {
             let error = "This server has no supported stdio or HTTP connection.";
             errors.push(json!({"name": name, "error": error}));
@@ -288,26 +212,32 @@ fn imported(raw: &Value, dir: &Path) -> (Value, Vec<String>) {
         config.insert("headers".into(), Value::Object(headers));
     }
     if let Some(oauth) = raw.get("oauth").and_then(Value::as_object) {
-        let mut safe = Map::new();
-        for (from, to) in [
-            ("issuer", "issuer"),
-            ("client_id", "client_id"),
-            ("clientId", "client_id"),
-        ] {
-            safe.extend(oauth.get(from).map(|value| (to.into(), value.clone())));
-        }
-        if let Some(secret) = oauth
-            .get("client_secret")
-            .or_else(|| oauth.get("clientSecret"))
-        {
-            match reference(secret, dir) {
-                Some(secret) => drop(safe.insert("client_secret".into(), secret)),
-                None => unresolved.push("oauth.client_secret".into()),
-            }
-        }
-        config.insert("oauth".into(), Value::Object(safe));
+        config.insert("oauth".into(), self::oauth(oauth, dir, &mut unresolved));
     }
     (Value::Object(config), unresolved)
+}
+
+/// An OAuth entry's issuer and client id, and its client secret when that is a reference; a
+/// literal secret is left for the person.
+fn oauth(oauth: &Map<String, Value>, dir: &Path, unresolved: &mut Vec<String>) -> Value {
+    let mut safe = Map::new();
+    for (from, to) in [
+        ("issuer", "issuer"),
+        ("client_id", "client_id"),
+        ("clientId", "client_id"),
+    ] {
+        safe.extend(oauth.get(from).map(|value| (to.into(), value.clone())));
+    }
+    if let Some(secret) = oauth
+        .get("client_secret")
+        .or_else(|| oauth.get("clientSecret"))
+    {
+        match reference(secret, dir) {
+            Some(secret) => drop(safe.insert("client_secret".into(), secret)),
+            None => unresolved.push("oauth.client_secret".into()),
+        }
+    }
+    Value::Object(safe)
 }
 
 /// An env or file reference, or a `${NAME}` / `{env:NAME}` string naming a variable.

@@ -319,13 +319,6 @@ def checked(entries, replies):
     return len(results)
 
 
-def meta(path):
-    try:
-        return json.loads(path.read_text())
-    except ValueError:  # read between the stand-in's truncation and its write
-        return {}
-
-
 def spool(f, replies):
     """Every model request's metadata, in order, with the reply that answered it (the replies'
     first slices in time order: the stand-in serves one request at a time), and the wire model
@@ -333,7 +326,7 @@ def spool(f, replies):
     each reply's last byte to be recorded as sent."""
     paths = sorted(f.requests.glob("[0-9]*.json"), key=lambda p: int(p.stem))
     assert len(paths) == len(replies) and all(r.body.marks for r in replies), (len(paths), len(replies))
-    reqs = [server.wait(lambda p=p: (m := meta(p)).get("sent") and m, 10, f"{p.name} never recorded its reply as sent") for p in paths]
+    reqs = [server.wait(lambda p=p: (m := json.loads(p.read_text())).get("sent") and m, 10, f"{p.name} never recorded its reply as sent") for p in paths]
     sent = {(m["method"], urlsplit(m["path"]).path) for m in reqs}  # the Claude CLI adds a query, such as ?beta=true
     assert sent == {("POST", ROUTE["endpoint"])}, f"requests went to {sorted(sent)}"
     served = [json.loads(p.with_suffix(".body").read_bytes())["model"] for p in paths]
@@ -507,7 +500,7 @@ def startup(rec, f, replies, shape, row):
             put(m, "client_cpu", rusage_cpu(kids, resource.getrusage(resource.RUSAGE_CHILDREN)), "s")
             assert done.returncode == 0, done.stderr
             printed.append(json.loads(done.stdout))
-            arrived = server.wait(lambda: meta(f.requests / f"{len(replies):03}.json").get("arrived"), 10, "no model request")
+            arrived = json.loads((f.requests / f"{len(replies):03}.json").read_text())["arrived"]
             put(m, "cold_to_first_request", arrived - before)
             put(m, "cold_total", total)
             rec["restarts"].append(snapshot({"server": json.loads((f.home / ".razor/server.json").read_text())["pid"]}))

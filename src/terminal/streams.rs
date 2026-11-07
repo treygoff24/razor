@@ -1,7 +1,7 @@
 //! Each session's stream, read from the API, and its lines folded into the app's bounded caches.
 use super::api::{self, Incoming, Line, Page};
 use super::{ApiEvent, App, Error, Transcript, audio, bindings, brand, children, commands};
-use super::{gauge, mcp, panel, text, transcript};
+use super::{Composer, gauge, mcp, panel, text, transcript};
 use crate::protocol::{AgentView, Ask, Body, Delivery, Live, SessionId, State, now};
 use std::time::Duration;
 
@@ -16,38 +16,48 @@ impl App {
         }
     }
 
-    /// Reads the root's first entry (its folder and model, which a long session's newest page does
-    /// not reach), the session's newest page and its saved draft behind earlier writes, then
-    /// streams on.
+    /// Reads the session's newest page and its saved draft behind earlier writes, then streams on;
+    /// the root's first entry, first.
     pub(super) fn open(&mut self, id: SessionId) {
-        let (edits, root) = (self.edits, self.root.as_ref() == Some(&id));
+        if self.root.as_ref() == Some(&id) {
+            self.rooted(id.clone());
+        }
+        let at = self.queued + 1;
         self.write(|api| async move {
             let read = async {
-                let start = match root {
-                    true => api.page(&id, Some(2), 1).await?.events.pop(),
-                    false => None,
-                };
                 let page = api.page(&id, None, 256).await?;
-                Ok::<_, Error>((start, page, api.draft(&id, None).await?))
+                Ok::<_, Error>((page, api.draft(&id, None).await?))
             };
             let read = read.await;
             move |app: &mut App| match read {
-                Ok(read) => app.opened(id, read, edits),
+                Ok(read) => app.opened(id, read, at),
+                Err(e) => app.say(&e.to_string()),
+            }
+        });
+    }
+
+    /// Reads the folder and model of `id`, the root, from its first entry, which a long session's
+    /// newest page does not reach, behind earlier writes; becoming the root after it opened, it
+    /// reads nothing else, so the words in its draft stay as they are.
+    pub(super) fn rooted(&mut self, id: SessionId) {
+        self.write(|api| async move {
+            let start = api.page(&id, Some(2), 1).await.map(|mut p| p.events.pop());
+            move |app: &mut App| match start {
+                Ok(Some(ApiEvent::Entry(entry))) if app.root.as_ref() == Some(&id) => {
+                    if let Body::Start { cwd, model, .. } = entry.body {
+                        (app.cwd, app.model) = (cwd, model);
+                    }
+                }
+                Ok(_) => {}
                 Err(e) => app.say(&e.to_string()),
             }
         });
     }
 
     // The first page draws at once, not after the stream's frame pacing.
-    fn opened(&mut self, id: SessionId, read: (Option<ApiEvent>, Page, String), edits: u64) {
-        let (start, page, draft) = read;
+    fn opened(&mut self, id: SessionId, (page, draft): (Page, String), at: u64) {
         if self.focus.as_ref() != Some(&id) {
             return;
-        }
-        if let Some(ApiEvent::Entry(entry)) = start
-            && let Body::Start { cwd, model, .. } = entry.body
-        {
-            (self.cwd, self.model) = (cwd, model);
         }
         for event in page.events {
             self.fold(Some(id.clone()), event, now());
@@ -57,15 +67,28 @@ impl App {
             t.read_past_metadata();
             t.cursor.0
         });
-        if self.edits == edits && self.sending.is_none() {
-            self.composer.replace(draft);
-            if !self.composer.is_empty() {
-                self.dismiss_suggestion();
-            }
-        }
+        self.kept = Some((at, id.clone(), draft.clone()));
+        self.take_draft(id.clone(), draft);
         super::recap::check(self);
         self.stream(id, cursor);
         self.immediate = true;
+    }
+
+    /// The addressed session's saved draft comes into the composer once a visit, ahead of any
+    /// words typed while it was read: from then on the composer is that session's draft.
+    pub(super) fn take_draft(&mut self, id: SessionId, draft: String) {
+        if self.drafted.as_ref() == Some(&id) {
+            return;
+        }
+        let (typed, mut saved) = (!self.composer.is_empty(), Composer::default());
+        saved.replace(draft);
+        self.composer.join(saved);
+        self.drafted = Some(id);
+        match typed {
+            true => self.edited(),
+            false if !self.composer.is_empty() => self.dismiss_suggestion(),
+            false => {}
+        }
     }
 
     pub(super) fn fold_line(&mut self, incoming: Incoming) {
@@ -108,10 +131,7 @@ impl App {
             self.stage.entry(entry, now);
         }
         let t = self.transcripts.entry(id.clone()).or_insert_with(|| {
-            let voiced = self
-                .delivered
-                .iter()
-                .filter(|d| d.session == id && d.voice.is_some());
+            let voiced = (self.delivered.iter()).filter(|d| d.session == id && d.voice.is_some());
             let mut t = Transcript::default();
             t.deliveries = voiced.map(|d| (d.entry, d.clone())).collect();
             t
@@ -183,18 +203,16 @@ impl App {
             Live::Delivery(delivery) => self.delivery(*delivery),
             _ => {}
         }
+        let ready = |s: &crate::protocol::Server| {
+            let version = s.release_ready.as_ref()?;
+            let machine = &s.machine;
+            Some(format!(
+                "Razor {version} is ready on {machine}; run razor restart to use it"
+            ))
+        };
         if !self.release_noticed
-            && let Some((server, version)) = self.servers.iter().find_map(|server| {
-                server
-                    .release_ready
-                    .as_ref()
-                    .map(|version| (server, version))
-            })
+            && let Some(sentence) = self.servers.iter().find_map(ready)
         {
-            let sentence = format!(
-                "Razor {version} is ready on {}; run razor restart to use it",
-                server.machine
-            );
             self.release_noticed = true;
             self.say(&sentence);
         }

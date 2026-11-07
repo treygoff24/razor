@@ -3,7 +3,7 @@ discard closes it, moves its uncommitted files to its session folder and removes
 not its committed branch."""
 import json
 from driver import flow
-from model import agent, reply
+from model import agent, reply, tool
 from server import agents
 
 root, child = "FLOW_ROOT_12", "You are oak12,"
@@ -16,8 +16,7 @@ with flow(replies, config='[children]\nreviewer = "reviewer-12.md"\n') as f:
     (f.home / ".razor/reviewer-12.md").write_text("REVIEWER_TEXT_12: review what the brief names.\n")
     f.base()
     before = f.git("rev-parse", "HEAD")
-    result = f.run("--print=json", root)
-    assert result.returncode == 0, result.stderr
+    parent = f.ask(root)["session"]
     children = [p.parent.name for p in (f.home / ".razor/sessions").glob("*/record.jsonl")
                 if list(f.record(p.parent.name))[0].get("child")]
     sid = children[0]
@@ -30,7 +29,6 @@ with flow(replies, config='[children]\nreviewer = "reviewer-12.md"\n') as f:
     kept = f.home / ".razor/sessions" / sid / "uncommitted"
     assert (kept / "__pycache__/m.pyc").read_text() == "pyc", "discard lost an untracked file"
     assert (kept / "base").read_text() == "base edited", "discard lost an uncommitted edit"
-    parent = json.loads(result.stdout)["session"]
     entries = list(f.record(parent))
     settle = next(e for e in entries if e["kind"] == "call" and e["input"].get("action") == "settle")
     said = json.loads(next(e["output"] for e in entries if e["kind"] == "result" and e["call"] == settle["call"]))["text"]
@@ -45,7 +43,7 @@ with flow(replies, config='[children]\nreviewer = "reviewer-12.md"\n') as f:
     replies += [agent(root, "start", name="elm12", placement="in_place", brief="Start one."), agent(root, "wait"),
                 agent(root, "settle", child="elm12", decision="discard"),
                 *(agent(root, "start", name=n, placement="in_place", brief="Finish.") for n in ("ash12", "elm12")),
-                reply(root, "mcp__razor__status", {}), agent(root, "wait"),
+                tool(root, "status"), agent(root, "wait"),
                 agent(root, "settle", child="ash12", decision="discard"), reply(root),
                 agent(elm, "start", name="ash12", placement="in_place", brief="Finish."), agent(elm, "wait"),
                 agent(elm, "finish", status="finished", report="Elm done."),

@@ -65,11 +65,6 @@ pub fn server<'a>(app: &'a App, id: &SessionId) -> Option<&'a Server> {
     app.servers.iter().find(|s| s.name == name)
 }
 
-/// The server owning `id` while it does not answer.
-fn silent_server<'a>(app: &'a App, id: &SessionId) -> Option<&'a Server> {
-    server(app, id).filter(|s| s.silent.is_some())
-}
-
 pub(super) fn location(app: &App, id: &SessionId, room: usize) -> String {
     let Some(s) = server(app, id) else {
         return id
@@ -90,35 +85,29 @@ pub(super) fn location(app: &App, id: &SessionId, room: usize) -> String {
     }
 }
 
-/// One list row, its press, and a press for two cells from a column: a parent's fold mark.
-/// Child cards start in their mark column.
-pub(super) struct Row(
-    pub Line<'static>,
-    pub Option<Action>,
-    pub Vec<(u16, Action)>,
-);
+/// The pane's rows, each with its press; child cards start in their mark column.
+type Rows = Vec<(Line<'static>, Option<Action>)>;
 
 struct Status<'a> {
     app: &'a App,
     width: usize,
     now: u64,
-    rows: Vec<Row>,
+    rows: Rows,
 }
 
 impl Status<'_> {
     fn push(&mut self, line: impl Into<Line<'static>>) {
-        self.rows.push(Row(line.into(), None, Vec::new()));
+        self.rows.push((line.into(), None));
     }
 
     fn action(&mut self, words: impl Into<Line<'static>>, action: Action) {
-        self.rows.push(Row(words.into(), Some(action), Vec::new()));
+        self.rows.push((words.into(), Some(action)));
     }
 
     fn text(&mut self, text: &str, ink: Color) {
         self.push(vec![span(clip(text, self.width), ink)]);
     }
 
-    // A blank row, then `── LABEL ──────── hint`.
     fn rule(&mut self, label: &str, hint: Option<&str>) {
         self.push(Vec::new());
         self.push(rule(label, hint, self.width));
@@ -128,6 +117,32 @@ impl Status<'_> {
         let words = vec![Span::styled(clip(text, 1024), style(ink, GLASS))];
         let lines = wrap(words, self.width);
         lines.into_iter().for_each(|l| self.push(l));
+    }
+
+    // The addressed session's id, state and context, and its last turn's tokens.
+    fn facts(&mut self) {
+        let (app, now) = (self.app, self.now);
+        if let Some(agent) = app.row() {
+            self.text(&format!("session {}", agent.session), GRAY);
+            self.text(&format!("state {}", Card::of(app, agent, now).word), WHITE);
+            let reading = agent.context.zip(agent.window).zip(percent(agent));
+            let reading = reading.map_or("not measured".into(), |((c, w), p)| {
+                format!("{} of {} · {p}%", kilo(c), kilo(w))
+            });
+            self.text(&format!("context {reading}"), GRAY);
+        }
+        let mut entries = app
+            .transcript()
+            .into_iter()
+            .flat_map(|t| t.entries.values().rev());
+        let usage = entries.find_map(|e| match &e.body {
+            Body::TurnEnd { usage, .. } => Some(usage),
+            _ => None,
+        });
+        if let Some(u) = usage {
+            let (input, output) = (kilo(u.input), kilo(u.output));
+            self.text(&format!("last turn {input} in · {output} out"), GRAY);
+        }
     }
 
     fn model(&mut self) {
@@ -157,8 +172,7 @@ impl Status<'_> {
             .collect();
         let windows = agent.map_or(&[][..], |a| a.usage.as_slice());
         let past = agent.and_then(|a| {
-            let pct = a.context? * 100 / a.window.filter(|w| *w > 0)?;
-            let line = (a.threshold * 100.).round() as u64;
+            let (pct, line) = (percent(a)?, (a.threshold * 100.).round() as u64);
             (pct >= line).then(|| format!("Context {pct}%, past the automatic rebuild at {line}%."))
         });
         let rejected = windows.iter().any(|w| w.rejected);
@@ -240,17 +254,10 @@ impl Status<'_> {
                     span(format!("{:>5}", format!("{pct:.0}%")), WHITE),
                 ]);
             }
-            None => self.text(
-                &format!(
-                    "{label}{}",
-                    if stale {
-                        "awaiting a reading"
-                    } else {
-                        "not measured yet"
-                    }
-                ),
-                GRAY_DIM,
-            ),
+            None => {
+                let missing = ["not measured yet", "awaiting a reading"][usize::from(stale)];
+                self.text(&format!("{label}{missing}"), GRAY_DIM);
+            }
         }
         let reset = window.and_then(|w| super::topbar::reset(self.app, w.resets_at?, self.now));
         let reset = reset.map_or(span("—", GRAY_DIM), |at| span(at, WHITE));
@@ -274,7 +281,6 @@ impl Status<'_> {
         let hint = bindings::text(app, "<targets.next> or <children.next> to pick");
         self.rule("CHILDREN", (!cards.is_empty()).then_some(hint.as_str()));
         let (kept, mut archived): (Vec<_>, Vec<_>) = cards.into_iter().partition(|c| c.kept(now));
-        // The ended ones most recently stopped first.
         archived.sort_by_key(|c| std::cmp::Reverse(c.agent.last_activity));
         if kept.is_empty() {
             self.text("none out", GRAY_DIM);
@@ -282,7 +288,7 @@ impl Status<'_> {
         let all: Vec<_> = kept.iter().chain(&archived).collect();
         let detail = cards::detail(&all, self.width + 1, Size::Full);
         for c in &kept {
-            self.card(c, detail, Size::Full);
+            self.card(c, detail);
         }
         if !archived.is_empty() {
             self.action(
@@ -291,14 +297,14 @@ impl Status<'_> {
             );
         }
         for c in archived.iter().filter(|_| self.app.archive) {
-            self.card(c, detail, Size::Full);
+            self.card(c, detail);
         }
     }
 
-    fn card(&mut self, card: &Card, detail: cards::Detail, size: Size) {
+    fn card(&mut self, card: &Card, detail: cards::Detail) {
         let id = &card.agent.session;
         let selected = self.app.selected_child() == Some(id);
-        for line in card.rows(size, self.width + 1, detail, (selected, false)) {
+        for line in card.rows(Size::Full, self.width + 1, detail, (selected, false)) {
             self.action(line, Action::Child(id.clone()));
         }
         if card.agent.parent.is_none() {
@@ -327,11 +333,6 @@ impl Status<'_> {
         }
         let unread = delivered.clone().filter(|d| !d.read).count();
         self.rule(&format!("INBOX · {unread} unread"), Some("▎ this session"));
-        let fresh = delivered
-            .clone()
-            .next_back()
-            .is_some_and(|d| self.now.saturating_sub(d.at) < 60_000);
-        app.next.every(self.now, if fresh { 1000 } else { 60_000 });
         // Folded, the newest four, so the pane fits without scrolling; opened, pages of 15.
         let total = delivered.clone().count();
         let (offset, shown) = app
@@ -347,40 +348,30 @@ impl Status<'_> {
             let bar = [" ", "▎"][usize::from(app.root.as_ref() == Some(&d.session))];
             // An item is two rows: the bar, a lead, words, and a note at the right edge.
             let row = |lead: Span<'static>, words: Vec<Span<'static>>, note: String| {
-                let used = words.iter().map(|s| width(&s.content)).sum::<usize>();
+                let used = spans_width(&words);
                 let gap = " ".repeat(columns.saturating_sub(used + width(&note)));
                 let mut row = vec![span(bar, VIOLET), lead];
                 row.extend(words);
                 row.extend([span(gap, GRAY), span(note, GRAY)]);
                 row
             };
-            let age = age(self.now.saturating_sub(d.at));
+            let age = ago(app, d.at, self.now);
             let subject = clip(&d.line, columns.saturating_sub(width(&age) + 1));
             let ink = [WHITE, GRAY][usize::from(d.read)];
             let face = [Modifier::BOLD, Modifier::empty()][usize::from(d.read)];
             let lead = span(if d.read { "  " } else { "● " }, CYAN);
             let subject = Span::styled(subject, style(ink, GLASS).add_modifier(face));
             self.action(row(lead, vec![subject], age), action.clone());
+            // Who sent it and from where, a silent server marked, and what it is.
             let kind = kind(d);
-            let place = location(
-                app,
-                &d.session,
-                columns.saturating_sub(width(&d.name) + width(kind) + 4),
-            );
-            let silent = silent_server(app, &d.session).is_some();
-            let who = app
-                .agents
-                .get(&d.session)
-                .map_or(d.name.as_str(), |a| &a.name);
-            let suffix = format!(" · {}{place}", if silent { "⊘ " } else { "" });
-            let name = clip(
-                who,
-                columns.saturating_sub(width(&suffix) + width(kind) + 1),
-            );
-            let words = vec![
-                span(name, ink),
-                span(suffix, if silent { AMBER } else { GRAY }),
-            ];
+            let room = columns.saturating_sub(width(&d.name) + width(kind) + 4);
+            let place = location(app, &d.session, room);
+            let silent = server(app, &d.session).is_some_and(|s| s.silent.is_some());
+            let who = app.agents.get(&d.session).map(|a| a.name.as_str());
+            let suffix = format!(" · {}{place}", ["", "⊘ "][usize::from(silent)]);
+            let room = columns.saturating_sub(width(&suffix) + width(kind) + 1);
+            let name = span(clip(who.unwrap_or(&d.name), room), ink);
+            let words = vec![name, span(suffix, [GRAY, AMBER][usize::from(silent)])];
             self.action(row(span("  ", GRAY), words, kind.into()), action);
             if let Some(voice) = &d.voice {
                 let wave = super::audio::spoken(voice, d.entry, self.width);
@@ -427,7 +418,7 @@ impl Status<'_> {
             }
         }
         let agent = self.app.row();
-        let reading = agent.and_then(|a| Some(a.context? * 100 / a.window.filter(|w| *w > 0)?));
+        let reading = agent.and_then(percent);
         for (n, (at, how)) in starts.iter().enumerate() {
             let next = starts.get(n + 1).map(|(at, _)| *at);
             let ms = next.unwrap_or(self.now).saturating_sub(*at);
@@ -454,12 +445,32 @@ impl Status<'_> {
     }
 }
 
+/// The context's whole percent of its window; none while unmeasured.
+fn percent(a: &AgentView) -> Option<u64> {
+    let (context, window) = a.context.zip(a.window.filter(|w| *w > 0))?;
+    Some(context.saturating_mul(100) / window)
+}
+
 /// `42s`, `6m`, `2h`.
 pub(super) fn age(ms: u64) -> String {
     match ms / 1000 {
         seconds @ 0..60 => format!("{seconds}s"),
         seconds @ 60..3600 => format!("{}m", seconds / 60),
         seconds => format!("{}h", seconds / 3600),
+    }
+}
+/// How long ago `since` was as an age, asking a frame when it next changes. Seconds show only
+/// while motion plays, turning with the wall's so ages under a minute share one frame a second;
+/// with motion still an age under a minute is `<1m`, so at rest it turns at the minute.
+pub(super) fn ago(app: &App, since: u64, now: u64) -> String {
+    let ms = now.saturating_sub(since);
+    let seconds = ms < 60_000 && super::motion::on(app);
+    let step = [60_000, 3_600_000][usize::from(ms >= 3_600_000)];
+    app.next
+        .at([now + step - ms % step, now + 1000 - now % 1000][usize::from(seconds)]);
+    match ms {
+        ..60_000 if !seconds => "<1m".into(),
+        _ => age(ms),
     }
 }
 
@@ -487,6 +498,13 @@ pub fn elapsed(ms: u64) -> String {
 
 /// The `/status` card's rows: the pane's sections with the addressed session's own facts.
 pub fn rows(app: &App, width: usize, now: u64) -> Vec<Line<'static>> {
+    let rows = sections(app, width, now, true).0;
+    rows.into_iter().map(|(line, _)| line).collect()
+}
+
+/// The pane's rows at `width`, with the `/status` card's facts of the addressed session after
+/// the model when `card`; and the row the inbox starts on.
+fn sections(app: &App, width: usize, now: u64, card: bool) -> (Rows, usize) {
     let mut status = Status {
         app,
         width,
@@ -494,41 +512,20 @@ pub fn rows(app: &App, width: usize, now: u64) -> Vec<Line<'static>> {
         rows: Vec::new(),
     };
     status.model();
-    if let Some(agent) = app.row() {
-        status.text(&format!("session {}", agent.session), GRAY);
-        status.text(&format!("state {}", Card::of(app, agent, now).word), WHITE);
-        let reading = agent.context.zip(agent.window).filter(|(_, w)| *w > 0);
-        let reading = reading.map_or("not measured".into(), |(c, w)| {
-            format!(
-                "{} of {} · {}%",
-                kilo(c),
-                kilo(w),
-                c.saturating_mul(100) / w
-            )
-        });
-        status.text(&format!("context {reading}"), GRAY);
-    }
-    let entries = app.transcript().map(|t| t.entries.values().rev());
-    let usage = entries.and_then(|mut entries| {
-        entries.find_map(|e| match &e.body {
-            Body::TurnEnd { usage, .. } => Some(usage),
-            _ => None,
-        })
-    });
-    if let Some(u) = usage {
-        let (input, output) = (kilo(u.input), kilo(u.output));
-        status.text(&format!("last turn {input} in · {output} out"), GRAY);
+    if card {
+        status.facts();
     }
     status.alerts();
     status.usage();
     status.children();
+    let inbox = status.rows.len();
     status.deliveries();
     status.contexts();
-    status.rows.into_iter().map(|Row(line, ..)| line).collect()
+    (status.rows, inbox)
 }
 
-/// The pane: its tab, the scrolled rows with their presses, and a scrollbar while they overflow.
-/// Its foot is where the stage will stand.
+/// The pane: its tab, the scrolled rows with their presses, and a scrollbar while they overflow;
+/// the stage stands at its foot.
 pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit>) {
     app.status_area = Some(r);
     fill(b, r, style(WHITE, GLASS));
@@ -539,25 +536,10 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit
         put(b, r.x, y, "│", 1, style(BEZEL_HI, GLASS));
     }
     put(b, r.x + 2, r.y, "STATUS", r.width - 2, bold(WHITE, GLASS));
-    hits.push((
-        Rect::new(r.x + 1, r.y, 8.min(r.width - 1), 1),
-        Action::Status,
-    ));
+    let tab = Rect::new(r.x + 1, r.y, 8.min(r.width - 1), 1);
+    hits.push((tab, Action::Status));
     let foot = super::stage::draw(app, b, r, now);
-    let mut status = Status {
-        app,
-        width: r.width.saturating_sub(4) as usize,
-        now,
-        rows: Vec::new(),
-    };
-    status.model();
-    status.alerts();
-    status.usage();
-    status.children();
-    let inbox = status.rows.len();
-    status.deliveries();
-    status.contexts();
-    let rows = status.rows;
+    let (rows, inbox) = sections(app, r.width.saturating_sub(4) as usize, now, false);
     let (visible, total) = (
         r.height.saturating_sub(1 + foot + u16::from(foot > 0)) as usize,
         rows.len(),
@@ -566,16 +548,12 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit
         app.status_scroll = inbox;
     }
     app.status_scroll = app.status_scroll.min(total.saturating_sub(visible));
-    for (y, Row(words, action, fold)) in
-        (r.y + 1..).zip(rows.into_iter().skip(app.status_scroll).take(visible))
-    {
+    let shown = rows.into_iter().skip(app.status_scroll).take(visible);
+    for (y, (words, action)) in (r.y + 1..).zip(shown) {
         let x = r.x + 2 - u16::from(matches!(action, Some(Action::Child(_))));
         let row = Rect::new(x, y, r.right().saturating_sub(x + 1), 1);
         line(b, row, y, &words, style(WHITE, GLASS));
-        let fold = fold
-            .into_iter()
-            .map(|(x, a)| (Rect::new(row.x + x, y, 2, 1), a));
-        hits.extend(action.map(|a| (row, a)).into_iter().chain(fold));
+        hits.extend(action.map(|a| (row, a)));
     }
     scrollbar(b, r.right() - 1, r.y + 1, visible, total, app.status_scroll);
 }

@@ -69,12 +69,11 @@ impl Writer {
             ));
         }
         self.failed = true;
-        self.file
-            .write_all(&line)
-            .await
-            .map_err(other("appending to deliveries.jsonl"))?;
-        self.file
-            .flush()
+        let written = async {
+            self.file.write_all(&line).await?;
+            self.file.flush().await
+        };
+        written
             .await
             .map_err(other("appending to deliveries.jsonl"))?;
         self.end += line.len() as u64;
@@ -134,14 +133,11 @@ impl Index {
                 }
                 let start = self.end.saturating_sub(LINE as u64);
                 let mut bytes = vec![0; (self.end - start) as usize];
-                self.file
-                    .seek(SeekFrom::Start(start))
-                    .await
-                    .map_err(other("reading deliveries.jsonl"))?;
-                self.file
-                    .read_exact(&mut bytes)
-                    .await
-                    .map_err(other("reading deliveries.jsonl"))?;
+                let read = async {
+                    self.file.seek(SeekFrom::Start(start)).await?;
+                    self.file.read_exact(&mut bytes).await
+                };
+                read.await.map_err(other("reading deliveries.jsonl"))?;
                 self.end = start;
                 bytes.append(&mut self.bytes);
                 self.bytes = bytes;
@@ -153,6 +149,27 @@ impl Index {
                 return Ok(Some(stored));
             }
         }
+    }
+}
+
+/// A new delivery of `line` at `session`'s `entry`, with no file, link or voice, before its
+/// sender's name and project are stored.
+fn made(session: &SessionId, entry: EntryId, line: String) -> Delivery {
+    Delivery {
+        session: session.clone(),
+        entry,
+        at: now(),
+        line,
+        file: None,
+        url: None,
+        name: String::new(),
+        project: String::new(),
+        archived: false,
+        read: false,
+        path: None,
+        voice: None,
+        sound: None,
+        terminal: None,
     }
 }
 
@@ -242,20 +259,9 @@ impl Deliveries {
             _ => return refuse(&t.deliver_one),
         };
         let delivery = Delivery {
-            session: session.clone(),
-            entry,
-            at: now(),
-            line: line.to_string(),
             file,
             url,
-            name: String::new(),
-            project: String::new(),
-            archived: false,
-            read: false,
-            path: None,
-            voice: None,
-            sound: None,
-            terminal: None,
+            ..made(session, entry, line.into())
         };
         let delivery = self.add(c, delivery).await?;
         serde_json::to_value(delivery).map_err(other("writing the delivery"))
@@ -277,21 +283,12 @@ impl Deliveries {
             Some(s) => (Some(Box::new(s.voice)), Some(s.sound), s.terminal),
             None => (None, None, None),
         };
+        let line = line.unwrap_or_default().chars().take(2000).collect();
         let note = Delivery {
-            session: session.clone(),
-            entry,
-            at: now(),
-            line: line.unwrap_or_default().chars().take(2000).collect(),
-            file: None,
-            url: None,
-            name: String::new(),
-            project: String::new(),
-            archived: false,
-            read: false,
-            path: None,
             voice,
             sound,
             terminal,
+            ..made(session, entry, line)
         };
         self.add(c, note).await.map(drop)
     }
@@ -311,7 +308,8 @@ impl Deliveries {
         Ok(delivery)
     }
 
-    /// Deliveries newest first before the named delivery, at most 256; receipts keep its position.
+    /// Deliveries newest first before the named delivery, at most 256; receipts keep its position:
+    /// the newest original `(at, session, entry)` keys before its own, retaining at most 256 rows.
     pub(crate) async fn list(
         &self,
         before: Option<(SessionId, EntryId)>,
@@ -325,16 +323,6 @@ impl Deliveries {
             }
             None => None,
         };
-        self.page(before, limit, words).await
-    }
-
-    /// The newest original `(at, session, entry)` keys before `before`, retaining at most 256 rows.
-    async fn page(
-        &self,
-        before: Option<(u64, SessionId, EntryId)>,
-        limit: usize,
-        words: &[String],
-    ) -> Result<Vec<Delivery>, Error> {
         let limit = limit.clamp(1, 256);
         let mut kept: Vec<Delivery> = Vec::with_capacity(limit);
         let mut index = Index::open(&self.inner.path).await?;

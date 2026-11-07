@@ -10,6 +10,7 @@ import shutil
 import subprocess
 from claude import reply
 from driver import flow
+from model import tool
 from server import post, stop, until
 
 replies = []
@@ -20,9 +21,7 @@ with flow(replies) as f:
     def use(tool, where=f, resume=None, **arguments):
         """A turn of `where`'s session `resume`, else a new one, calling `tool`: the session and its result."""
         replies.extend([reply((None, f"mcp__razor__{tool}", arguments)), reply(text="saved")])
-        result = where.run("--print=json", *(["--resume", resume] if resume else []), "Keep RULING_FILES_24 in the project.")
-        assert result.returncode == 0, result.stderr
-        sid = json.loads(result.stdout)["session"]
+        sid = where.ask(*(["--resume", resume] if resume else []), "Keep RULING_FILES_24 in the project.")["session"]
         return sid, [e for e in where.record(sid) if e["kind"] == "result"][-1]
 
     def memory(**arguments):
@@ -46,24 +45,21 @@ with flow(replies) as f:
     memory(action="write", kind="state", text="STATE_FILES_24 ready for a new session.", replaces="state")
     ruling = memory(action="write", kind="ruling", text="Keep the marker.")["id"]
     replies.append(reply(text="opened"))
-    opened = f.run("--print=json", "Read project memory.")
-    assert opened.returncode == 0, opened.stderr
-    page = sorted(f.requests.glob("[0-9]*.body"))[-1].read_text()
+    f.ask("Read project memory.")
+    page = f.sent()[-1]
     assert "STATE_FILES_24" in page and "RULING_FILES_24" in page and ruling in page, "new session lost state or ruling"
     replies.extend([reply((None, "mcp__razor__agent", {"action": "start", "name": "helper",
                          "brief": "Read the project's memory and answer."}), match="START_HELPER_24"),
                     reply(text="started", match="START_HELPER_24"),
                     reply(text="read", match="You are helper,"),
                     reply(text="received", match="START_HELPER_24")])
-    started = f.run("--print=json", "START_HELPER_24")
-    assert started.returncode == 0, started.stderr
-    root = json.loads(started.stdout)["session"]
+    root = f.ask("START_HELPER_24")["session"]
     call = next(e for e in f.record(root) if e["kind"] == "result")
     child = json.loads(call["output"])["session"]
     entries = until(f, child, lambda es: any(e["kind"] == "turn_end" for e in es))
     until(f, root, lambda es: sum(e["kind"] == "turn_end" for e in es) >= 2)
     assert entries[0]["cwd"] != str(f.cwd) and (Path(entries[0]["cwd"]) / ".git").is_file(), "helper was not in a git worktree"
-    page = next(p.read_text() for p in f.requests.glob("*.body") if "You are helper," in p.read_text())
+    page = next(body for body in f.sent() if "You are helper," in body)
     assert "STATE_FILES_24" in page and ruling in page, "helper lost main checkout's memory"
     offered = {t["name"]: t["input_schema"] for t in json.loads(page)["tools"]}
     assert [offered[f"mcp__razor__{n}"]["properties"]["action"]["enum"] for n in ("memory", "task")] == [["search", "get"], ["list", "get", "write"]], "a helper cannot claim or comment"
@@ -85,7 +81,7 @@ with flow(replies) as f:
     # A home whose first read failed has fetched nothing yet, so its page still points to the list.
     theirs, refused = use("task", b, action="write", id=1, claim=True)
     assert json.loads(claimed["output"])["claimed"] and refused["outcome"] == "error", (claimed, refused)
-    assert "keeps its tasks on its git remote" in sorted(f.requests.glob("[0-9]*.body"))[-1].read_text(), "a page hid unfetched tasks"
+    assert "keeps its tasks on its git remote" in f.sent()[-1], "a page hid unfetched tasks"
     post(f, f"/sessions/{mine}/quit", {})
     until(f, mine, lambda _: "claim:" not in there("show", "refs/razor/tasks:1.md"))
     assert json.loads(use("task", b, theirs, action="write", id=1, claim=True)[1]["output"])["claimed"]
@@ -114,10 +110,6 @@ with flow(replies) as f:
 # A helper claims for itself, comments, releases and reclaims; settlement releases that claim
 # and records its report. Forbidden fields are refused before any part of a write applies.
 root, helper = "CHILD_TASKS_24", "You are writer24,"
-
-
-def tool(marker, tool_name, **arguments):
-    return reply((None, f"mcp__razor__{tool_name}", arguments), match=marker)
 
 
 forbidden = [{"title": "New task"}, *({"id": 1, k: v} for k, v in [
@@ -158,9 +150,7 @@ with flow(replies) as f:
                 tool("You are nested24,", "agent", action="finish", status="finished", report="Nested project report."),
                 tool("You are other24,", "agent", action="finish", status="finished", report="Other project report.")]
     assert other.run("--print=json", "OTHER_TASK_24").returncode == 0
-    result = f.run("--print=json", root)
-    assert result.returncode == 0, result.stderr
-    parent = json.loads(result.stdout)["session"]
+    parent = f.ask(root)["session"]
     results = [e for e in f.record(parent) if e["kind"] == "result"]
     child = json.loads(results[3]["output"])["session"]
     writes = [e for e in f.record(child) if e["kind"] == "result"][:-1]

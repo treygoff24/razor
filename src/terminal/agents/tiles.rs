@@ -3,7 +3,7 @@
 use super::panel::{self, Standing, Tone, on, standing};
 use super::sections::totals;
 use crate::protocol::AgentView;
-use crate::protocol::views::{Section, ViewRow};
+use crate::protocol::views::{Section, SectionKind, ViewRow};
 use crate::terminal::text::*;
 use crate::terminal::{App, status, tools};
 use ratatui::style::{Color, Stylize};
@@ -334,15 +334,17 @@ pub fn frame(
     panel::write(b, r.x, r.bottom() - 1, &foot);
 }
 
-/// Group `i` in `r`: its frame on its ground with the number and name tabs, how many need the
+/// Group `g` in `r`: its frame on its ground with the number and name tabs, how many need the
 /// person, its counts at the right, and the hatch over the room under its content past `end`;
-/// folded, one line with its census, marked `❯` while `lit`.
+/// folded, one line with its census, marked `❯` while `lit`. It is number `i + 1`, as NEEDS YOU,
+/// drawn first, has none.
 pub fn group(app: &App, b: &mut Buffer, (g, i, lit): (&Group, usize, bool), (r, end): (Rect, u16)) {
+    let n = (g.tree[0].kind != SectionKind::NeedsYou).then_some(i + 1);
     let (tone, w) = (g.tone, r.width as usize);
     let roots = panel::rows(g.tree).filter(|r| r.depth == 0);
     let census = panel::census(roots.filter_map(|r| app.agents.get(&r.session)));
     let ((agents, helpers), needs) = (totals(g.tree), census[0] + census[1]);
-    let mut tags = panel::named(Some(i + 1), &g.tree[0].name, tone);
+    let mut tags = panel::named(n, &g.tree[0].name, tone);
     let you = [" ◆ {} ", " ◆ {} NEEDS YOU ", " ◆ {} NEED YOU "];
     let you = you[needs.min(2) * usize::from(w > 50)].replace("{}", &needs.to_string());
     let you = on(you, AMBER, tone.ground, true);
@@ -357,7 +359,7 @@ pub fn group(app: &App, b: &mut Buffer, (g, i, lit): (&Group, usize, bool), (r, 
         let census = [0, census[1], census[2], census[3]];
         tags.extend(panel::counts(census, tone.ground));
     } else {
-        let index = Some((i + 1, tone.soft));
+        let index = n.map(|n| (n, tone.soft));
         frame(b, r, (tone.frame, tone.ground), true, index);
         let hatch = style(mix(tone.ground, tone.hue, 0.28), tone.ground);
         for y in end + 1..r.bottom().saturating_sub(1) {
@@ -392,9 +394,9 @@ pub fn shelf(b: &mut Buffer, r: Rect, tone: Tone, (name, roots): &(Option<&str>,
         .unwrap_or_default();
     let title = on(title, mix(tone.hue, WHITE, 0.45), tone.ground, true);
     let census = panel::counts(panel::census(roots.iter().map(|a| a.0)), tone.ground);
-    let room = (r.width as usize).saturating_sub(4 + panel::wide(&census));
+    let room = (r.width as usize).saturating_sub(4 + spans_width(&census));
     panel::write(b, r.x + 2, r.y, &clip_spans(vec![title], room));
-    let at = r.right().saturating_sub(1 + panel::wide(&census) as u16);
+    let at = r.right().saturating_sub(1 + spans_width(&census) as u16);
     panel::write(b, at, r.y, &census);
 }
 
@@ -422,7 +424,7 @@ pub fn tile(
     let lead = on(format!("{lead} "), lead_ink, ground, false);
     let said = vec![lead, Span::styled(words, ink.bg(ground))];
     let short = [vec![aim.clone()], said.clone()][usize::from(s.needs())].clone();
-    let marks = panel::marks(app, helpers.clone(), tone, now);
+    let marks = panel::marks(app, helpers.clone(), now);
     let gap = on("  ", DATA, ground, false);
     let after = [Vec::new(), [vec![gap], short.clone()].concat()][usize::from(size.h == 1)].clone();
     let look = (ground, lit);
@@ -437,7 +439,7 @@ pub fn tile(
     lines.extend((0..size.gap).map(|_| Line::default()));
     let step = a.doing.as_ref().filter(|_| size.h >= 6 && stepped(a, s));
     let names = helpers.filter_map(|r| app.agents.get(&r.session)).map(|h| {
-        let (mark, word) = panel::helper(app, h, tone, now);
+        let (mark, word) = panel::helper(app, h, now);
         let ink = [PANEL_GRAY, AMBER][usize::from(word.starts_with("waiting"))];
         [mark, on(format!(" {}  ", h.name), ink, ground, false)]
     });
@@ -452,7 +454,7 @@ pub fn tile(
     lines.extend(status);
     if let Some((tool, target, at)) = step {
         let mark = tools::mark(tool, &serde_json::Value::Null);
-        let words = format!("{mark} {target} · {}", panel::age(app, *at, now));
+        let words = format!("{mark} {target} · {}", status::ago(app, *at, now));
         lines.push(on(words, PANEL_GRAY, ground, false).into());
     }
     lines.extend((!names.is_empty()).then(|| Line::from(names)));

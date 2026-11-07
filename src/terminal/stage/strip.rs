@@ -94,12 +94,8 @@ pub(super) fn draw(
         let mut canvas = Sprite::new(size, (rows - 1) * 2);
         let px = avatar(id, bodies, frame.pose);
         if frame.visible {
-            canvas.blit(
-                &px,
-                i64::from(frame.dx),
-                6 + i64::from(frame.dy),
-                frame.flip,
-            );
+            let (dx, dy) = (i64::from(frame.dx), i64::from(frame.dy));
+            canvas.blit(&px, dx, 6 + dy, frame.flip);
         }
         particles(&mut canvas, &frame, size);
         raster(&mut grid, &canvas, x);
@@ -127,11 +123,7 @@ fn sample(
             return f;
         }
     }
-    if motion && blink(id, last_key, now, until) {
-        rest("blink")
-    } else {
-        rest("idle")
-    }
+    rest(["idle", "blink"][usize::from(motion && blink(id, last_key, now, until))])
 }
 
 fn rest(pose: &'static str) -> Frame {
@@ -176,16 +168,8 @@ fn reaction(app: &App, crew: &[SessionId], now: u64) -> Option<Run> {
     if let Some(at) = records.input
         && emotes::random(at) % 10 < 3
     {
-        consider(
-            0,
-            if emotes::random(at + 1).is_multiple_of(2) {
-                "wave"
-            } else {
-                "exclaim"
-            },
-            Some(at),
-            2,
-        );
+        let name = ["wave", "exclaim"][(emotes::random(at + 1) % 2) as usize];
+        consider(0, name, Some(at), 2);
     }
     if let Some(at) = app.stage.cleared
         && emotes::random(at) % 10 < 4
@@ -269,11 +253,7 @@ fn idle(
 
 fn idle_name(turn: u64, hash: u64, sleepy: bool) -> &'static str {
     if sleepy {
-        return if turn.is_multiple_of(2) {
-            "sleep"
-        } else {
-            "zzz"
-        };
+        return ["sleep", "zzz"][(turn % 2) as usize];
     }
     // Disjoint alternating pools prevent a member repeating its previous solo antic.
     let pool: &[&str] = if turn.is_multiple_of(2) {
@@ -307,13 +287,9 @@ fn target(
     } else {
         &others
     };
-    if candidates.is_empty() {
-        None
-    } else {
-        candidates
-            .get((hash as usize / 4) % candidates.len())
-            .copied()
-    }
+    candidates
+        .get((hash as usize / 4) % candidates.len().max(1))
+        .copied()
 }
 
 fn partner(run: Run, member: usize, now: u64) -> Option<Run> {
@@ -327,12 +303,9 @@ fn partner(run: Run, member: usize, now: u64) -> Option<Run> {
     Some(Run {
         member,
         at,
-        name: if run.name == "dance" {
-            "dance"
-        } else if emotes::random(at).is_multiple_of(2) {
-            "blink"
-        } else {
-            "hop"
+        name: match run.name {
+            "dance" => "dance",
+            _ => ["blink", "hop"][(emotes::random(at) % 2) as usize],
         },
         target: None,
         ..run
@@ -342,10 +315,7 @@ fn partner(run: Run, member: usize, now: u64) -> Option<Run> {
 fn troll(app: &App, crew: &[SessionId], last_key: u64, now: u64, until: &mut u64) -> Option<Run> {
     let row = app.agents.get(crew.first()?)?;
     let working = app.stage.seen.get(crew.first()?).and_then(|s| s.working);
-    let high = row
-        .context
-        .zip(row.window)
-        .is_some_and(|(used, total)| total > 0 && used as f64 / total as f64 > 0.85);
+    let high = super::super::cards::fill(row).is_some_and(|f| f > 0.85);
     let mut selected = None;
     let mut consider = |start: u64, name, repeat| {
         let at = if repeat && now >= start {

@@ -1,5 +1,5 @@
 //! A room is a pure function of record times, status observations and the local clock.
-use super::super::App;
+use super::super::{App, text::zoned};
 use super::{
     Stage,
     art::{self, Pose},
@@ -151,35 +151,25 @@ fn cast(app: &App, crew: &[SessionId], scene: &mut Scene) {
         let row = app.agents.get(id);
         let state = state(row, i == 0);
         let x = left + (i * gap) as f64;
-        let fill =
-            row.and_then(|r| Some(r.context? as f64 / r.window.filter(|n| *n > 0)? as f64 * 100.));
-        let accent = if i == 0 {
-            0
-        } else {
-            (art::hash(id.as_str()) as usize % 11) + 1
-        };
+        let fill = row.and_then(super::super::gauge::share);
+        // The session's own creature keeps its plain colouring; a child wears one of eleven.
+        let accent = usize::from(i > 0) * (art::hash(id.as_str()) as usize % 11 + 1);
         scene.actors.push(Actor {
             who: art::member(root),
             name: name(row, i == 0),
             state,
             x,
             is_self: i == 0,
-            pose: if fill.is_some_and(|f| f > 80.) {
-                Pose::Messy
-            } else {
-                Pose::Idle
-            },
+            pose: [Pose::Idle, Pose::Messy][usize::from(fill.is_some_and(|f| f > 80.))],
             dim: if state == ActorState::Ended { 0.5 } else { 0. },
             accent,
             ..Actor::default()
         });
         if let Some(fill) = fill {
-            let mug = if fill < 34. {
-                "mug_full"
-            } else if fill < 67. {
-                "mug_half"
-            } else {
-                "mug_empty"
+            let mug = match fill {
+                _ if fill < 34. => "mug_full",
+                _ if fill < 67. => "mug_half",
+                _ => "mug_empty",
             };
             scene.bench.push(placed(mug, 0, x + 3., None));
         }
@@ -246,11 +236,8 @@ impl Wake {
     }
 }
 
-pub(super) fn local(app: &App, now: u64) -> Option<jiff::Zoned> {
-    crate::terminal::text::zoned(now, app.zone.as_ref())
-}
 pub(super) fn hour(app: &App, now: u64) -> u64 {
-    local(app, now)
+    zoned(now, app.zone.as_ref())
         .and_then(|z| z.checked_add(jiff::Span::new().hours(1)).ok())
         .and_then(|z| at_hour(&z, z.hour()))
         .filter(|at| *at > now)
@@ -330,11 +317,7 @@ fn running(scene: &mut Scene, stage: &Stage, w: &mut Wake) {
     let x = actor.x;
     let n = stage.records.calls.len();
     for (i, call) in stage.records.calls.iter().take(n).enumerate() {
-        let k = if w.motion {
-            w.now.saturating_sub(call.at) / 500
-        } else {
-            0
-        };
+        let k = u64::from(w.motion) * (w.now.saturating_sub(call.at) / 500);
         let (name, frame) = match call.prop {
             Prop::Tests => ("beaker", k as usize % 4),
             Prop::Edit | Prop::Shell => ("wrench", k as usize % 2),
@@ -345,10 +328,9 @@ fn running(scene: &mut Scene, stage: &Stage, w: &mut Wake) {
         if matches!(call.prop, Prop::Write) {
             scene.bench.push(placed("pad", 0, x, None));
         }
-        let nudge = if matches!(call.prop, Prop::Read | Prop::Write) {
-            (k % 2) as f64
-        } else {
-            0.
+        let nudge = match call.prop {
+            Prop::Read | Prop::Write => (k % 2) as f64,
+            _ => 0.,
         };
         scene.bench.push(placed(name, frame, x + nudge, None));
         w.animate(call.at, u64::MAX, 500);
@@ -356,7 +338,7 @@ fn running(scene: &mut Scene, stage: &Stage, w: &mut Wake) {
 }
 
 fn sky(scene: &mut Scene, stage: &Stage, app: &App, w: &mut Wake) {
-    let local = local(app, w.now);
+    let local = zoned(w.now, app.zone.as_ref());
     let hour = local.as_ref().map_or(12, |z| z.hour());
     if hour < 6 {
         scene.sky = Sky::Night;

@@ -10,8 +10,8 @@ is sent as written. The server checks it when creating a session. `--continue` s
 folder, and `--resume` addresses the requested session. Without `[remote]`, these commands use
 the existing socket and may start this home's server. Other commands keep their local behavior.
 
-Main constructs one connection containing the HTTP client, URL, key and folder and passes it to
-the terminal or headless request path. Reusing the existing authenticated API keeps the session
+`api::connection` constructs one connection containing the HTTP client, URL, key and folder, and
+main passes it to the terminal or to `api::turn`, the headless request path. Reusing the existing authenticated API keeps the session
 and its records on the server and the microphone and player on the terminal's machine. A separate
 local server and server-to-server pairing would add a second lifecycle for a client that does not
 need one. A settings or key error refuses the command rather than starting a different server.
@@ -86,7 +86,7 @@ The peer cache keeps an incremental byte total within 8 MiB: changed agent rows,
 
 **Acceptance.** Flows 25, 26, 43 and 44 in separate systemd units. Two real paired scratch servers: identical ids, input/withdraw/stop/answer, native event/page/file forwarding, no recursive rows, peer disconnect/return and key revocation. Verify provenance, forbidden destinations, shared read state across restart, migration, window unread, local old-page receipts and no second push. Real pty frames at 40×30, 120×40, 160×50 and motion on/off; compare the approved combined.html and unchanged existing frames. Fmt, clippy, size; release perf versus main alternating three times with machine load recorded.
 
-Design page, 2026-10-27; revised 2026-10-28. Module `src/api/`, and `src/main.rs`'s server and clients. Budget row: "API server and configuration", 4,000 lines, shared with `src/config/`, `src/main.rs` and `src/lib.rs`.
+Design page, 2026-10-27; revised 2026-10-28. Module `src/api/`; `src/main.rs` turns the command line into its calls. Budget row: "API server and configuration", 4,000 lines, shared with `src/config/`, `src/main.rs` and `src/lib.rs`.
 
 The server is the one door every client uses: the terminal app, `--print`, `razor login`, `razor devices`, and later the web app and plugins. It holds client connections; [devices and paired transport](devices.md) owns enrollment and keys. It reaches sessions through the controller, residents and deliveries through the residents module, and sign-in through `Responses::login`.
 
@@ -94,32 +94,45 @@ The server is the one door every client uses: the terminal app, `--print`, `razo
 
 ```rust
 /// The local socket and the local device's key (mode 0600), in the state directory.
-pub const SOCKET: &str = "server.sock";
-pub use crate::devices::{Error, KEY};
+pub(crate) const SOCKET: &str = "server.sock";
+pub use crate::devices::Error;
+pub(crate) use crate::devices::KEY;
 /// The base URL of a client bound to `SOCKET`; the host is not used.
-pub const LOCAL: &str = "http://localhost";
+pub(crate) const LOCAL: &str = "http://localhost";
 
-/// Serve until this future is dropped.
-/// - Listens on `home/server.sock`, replacing a stale file (the caller holds `server.lock`), and
-///   on `address` (`server.address`, the tailnet address) when one is given.
-/// - Makes `server.id` at the first start and writes `server.json`: `{pid, address}`. The
-///   controller has already opened device enrollment and keys through `crate::devices`.
+/// `razor serve`: this home's one server, until SIGTERM.
+/// - Raises the open-file limit, holds `server.lock`, and starts the controller, the residents
+///   and the desktop daemon.
+/// - Listens on `home/server.sock`, replacing a stale file, and on `server.address`, the tailnet
+///   address, when one is set.
+/// - Makes `server.id` at the first start and writes `server.json`: `{pid, address}`.
 /// - Every request must carry `Authorization: Bearer <key>`: the local key or an enrolled
 ///   device's. A body is at most 32 MiB.
-/// - The ChatGPT sign-in answers 503 until `serve` is handed the model client.
-pub async fn serve(home: PathBuf, address: Option<String>, controller: Controller,
-    residents: Residents, deliveries: Deliveries) -> Result<(), Error>;
+pub async fn serve(home: PathBuf) -> Result<(), Error>;
+
+/// A client and local key for `home`, starting its service or a detached server when none
+/// answers, and waiting up to ten seconds for it.
+pub async fn connect(home: &Path) -> Result<(reqwest::Client, String), Error>;
+/// The server the session commands use: `[remote]`'s, else this home's own.
+pub async fn connection(home: &Path) -> Result<Connection, Error>;
+/// `--continue`: the newest session in the connection's folder.
+pub async fn newest(c: &Connection) -> Result<SessionId, Error>;
+/// `--print`: one input, to a new session when none is named, read to the end of its turn.
+pub async fn turn(c: &Connection, session: Option<SessionId>, input: &ClientInput,
+    stream: bool) -> Result<(SessionId, End, String), Error>;
+/// `razor doctor`: a line for each thing Razor runs on; Ok when the default model can run.
+pub async fn doctor(home: &Path) -> Result<(), Error>;
 
 /// `razor login`: the ChatGPT sign-in runs in the server; each instruction is printed as it comes.
 pub async fn login(client: &reqwest::Client, key: &str) -> Result<(), Error>;
 /// `razor devices`, `razor devices add <name>`, `razor devices remove <name>`: the text to print.
 pub async fn devices(client: &reqwest::Client, key: &str) -> Result<String, Error>;
 pub async fn enroll(client: &reqwest::Client, key: &str, name: &str,
-    address: Option<&str>, given: Option<&str>, own: Option<&str>) -> Result<String, Error>;
+    address: Option<&str>, given: Option<&str>) -> Result<String, Error>;
 pub async fn revoke(client: &reqwest::Client, key: &str, name: &str) -> Result<String, Error>;
 ```
 
-`main.rs` builds every client with reqwest's `unix_socket(home/SOCKET)` and reads `KEY`; `razor serve` starts the controller, opens `Residents` and `Deliveries`, and calls `serve`. The controller opens `crate::devices`, which owns keys, `devices.json` and the shared error type. `api/devices.rs` holds the enrollment routes and authentication middleware.
+`connect` builds every local client with reqwest's `unix_socket(home/SOCKET)` and reads `KEY`; `serve` starts the controller, opens `Residents` and `Deliveries`, and listens. The controller opens `crate::devices`, which owns keys, `devices.json` and the shared error type. `api/devices.rs` holds the enrollment routes and authentication middleware.
 
 **Before the model client is wired in**, `serve` takes no `Arc<Responses>` and `POST /login` answers 503 with one sentence. Once it is, `serve` takes `responses`, and `sign_in` (31 lines) runs `Responses::login(show, stop)` on its own task and sends `true` on `stop` when the client leaves.
 
@@ -144,7 +157,7 @@ A refusal is a status code and `{"error": "<one sentence>"}`:
 | `POST /sessions/{id}/quit` | | `{}` once the session is closed with no closing turn: the turn ending now is its last, as `/done`'s closing turn would be, so a running turn stops, inputs still waiting are Withdrawn, its jobs and children close, and a closed turn end is recorded (an empty one when idle); its next input reopens it (`/quit`, Trey 2026-10-30). |
 | `POST /sessions/{id}/handover` | | `{entry}` once the threshold's continuation-note input is admitted, or `{}` if already requested/rebuilding; never waits for the rebuild. A closed child gets 400 with a sentence. |
 | `POST /sessions/{id}/asks/{entry}` | `Answer` | `{entry}`: the input carrying the answer. Refused once the ask is answered from any device. |
-| `GET /sessions/{id}/events?after=N&native=` | | NDJSON: the session's stream. |
+| `GET /sessions/{id}/events?after=N&native=&heartbeat=` | | NDJSON: the session's stream. |
 | `GET /sessions/{id}/entries?before=N&limit=L&native=` | | NDJSON: the stored lines of up to `L` entries before `N` (default: the end), in record order. A page is at most 8 MiB, except that one entry larger than that comes whole and alone; entries are never split. `L` is 256 by default, 1,024 at most. Entry `N` alone is `before=N+1&limit=1`. |
 | `GET /sessions/{id}/project` | | `{"commits": N, "merges": M, "branch": "main"}` from the session folder's git history; absent facts are omitted, including the branch on a detached head; `{}` outside git or after two seconds. |
 | `GET /sessions/{id}/marks` | | `[[entry, kind], …]`, oldest first, newest 4,096 at most: `you`, `question`, `rebuild`, `error` or `failed` at the failed result's entry. |
@@ -167,6 +180,7 @@ A refusal is a status code and `{"error": "<one sentence>"}`:
 1. `attached {session, last}`.
 2. The stored lines after the cursor.
 3. Then, as they happen: entries, `delta`, `thought` (the words of a thinking summary as the model writes them), `taken` (a working turn took this queued input at a tool boundary), and `tail` (a running job's last lines and when it last wrote).
+4. With `heartbeat=true`, `{"kind": "heartbeat"}` after every 15 seconds without a line, so a reader of a quiet session can tell a live stream from a dead connection, as the status stream's `server` line every 15 seconds does with `heartbeat=true` there. A client that does not ask gets none. A paired session's stream forwards the query, so the owner sends them and the home passes them through.
 
 On both, an entry leaves out its `native`, the model path's replay data that no client draws (on a GPT response about 100 KB, nearly all of the entry); `native=true` sends each stored line byte for byte. The record and `recall` keep it, and a paired server's `recall` asks for it.
 
@@ -194,6 +208,7 @@ The authenticated PUT/GET/DELETE/POST routes beneath `/sessions/{id}/meetings/{m
 
 Every type this page puts on the wire is in `src/protocol/api.rs`: `ClientInput`, `Answer`, `Listed`, `Delivery`, `Device`, `Login`, `AgentView`, `UsageWindow`, `Live`, and the limits `IMAGE_BASE64` (10 MB), `IMAGES_PER_INPUT` (20) and `BODY_BYTES` (32 MiB). `Report` and `Ask` are in `children.rs`. What they mean here:
 - `Live` holds the stream-only lines above. `Tail` is a running job's last 5 lines with the call entry that started it (`call`; 0 for a job recorded before calls were linked), at most 1 KiB, at most one every 250 ms per job.
+- `Server` is a home as a phone knows it; its capability flags say what the home takes: `transcribe` (voice notes), `call`, `meetings`, `video`, `suggestions` and `follow`. `call`, `meetings`, `suggestions` and `follow` are left out when false. `follow` is true on a server whose events route honours `follow=true`, which this one always does; an older server ignores that query and marks the session looked at, and its line has no `follow`, so a client trusts `follow=true` only where the line says so. A paired server's line is among `servers`, so a relayed `id@peer` session is judged by its peer's line.
 - `AgentView` is the children module's row plus model, effort, context, window, threshold, calls, asks, launched and `headline_at`. A fact not known yet is absent, never zero.
 - A row's `report` is the one `Report { status, text, entry }`. The API sends its text cut to the first line, at most 200 characters; the whole text stays in its entry.
 - `ClientInput` is admitted from the person, or, when `from` names an outside program, as `Origin::Program { name }`.
@@ -252,8 +267,9 @@ The workload is a person attached to a session with 20 working children and 2 re
 - **Enrolling.** `razor devices add phone` posts `/devices` through the socket and prints the key once. `enroll`, `revoke`, `devices` and `login` are this module's client functions; `main.rs` calls them for `razor devices [add|remove]` and `razor login`.
 - **Revoking.** `razor devices remove phone` deletes the key. Each device's open streams wait on a channel of its own; removing the device drops that channel's sender, which ends exactly those streams. A sign-in that phone started stops with its stream; nothing on another device notices.
 - **The local key** is never listed or revoked. To rotate it, delete `device.key` and restart.
-- **Locally**, a client connects to `$RAZOR_HOME/server.sock` (reqwest 0.13's `unix_socket`, axum 0.8's `UnixListener`) and still sends the key: one check on one path. It probes `GET /devices`, which reads no record; if nothing answers, `main.rs` starts `razor serve` detached and waits up to 10 seconds.
+- **Locally**, a client connects to `$RAZOR_HOME/server.sock` (reqwest 0.13's `unix_socket`, axum 0.8's `UnixListener`) and still sends the key: one check on one path. It probes `GET /devices`, which reads no record; if nothing answers, `connect` starts `razor serve` detached and waits up to 10 seconds.
 - **Remotely**, a device uses `server.address`. It is empty by default, so out of the box nothing listens on the network. The person sets it to the tailnet address. Razor speaks plain HTTP inside WireGuard.
+- **A vanished device.** A phone that loses its network never closes its connections, and two were seen still open after 78 idle minutes. Every connection on `server.address` therefore has TCP keepalive: an idle one is probed after 60 seconds, every 15 seconds, and closed after 4 unanswered probes. Keepalive never probes a connection with data in flight, which a stream with heartbeats always has, and Linux retransmits unacknowledged data for about 15 minutes; so on Linux a 120-second `TCP_USER_TIMEOUT` closes a connection whose writes go unacknowledged that long. On Linux, either way, a dead peer's connection closes about two minutes after it last answered; a phone reconnects with its cursor. A suspended app whose phone still acknowledges is alive to TCP and stays open, and a client that holds its receive window shut for two minutes is closed too. macOS has no user timeout and keeps its own retransmission limit. `socket2`, already built for the HTTP client, sets these options; it replaces per-platform `setsockopt` calls through `libc`. The local socket needs none.
 - **`server.json`** keeps `{pid, address}` for the flows driver.
 - **As a user service.** `razor serve` stays in the foreground and exits on SIGTERM; `razor install` writes the unit. Its stop signals the server alone (`KillMode=process`), as launchd does on macOS: systemd's default signals the whole control group at once, so the Claude bridge could exit while the server still ran, which read as a conversation ending by itself and closed every open turn with "The Claude bridge exited" instead of leaving it to resume at the next start (2026-11-03), and every job died with the server. Now the server's exit closes the bridge's input, the bridge closes its conversations, and the jobs live on for the next start to take back. Flow 19 runs a server with the unit's `[Service]` settings under the user's systemd and stops it.
 

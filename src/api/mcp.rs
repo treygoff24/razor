@@ -1,6 +1,6 @@
 //! `razor mcp`: the shell's words as the same MCP operations every client sends.
 
-use super::client::send;
+use super::client::json;
 use super::{Error, LOCAL, other};
 use crate::protocol::{McpRow, McpScope, SessionId};
 use serde_json::{Value, json};
@@ -69,7 +69,7 @@ pub async fn run(
     } else {
         client.post(format!("{LOCAL}{route}")).json(&body)
     };
-    let value = answer(request, key).await.map_err(|e| {
+    let value = json(request.bearer_auth(key)).await.map_err(|e| {
         if body["op"] == "sign_in" {
             Error::Refused(format!(
                 "{e} Run razor mcp sign-in {}.",
@@ -134,13 +134,4 @@ fn preview(value: &Value) -> String {
     }
     lines.push("Preview only; nothing was saved. To review and apply, open razor and run /mcp import <file>.".into());
     lines.join("\n")
-}
-
-/// The shared HTTP path knows neither CLI operations nor their presentation.
-async fn answer(request: reqwest::RequestBuilder, key: &str) -> Result<Value, Error> {
-    send(request.bearer_auth(key))
-        .await?
-        .json()
-        .await
-        .map_err(other("Reading MCP management"))
 }

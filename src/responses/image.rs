@@ -4,7 +4,6 @@
 use super::{Error, Responses, bounded, other, rejected};
 use crate::protocol::{IMAGE_BYTES, SessionId, image_type};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -90,46 +89,33 @@ impl Responses {
             }
         };
         let url = format!("{}/{route}", base.trim_end_matches('/'));
-        let mut tokens = self.credentials(None).await?;
-        for retry in [true, false] {
-            let mut post = (self.client.post(&url).bearer_auth(&tokens.access_token))
-                .header("session_id", session.as_str())
+        let request = || {
+            (self.client.post(&url))
                 .header("originator", ORIGINATOR)
                 .header("x-codex-image-turn-id", turn)
-                .json(&body);
-            if !tokens.account_id.is_empty() {
-                post = post.header("chatgpt-account-id", &tokens.account_id);
-            }
-            let response = post
-                .send()
-                .await
-                .map_err(other("sending an image request"))?;
-            let status = response.status();
-            if status == StatusCode::UNAUTHORIZED && retry {
-                tokens = self.credentials(Some(&tokens.access_token)).await?;
-                continue;
-            }
-            if !status.is_success() {
-                return Err(rejected(status, response)
-                    .await
-                    .without(&tokens.access_token));
-            }
-            let reply: Value = serde_json::from_slice(&bounded(response, RESPONSE).await?)
-                .map_err(other("reading an image response"))?;
-            let encoded = reply["data"][0]["b64_json"].as_str();
-            let encoded = encoded.ok_or(Error::Refused(
-                "The image request returned no image.".into(),
-            ))?;
-            let bytes =
-                (STANDARD.decode(encoded.trim())).map_err(other("decoding a generated image"))?;
-            let written = async {
-                tokio::fs::create_dir_all(saved.parent().unwrap_or(saved)).await?;
-                tokio::fs::write(saved, &bytes).await
-            };
-            written.await.map_err(other("saving a generated image"))?;
-            return Ok(bytes.len() as u64);
+                .json(&body)
+        };
+        let (response, bearer) = self
+            .signed(session, request, "sending an image request")
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(rejected(status, response).await.without(&bearer));
         }
-        Err(Error::Auth)
+        let reply: Value = serde_json::from_slice(&bounded(response, RESPONSE).await?)
+            .map_err(other("reading an image response"))?;
+        let encoded = reply["data"][0]["b64_json"].as_str();
+        let encoded = encoded.ok_or(Error::Refused(
+            "The image request returned no image.".into(),
+        ))?;
+        let bytes =
+            (STANDARD.decode(encoded.trim())).map_err(other("decoding a generated image"))?;
+        let written = async {
+            tokio::fs::create_dir_all(saved.parent().unwrap_or(saved)).await?;
+            tokio::fs::write(saved, &bytes).await
+        };
+        written.await.map_err(other("saving a generated image"))?;
+        Ok(bytes.len() as u64)
     }
 }
 

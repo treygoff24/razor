@@ -2,7 +2,6 @@
 The pack stays immutable and its moving skill is published through a stable override link.
 """
 import json
-from pathlib import Path
 import subprocess
 import shutil
 import sys
@@ -141,9 +140,7 @@ sys.exit(result.returncode)
         assert (override / "link").read_text() == "../../decoy.txt"
         assert not (override.parent / "pinned").exists()
         # Later skill lookup sees the published folder, while a retained path follows replacements.
-        result = f.run("--print=json", "Read the moving skill.")
-        assert result.returncode == 0, result.stderr
-        session = json.loads(result.stdout)["session"]
+        session = f.ask("Read the moving skill.")["session"]
         loaded = next(entry for entry in f.record(session) if entry["kind"] == "result")
         assert "updated upstream" in loaded["output"] and str(override) in loaded["output"], loaded
         catalog = json.loads(send(f, "GET", "/sessions/clock/skills").read())
@@ -153,9 +150,7 @@ sys.exit(result.returncode)
         # Opting out is live: the next load restores the pack, and a restart launches no updater.
         enabled = config.read_text()
         config.write_text("skill_updates = false\n" + enabled)
-        result = f.run("--print=json", "Read the moving skill again.")
-        assert result.returncode == 0, result.stderr
-        loaded = next(entry for entry in f.record(json.loads(result.stdout)["session"]) if entry["kind"] == "result")
+        loaded = next(entry for entry in f.record(f.ask("Read the moving skill again.")["session"]) if entry["kind"] == "result")
         assert "bundled" in loaded["output"] and str(override) not in loaded["output"], loaded
     finally:
         running.terminate()

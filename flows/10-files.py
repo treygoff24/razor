@@ -17,9 +17,7 @@ items = [call(name, json.dumps(arguments), f"call_{n}") for n, (name, arguments)
 with flow([response(items), done()], model="gpt-6.1-sol", config=PLAIN) as f:
     (f.cwd / "notes.txt").write_text(notes)
     (f.cwd / "twice.txt").write_text(twice)
-    result = f.run("--print=json", "Page the notes, try both edits, write the new file.")
-    assert result.returncode == 0, result.stderr
-    answer = json.loads(result.stdout)
+    answer = f.ask("Page the notes, try both edits, write the new file.")
     assert answer["message"] == "flow done", answer
     entries = list(f.record(answer["session"]))
     outputs = [e for e in entries if e["kind"] == "result"]

@@ -90,7 +90,7 @@ On Linux with PulseAudio or PipeWire, replace `-f avfoundation -i none:default` 
 
 ### Spoken notes from agents
 
-An agent can send you a short spoken note when it finishes or gets stuck, using the same `speech` program. A note appears in your inbox with a ▶, and the terminal app you used last plays a new one by itself if its machine has a player (`play`; macOS has one by default). By default an agent may speak at any time, at most 3,000 characters a day. With `when` set to `away`, it speaks only while you are away, unless you asked for a voice note: you count as present for a minute after you type in a terminal app on a machine that can play audio, not over SSH, and on a Mac after any keyboard or mouse use.
+An agent can send you a spoken note when it finishes or gets stuck, using the same `speech` program. A note appears in your inbox with a ▶, and the terminal app you used last plays a new one by itself if its machine has a player (`play`; macOS has one by default). By default an agent may speak at any time, with no daily limit. With `when` set to `away`, it speaks only while you are away, unless you asked for a voice note: you count as present for a minute after you type in a terminal app on a machine that can play audio, not over SSH, and on a Mac after any keyboard or mouse use.
 
 These settings are kept by the server, not in a settings file:
 
@@ -101,13 +101,21 @@ These settings are kept by the server, not in a settings file:
 | `families` | `{}` | Different voices for different agents: Razor gives each agent one of the families the terminal app draws (the characters in its workshop scene) by its id, and this maps a family's name to a voice id; an unknown name is dropped. Empty: every agent uses `voice`. |
 | `gain_db` | `9.5` | How much louder to make the audio, in decibels (needs `ffmpeg`). |
 | `expressiveness` | `0.5` | From 0 (steady) to 1 (lively). |
-| `memos` | `false` | Allows notes of up to 1,000 characters instead of 300. |
 | `quiet` | `null` | A time range with no spoken notes, such as `{"from": "22:00", "to": "07:00"}`. |
-| `daily_characters` | `3000` | The most characters agents may speak in a day. |
+| `daily_characters` | none | The most characters agents may speak in a day; a voice note has no other length limit. Absent or `null`: no limit. |
 | `call_voice` | `""` | The voice of live voice calls from the separately distributed phone client. |
-| `call_daily_dollars` | `10` | The most those calls may spend in a day, in US dollars. |
+| `call_daily_dollars` | none | The most those calls may spend in a day, in US dollars. Absent or `null`: no limit. |
 
-Read and change them through the server's API, here with the `razor_api` shell function from [Using Razor from scripts](scripting.md#the-local-api). A change sets the fields it sends; the others keep their value. With paired servers, the settings live on the server that `[server] shared` names, and the others refuse a change:
+Change one with `razor config`, naming the field after `voice.`. A value is JSON, or text if it is not; `unset` puts the field back to its default, which for the two daily limits is no limit. Each command prints the field's value afterward:
+
+```sh
+razor config set voice.call_daily_dollars 5      # at most $5 of calls a day
+razor config unset voice.call_daily_dollars      # no limit again
+razor config set voice.quiet '{"from": "22:00", "to": "07:00"}'
+razor config get voice.daily_characters          # null: no limit
+```
+
+Or read and change them through the server's API, here with the `razor_api` shell function from [Using Razor from scripts](scripting.md#the-local-api). A change sets the fields it sends; the others keep their value, and `null` removes a daily limit. With paired servers, the settings live on the server that `[server] shared` names: the others read that server's settings, and refuse a change with that server's name, so you change them there:
 
 ```sh
 razor_api http://localhost/v1/voice                # the current settings

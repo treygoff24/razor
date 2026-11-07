@@ -2,15 +2,13 @@
 answers to its server's and project's name, not main."""
 import json
 from driver import flow
-from model import agent, message, reply
+from model import agent, message, reply, tool
 
 root, child = "FLOW_ROOT_15", "You are oak15,"
-replies = [reply(root, "mcp__razor__status", {}), reply(root, text="Named.")]
+replies = [tool(root, "status"), reply(root, text="Named.")]
 with flow(replies, config='[server]\nname = "desk"') as f:
     f.base()
-    first = f.run("--print=json", root)
-    assert first.returncode == 0, first.stderr
-    parent = json.loads(first.stdout)["session"]
+    parent = f.ask(root)["session"]
 
     def boards():
         entries = list(f.record(parent))
@@ -21,7 +19,7 @@ with flow(replies, config='[server]\nname = "desk"') as f:
     name = alone[0]["name"]
     assert len(alone) == 1 and name == f"desk-{f.cwd.name}", alone
     replies += [agent(root, "start", name="oak15", brief="Commit a marker and post to the tree."),
-                agent(root, "wait", children=["oak15"]), reply(root, "mcp__razor__status", {}),
+                agent(root, "wait", children=["oak15"]), tool(root, "status"),
                 agent(root, "wait", children=["oak15"]),
                 agent(root, "settle", child="oak15", decision="discard"), reply(root),
                 agent(child, "headline", text="Working on channel flow."),
@@ -29,8 +27,7 @@ with flow(replies, config='[server]\nname = "desk"') as f:
                 message(child, "note", to="channel", text="QUIET_POST_15"),
                 message(child, "note", to="channel", text=f"@{name} @{name} MENTION_POST_15"),
                 agent(child, "finish", status="finished", report="Channel work finished.")]
-    result = f.run("--resume", parent, "--print=json", "Start the lane.")
-    assert result.returncode == 0, result.stderr
+    f.ask("--resume", parent, "Start the lane.")
     entries = list(f.record(parent))
     inputs = [e for e in entries if e["kind"] == "input"]
     assert not any(e["text"] == "QUIET_POST_15" for e in inputs), inputs

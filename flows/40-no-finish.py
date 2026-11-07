@@ -229,7 +229,7 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
                 reply("HELD_LATER40", text="held-answer40")]
     parent = start(HELD)
     sid = child(parent, "held40")
-    server.wait(lambda: any(held in p.read_text() for p in f.requests.glob("*.body")))
+    server.wait(lambda: any(held in body for body in f.sent()))
     early = server.post(f, f"/sessions/{sid}/input", {"text": "HELD_EARLY40"})["entry"]
     while b'"kind":"turn_end"' not in (f.home / ".razor/sessions" / sid / "record.jsonl").read_bytes():
         pass

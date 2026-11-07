@@ -162,21 +162,14 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<vie
         Some(Panel::Login { lines, running, .. }) => {
             let rows = lines
                 .iter()
-                .flat_map(|s| wrap(vec![Span::raw(s.clone())], width))
-                .collect();
-            (
-                if *running {
-                    "login · waiting for sign-in"
-                } else {
-                    "login"
-                },
-                rows,
-            )
+                .flat_map(|s| wrap(vec![Span::raw(s.clone())], width));
+            let title = ["login", "login · waiting for sign-in"][usize::from(*running)];
+            (title, rows.collect())
         }
         Some(Panel::Mcp(_)) => return mcp::draw(app, b, r, now, hits),
         None => return,
     };
-    let words = frame(b, r, title);
+    let words = frame(b, r, title, BEZEL_HI);
     let body = Rect {
         height: words.height.saturating_sub(1),
         ..words
@@ -188,7 +181,7 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<vie
         (None, false) => String::new(),
     };
     let keys = format!("{search}<panel.up>/<panel.down> scroll · <panel.cancel> back");
-    let keys = super::bindings::text(app, &keys);
+    let keys = super::bindings::hints(app, &keys, " · ");
     put(
         b,
         words.x,
@@ -210,14 +203,9 @@ fn found(rows: Vec<Line<'static>>, search: Option<&str>, width: usize) -> Vec<Li
     rows.flat_map(|row| wrap(row.spans, width)).collect()
 }
 
-/// Fills `r` and draws its rule box with `title` in the top edge; returns the area inside for
-/// the words, two columns in from each side.
-pub fn frame(b: &mut Buffer, r: Rect, title: &str) -> Rect {
-    frame_colour(b, r, title, BEZEL_HI)
-}
-
-/// Draws the same panel with the requested border colour.
-pub fn frame_colour(b: &mut Buffer, r: Rect, title: &str, colour: ratatui::style::Color) -> Rect {
+/// Fills `r` and draws its rule box in `colour` with `title` in the top edge; returns the area
+/// inside for the words, two columns in from each side.
+pub fn frame(b: &mut Buffer, r: Rect, title: &str, colour: ratatui::style::Color) -> Rect {
     fill(b, r, style(DATA, GLASS));
     let (edge, rule) = (style(colour, GLASS), "─".repeat(r.width as usize - 2));
     put(b, r.x, r.y, &format!("┌{rule}┐"), r.width, edge);

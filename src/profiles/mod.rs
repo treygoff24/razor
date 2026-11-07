@@ -9,13 +9,17 @@ mod typescript;
 
 pub(crate) use conversation::{Conversation, IMAGE};
 pub(crate) use models::{
-    Model, Transport, id, limits, model, models, speed, speed_choice, validate, video,
+    LARGE, Model, Transport, id, limits, model, models, speed, speed_choice, validate, video,
 };
 pub(crate) use startup::{machine, opening, save};
 
-use crate::{config::Replay, protocol::SPILL, tools::Action};
+use crate::config::Replay;
+use crate::protocol::{Effort, SPILL, Speed};
+use crate::tools::Action;
 use serde_json::{Map, Value, json};
-use std::{fmt, sync::Arc};
+use std::collections::BTreeMap;
+use std::fmt;
+use std::sync::{Arc, LazyLock};
 
 const GPT: &str = include_str!("data/gpt.md");
 /// The part of the prompt about the record, on every route.
@@ -40,13 +44,18 @@ pub(crate) fn tokens(transport: Transport, bytes: u64) -> u64 {
 
 /// Fills MCP's versioned model-facing text without resolving credential references.
 pub(crate) fn mcp_text(key: &str, fields: &[(&str, &str)]) -> String {
-    static TEXT: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-    let data = TEXT
-        .get_or_init(|| serde_json::from_str(include_str!("data/mcp.json")).unwrap_or_default());
-    fields.iter().fold(
-        data[key].as_str().unwrap_or_default().to_owned(),
-        |text, (key, value)| text.replace(&format!("{{{key}}}"), value),
-    )
+    static TEXT: LazyLock<Value> =
+        LazyLock::new(|| shipped(include_str!("data/mcp.json")).unwrap_or_default());
+    fill(TEXT[key].as_str().unwrap_or_default(), fields)
+}
+
+/// `template` with each `{field}` replaced by its value, field by field in the order given.
+fn fill(template: &str, fields: &[(&str, impl AsRef<str>)]) -> String {
+    fields
+        .iter()
+        .fold(template.to_owned(), |text, (name, value)| {
+            text.replace(&format!("{{{name}}}"), value.as_ref())
+        })
 }
 
 /// Where one profile's requests go and what rides on each, as config resolved it.
@@ -61,8 +70,8 @@ pub(crate) struct Endpoint {
     /// The model id the request names: the provider's id, or Razor's name on a sign-in.
     pub(crate) id: String,
     /// The highest effort the model takes; a higher one is sent as this.
-    pub(crate) top: crate::protocol::Effort,
-    pub(crate) speed_ids: std::collections::BTreeMap<crate::protocol::Speed, String>,
+    pub(crate) top: Effort,
+    pub(crate) speed_ids: BTreeMap<Speed, String>,
     pub(crate) replay: Replay,
     /// Top-level fields added to every chat request: a host's switch for keeping history.
     pub(crate) request: Map<String, Value>,
@@ -230,6 +239,66 @@ fn builtins(variant: &Value, child: bool, mode: &str) -> Result<Vec<Value>, Erro
     Ok(builtins)
 }
 
+/// What `razor` gives after its editable part: on chat the variant's route text, else the
+/// family's own for the mode, and with `image_gen` on Claude or chat the line on making images
+/// with a GPT helper; then the record's part, naming the handover tool as the route calls it.
+fn route(transport: Transport, code_mode: bool, variant: &Value, image_gen: bool) -> String {
+    let (claude, chat) = (transport == Transport::Claude, transport == Transport::Chat);
+    let mut family = match (claude, code_mode) {
+        _ if chat => variant["route"]
+            .as_str()
+            .unwrap_or(include_str!("data/tools-generic.md"))
+            .into(),
+        (true, false) => include_str!("data/tools-claude.md").into(),
+        (true, true) => include_str!("data/claude-code.md").into(),
+        (false, true) => GPT.into(),
+        // Plain GPT has no exec, so Codex's lines about it go.
+        (false, false) => GPT
+            .lines()
+            .filter(|l| !l.contains("functions.exec"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    if image_gen && (claude || chat) {
+        family.push_str(concat!("\n\n", include_str!("data/image-helper.md")));
+    }
+    let handover = if claude && !code_mode {
+        "mcp__razor__handover"
+    } else {
+        "handover"
+    };
+    let record = RECORD.replace("{handover}", handover);
+    format!("{}\n\n{}", family.trim_end(), record.trim_end())
+}
+
+/// The profile's version after `aa854dab-razor-7`: the family (a provider's Claude or GPT with
+/// its host; on chat the variant's version, the host, id, replay and request fields, so a score
+/// certifies them) and the `mode`. Claude Code keeps the exec declaration it opened with, so
+/// there the web verbs nested in it name the version too, and turning one on or off rebuilds.
+fn version(endpoint: &Endpoint, mode: &str, variant: &Value, actions: &[Action]) -> String {
+    let claude = endpoint.transport == Transport::Claude;
+    let chat = endpoint.transport == Transport::Chat;
+    let family = match (claude, chat) {
+        _ if !chat && endpoint.key.is_some() => {
+            format!("{}-{}", if claude { "claude" } else { "gpt" }, endpoint.url)
+        }
+        (true, _) => "claude".to_owned(),
+        (_, true) => format!(
+            "generic-{}-{}-{}-{:?}-{}",
+            variant["version"].as_str().unwrap_or("plain"),
+            endpoint.url,
+            endpoint.id,
+            endpoint.replay,
+            Value::Object(endpoint.request.clone()),
+        ),
+        _ => "gpt".to_owned(),
+    };
+    let on = |verb: &str| u8::from(actions.iter().any(|a| a.name == verb));
+    let verbs = format!("-web-{}{}{}", on("search"), on("fetch"), on("answer"));
+    let web: &str = if claude && mode == "code" { &verbs } else { "" };
+    format!("aa854dab-razor-7-{family}-{mode}{web}")
+}
+
 /// Binds at most 256 actions: built-ins to the shipped declarations, scripted and MCP tools to
 /// the schema they supplied, beside the maker's own web tools. Code mode is refused on a
 /// provider's Responses route and on chat. On chat a variant (docs/design/generic.md), config's
@@ -263,64 +332,16 @@ pub(crate) fn load(
         _ => Value::Null,
     };
     let variant = variant.unwrap_or(&row);
-    let mut family = match (claude, code_mode) {
-        _ if chat => variant["route"]
-            .as_str()
-            .unwrap_or(include_str!("data/tools-generic.md"))
-            .into(),
-        (true, false) => include_str!("data/tools-claude.md").into(),
-        (true, true) => include_str!("data/claude-code.md").into(),
-        (false, true) => GPT.into(),
-        // Plain GPT has no exec, so Codex's lines about it go.
-        (false, false) => GPT
-            .lines()
-            .filter(|l| !l.contains("functions.exec"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    };
-    if image_gen && (claude || chat) {
-        family.push_str("\n\nTo make or edit an image, start a GPT helper with the agent tool using model `sol` and ask it to report the image file's path. You can view or deliver that file.");
-    }
-    let handover = if claude && !code_mode {
-        "mcp__razor__handover"
-    } else {
-        "handover"
-    };
-    let family_name = match (claude, chat) {
-        _ if !chat && keyed => {
-            format!("{}-{}", if claude { "claude" } else { "gpt" }, endpoint.url)
-        }
-        (true, _) => "claude".to_owned(),
-        // The host, id, replay and request fields, so a score certifies them.
-        (_, true) => format!(
-            "generic-{}-{}-{}-{:?}-{}",
-            variant["version"].as_str().unwrap_or("plain"),
-            endpoint.url,
-            endpoint.id,
-            endpoint.replay,
-            Value::Object(endpoint.request.clone()),
-        ),
-        _ => "gpt".to_owned(),
-    };
     let mode = if code_mode { "code" } else { "plain" };
-    // Claude Code keeps the exec declaration it opened with, so there the web verbs nested in
-    // it name the version, and turning one on or off rebuilds.
-    let on = |verb: &str| u8::from(actions.iter().any(|a| a.name == verb));
-    let verbs = format!("-web-{}{}{}", on("search"), on("fetch"), on("answer"));
-    let web: &str = if claude && code_mode { &verbs } else { "" };
     let mut profile = Profile {
-        version: format!("aa854dab-razor-7-{family_name}-{mode}{web}"),
+        version: version(&endpoint, mode, variant, &actions),
         prompt: String::new(),
         tools: Vec::new(),
         nested: Vec::new(),
         code_mode,
+        route: route(transport, code_mode, variant, image_gen),
         endpoint,
         wording: shipped(include_str!("data/results.json"))?,
-        route: format!(
-            "{}\n\n{}",
-            family.trim_end(),
-            RECORD.replace("{handover}", handover).trim_end()
-        ),
         renames: Vec::new(),
     };
     let builtins = builtins(variant, child, mode)?;
@@ -328,45 +349,7 @@ pub(crate) fn load(
         profile.tools = claude::tools(&actions, &builtins)?;
         return Ok(profile);
     }
-    for action in actions.iter() {
-        let builtin = builtins.iter().find(|b| shared(b, &action.name, mode));
-        if builtin.is_some_and(|b| b["omit"] == true) {
-            continue;
-        }
-        // On chat the web verbs say nothing of a native web tool: this route has none.
-        let wording = if chat { "generic" } else { "description" };
-        let text = |field: &str| builtin.and_then(|b| b[field].as_str()).unwrap_or_default();
-        let (name, description, schema) = match (&action.schema, builtin) {
-            (Some(own), _) => (&*action.name, &*own.description, &own.input),
-            (None, Some(b)) => (
-                text("name"),
-                b[wording].as_str().unwrap_or(text("description")),
-                &b["schema"],
-            ),
-            (None, None) => continue,
-        };
-        if chat && (name != action.name || builtin.is_some_and(|b| b["keys"].is_object())) {
-            let keys = builtin.and_then(|b| b["keys"].as_object()).cloned();
-            let entry = (
-                name.into(),
-                action.name.to_string(),
-                keys.unwrap_or_default(),
-            );
-            profile.renames.push(entry);
-        }
-        if code_mode {
-            let (name, description) = (name.into(), description.into());
-            profile.nested.push(Declaration {
-                name,
-                description,
-                input: typescript::render(schema),
-            });
-        } else {
-            profile
-                .tools
-                .push(profile.declare(name, description, schema.clone()));
-        }
-    }
+    profile.bind(&actions, &builtins, mode);
     if chat {
         return Ok(profile);
     }
@@ -384,6 +367,51 @@ pub(crate) fn load(
 }
 
 impl Profile {
+    /// Declares each of `actions` that `mode` shows: by its own schema, else by its shipped
+    /// declaration among `builtins`, nested in code mode and direct otherwise. On chat a name or
+    /// keys a declaration renames are kept, to map the model's calls back.
+    fn bind(&mut self, actions: &[Action], builtins: &[Value], mode: &str) {
+        let chat = self.endpoint.transport == Transport::Chat;
+        for action in actions {
+            let builtin = builtins.iter().find(|b| shared(b, &action.name, mode));
+            if builtin.is_some_and(|b| b["omit"] == true) {
+                continue;
+            }
+            // On chat the web verbs say nothing of a native web tool: this route has none.
+            let wording = if chat { "generic" } else { "description" };
+            let text = |field: &str| builtin.and_then(|b| b[field].as_str()).unwrap_or_default();
+            let (name, description, schema) = match (&action.schema, builtin) {
+                (Some(own), _) => (&*action.name, &*own.description, &own.input),
+                (None, Some(b)) => (
+                    text("name"),
+                    b[wording].as_str().unwrap_or(text("description")),
+                    &b["schema"],
+                ),
+                (None, None) => continue,
+            };
+            if chat && (name != action.name || builtin.is_some_and(|b| b["keys"].is_object())) {
+                let keys = builtin.and_then(|b| b["keys"].as_object()).cloned();
+                let entry = (
+                    name.into(),
+                    action.name.to_string(),
+                    keys.unwrap_or_default(),
+                );
+                self.renames.push(entry);
+            }
+            if self.code_mode {
+                let (name, description) = (name.into(), description.into());
+                self.nested.push(Declaration {
+                    name,
+                    description,
+                    input: typescript::render(schema),
+                });
+            } else {
+                let declared = self.declare(name, description, schema.clone());
+                self.tools.push(declared);
+            }
+        }
+    }
+
     /// A direct declaration in the transport's own shape.
     fn declare(&self, name: &str, description: &str, schema: Value) -> Value {
         match self.endpoint.transport {
@@ -408,8 +436,6 @@ impl Profile {
             description += &nested.section();
         }
         if !claude {
-            // Codex's own image generation and search for Lite, run on the sign-in, each under its
-            // namespace's heading.
             let namespaced = [
                 (
                     "image_gen__imagegen",
@@ -455,7 +481,6 @@ impl Profile {
         );
         self.tools.splice(0..0, [exec, wait]);
         if claude {
-            // Claude Code's own web tools, on the subscription.
             self.tools.extend([
                 json!({"builtin": "WebSearch"}),
                 json!({"builtin": "WebFetch"}),
@@ -467,10 +492,7 @@ impl Profile {
     /// Normalizes one call to its action and input without running it. A malformed call is
     /// that call's own error; exec's input is its raw source.
     pub(crate) fn input(&self, name: &str, input: Value) -> Result<(String, Value), Error> {
-        let name = (name
-            .strip_prefix("functions.")
-            .or_else(|| name.strip_prefix("mcp__razor__")))
-        .unwrap_or(name);
+        let name = crate::record::action(name);
         if self.code_mode && name == "exec" {
             let source = input.as_str().or_else(|| input["code"].as_str());
             let source =
@@ -489,12 +511,8 @@ impl Profile {
         {
             return mapped;
         }
-        if !self
-            .tools
-            .iter()
-            .any(|t| t["name"] == name || t["function"]["name"] == name)
-            && !self.nested.iter().any(|d| d.name == name)
-        {
+        let declared = |t: &Value| t["name"] == name || t["function"]["name"] == name;
+        if !self.tools.iter().any(declared) && !self.nested.iter().any(|d| d.name == name) {
             return Err(Error::Invalid(format!("No tool named {name} is available")));
         }
         let Value::Object(mut fields) = value else {
@@ -634,10 +652,10 @@ impl Profile {
         json!({"path": path, "images": images, "output_hint": hint})
     }
 
-    /// A job's end notice, delivered as input, from its call's input and
-    /// the controller's `ended` event, `path` and `call_id`; when the person's stop ended the job,
-    /// `stopped_ms` after its call, it says so, with the job's last lines.
-    pub(crate) fn notice(&self, _name: &str, input: &Value, output: Value) -> String {
+    /// A job's end notice, delivered as input, from its call's input and the controller's `ended`
+    /// event, `path` and `call_id`; when the person's stop ended the job, `stopped_ms` after its
+    /// call, it says so, with the job's last lines.
+    pub(crate) fn notice(&self, input: &Value, output: Value) -> String {
         let escape = |s: &str| {
             s.replace('&', "&amp;")
                 .replace('<', "&lt;")
@@ -691,12 +709,9 @@ impl Profile {
         }
     }
 
-    /// Fills one shipped wording template, field by field in the order given.
+    /// Fills one shipped wording template.
     fn say(&self, key: &str, fields: &[(&str, &str)]) -> String {
-        let template = self.wording[key].as_str().unwrap_or_default().to_owned();
-        fields.iter().fold(template, |text, (field, value)| {
-            text.replace(&format!("{{{field}}}"), value)
-        })
+        fill(self.wording[key].as_str().unwrap_or_default(), fields)
     }
 }
 

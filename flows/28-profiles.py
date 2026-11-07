@@ -38,9 +38,7 @@ replies = [first_reply, search, cell("call_look", look), made(MADE), cell("call_
 with flow(replies, model="gpt-6.1-sol", config='startup = ["razor", "project"]\n[profiles.codex]\nimage_gen = true') as f:
     (f.cwd / "shot.png").write_bytes(SHOT)
     (f.cwd / "big.png").write_bytes(SHOT[:8] + bytes(7_500_000))
-    result = f.run("--print=json", "--speed", "fast", "Run the cell and continue.")
-    assert result.returncode == 0, result.stderr
-    answer = json.loads(result.stdout)
+    answer = f.ask("--speed", "fast", "Run the cell and continue.")
     assert answer["message"] == "flow done", answer
     entries = list(f.record(answer["session"]))
     assert [e["text"] for e in entries if e["kind"] == "thinking"] == ["SUMMARY_A"], "summary missing or duplicated"
@@ -58,14 +56,14 @@ with flow(replies, model="gpt-6.1-sol", config='startup = ["razor", "project"]\n
     assert "Script completed" in outputs[1]["output"] and "flow exec 🪶" in outputs[1]["output"], outputs
     assert "flow search found" in outputs[1]["output"], outputs
     meta = json.loads((f.requests / "002.json").read_text())
-    asked = json.loads((f.requests / "002.body").read_bytes())
+    asked = f.request(2)
     assert meta["path"] == "/alpha/search" and meta["headers"]["chatgpt-account-id"] == "flow-account", meta
     assert asked["commands"] == {"search_query": [{"q": "flow kingfisher"}]} and asked["model"] == "gpt-6.1-sol", asked
     assert asked["settings"] == {"allowed_callers": ["direct"], "external_web_access": False}, asked
     assert asked["id"] == answer["session"] and "Run the cell and continue." in json.dumps(asked["input"]), asked
     assert responses[0]["usage"]["input"] == 40 and responses[0]["usage"]["cache_read"] == 60, responses[0]
-    first = json.loads((f.requests / "001.body").read_bytes())
-    second = json.loads((f.requests / "003.body").read_bytes())
+    first = f.request(1)
+    second = f.request(3)
     assert first["service_tier"] == "priority", first
     assert first["store"] is False and first["parallel_tool_calls"] is False, first
     assert "reasoning.encrypted_content" in first["include"], first
@@ -98,7 +96,7 @@ with flow(replies, model="gpt-6.1-sol", config='startup = ["razor", "project"]\n
     results = {e["call"]: e for e in entries if e["kind"] == "result"}
     assert results["call_look:2"]["outcome"] == "error" and "over 7.5 MB" in results["call_look:2"]["output"], results
     assert results["call_look:3"]["outcome"] == "error" and "does not fit" in results["call_look:3"]["output"], results
-    after = json.loads((f.requests / "005.body").read_bytes())["input"]
+    after = f.request(5)["input"]
     output = next(i for i in after if i["type"] == "custom_tool_call_output" and i["call_id"] == "call_look")
     shown = after[-1]["content"]
     assert after.index(output) < len(after) - 1 and [c["type"] for c in shown] == ["input_text", "input_image"] * 2, shown
@@ -106,7 +104,7 @@ with flow(replies, model="gpt-6.1-sol", config='startup = ["razor", "project"]\n
     # The generation is Codex's request on the sign-in; the PNG is saved under the call's entry,
     # and the record keeps its path, which generatedImage() writes for the model.
     entry = next(e["id"] for e in entries if e["kind"] == "call" and e["call"] == "call_look:4")
-    meta, body = json.loads((f.requests / "004.json").read_text()), json.loads((f.requests / "004.body").read_bytes())
+    meta, body = json.loads((f.requests / "004.json").read_text()), f.request(4)
     assert meta["path"] == "/images/generations", meta
     assert body == {"prompt": "a fox", "background": "opaque", "model": "gpt-image-2", "quality": "auto", "size": "auto"}, body
     headers = meta["headers"]
@@ -118,19 +116,18 @@ with flow(replies, model="gpt-6.1-sol", config='startup = ["razor", "project"]\n
     kept = json.dumps([e for e in entries if e["kind"] in ("call", "result")])
     assert base64.b64encode(MADE).decode() not in kept, "the record holds the generated image's bytes"
     # An edit of the latest image sends the image the model last saw.
-    meta, body = json.loads((f.requests / "006.json").read_text()), json.loads((f.requests / "006.body").read_bytes())
+    meta, body = json.loads((f.requests / "006.json").read_text()), f.request(6)
     assert meta["path"] == "/images/edits" and body["images"] == [{"image_url": url(MADE)}], (meta, body)
 
     # Turn-end video cleanup must preserve native items, in memory and after a clean restart.
-    expected = json.loads((f.requests / "007.body").read_bytes())["input"] + responses[-1]["native"]["responses"]["items"]
+    expected = f.request(7)["input"] + responses[-1]["native"]["responses"]["items"]
     for index in (8, 9):
         if index == 9:
             pid = server.start(f)
             os.kill(pid, signal.SIGTERM)
             server.gone(pid)
-        resumed = f.run("--print=json", "--resume", answer["session"], "Continue the conversation.")
-        assert resumed.returncode == 0, resumed.stderr
-        replayed = json.loads((f.requests / f"{index:03}.body").read_bytes())["input"]
+        f.ask("--resume", answer["session"], "Continue the conversation.")
+        replayed = f.request(index)["input"]
         assert replayed[:len(expected)] == expected, "native items changed across turns"
     assert not any(e["kind"] == "rebuild" for e in f.record(answer["session"])), "native resume rebuilt instead"
 
@@ -146,19 +143,19 @@ with flow([done()], model="openai/gpt-6.1-sol") as f:
     result = f.run("--print=json", "Reply on the API key.")
     assert (f.requests / "001.json").exists(), (result.stdout, result.stderr)
     meta = json.loads((f.requests / "001.json").read_text())
-    assert "service_tier" not in json.loads((f.requests / "001.body").read_bytes())
+    assert "service_tier" not in f.request(1)
     assert meta["path"] == "http://api.openai.com/v1/responses", meta
     assert meta["headers"]["authorization"] == "Bearer flow-public-key", meta
     assert "chatgpt-account-id" not in meta["headers"], meta
     assert result.returncode == 0 and json.loads(result.stdout)["message"] == "flow done", result
-    body = json.loads((f.requests / "001.body").read_bytes())
+    body = f.request(1)
     assert body["reasoning"].get("summary") == "auto", body["reasoning"]
     names = {t["name"] for t in body["tools"] if t["type"] == "function"}
     assert {"read", "write", "edit", "bash"} <= names and "exec" not in names, names
     config.write_text(config.read_text() + "\n[profiles.codex]\ncode_mode = true\n")
     refused = f.run("--print", "Explicit code mode.")
     assert refused.returncode != 0 and "API-key and chat routes support plain tools only" in refused.stderr, refused
-    assert len(list(f.requests.glob("[0-9]*.body"))) == 1, "refused code mode contacted the host"
+    assert len(f.sent()) == 1, "refused code mode contacted the host"
 
 # Common model limits do not make native routes accept chat connection fields, and a row's old
 # connection fields name where they moved, in the detached server's log too, beside a leftover key

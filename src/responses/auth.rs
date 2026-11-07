@@ -1,7 +1,9 @@
 //! Razor's own ChatGPT sign-in: `$RAZOR_HOME/auth.json`.
 
 use super::{Error, Responses, bounded, other};
+use crate::protocol::SessionId;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
@@ -65,14 +67,36 @@ impl Responses {
         Ok(auth.tokens)
     }
 
+    /// Sends `request` on the sign-in, with its bearer, `session_id` and account id, refreshing the
+    /// sign-in once on 401; returns the answer and the bearer it went with.
+    pub(super) async fn signed(
+        &self,
+        session: &SessionId,
+        request: impl Fn() -> reqwest::RequestBuilder,
+        doing: &'static str,
+    ) -> Result<(reqwest::Response, String), Error> {
+        let (mut tokens, mut refreshed) = (self.credentials(None).await?, false);
+        loop {
+            let mut post = (request().bearer_auth(&tokens.access_token))
+                .header("session_id", session.as_str());
+            if !tokens.account_id.is_empty() {
+                post = post.header("chatgpt-account-id", &tokens.account_id);
+            }
+            let response = post.send().await.map_err(other(doing))?;
+            if response.status() != StatusCode::UNAUTHORIZED || refreshed {
+                return Ok((response, tokens.access_token));
+            }
+            tokens = self.credentials(Some(&tokens.access_token)).await?;
+            refreshed = true;
+        }
+    }
+
     /// Writes a unique 0600 sibling, syncs it, then renames it over `auth.json`.
     async fn save(&self, auth: &Auth) -> Result<(), Error> {
         fs::create_dir_all(&self.home)
             .await
             .map_err(other("making Razor's sign-in directory"))?;
-        let path = self
-            .home
-            .join(format!("auth-{}.tmp", crate::protocol::SessionId::new()));
+        let path = self.home.join(format!("auth-{}.tmp", SessionId::new()));
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]

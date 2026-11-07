@@ -118,6 +118,7 @@ key = {json.dumps(str(apns.key))}
         mine = lambda row: {k: row.get(k) for k in expected}
         assert agents["kind"] == "agents" and mine(agents["server"]) == expected, agents
         assert [mine(r) for r in agents["servers"]] == [expected], agents
+        assert agents["server"].get("follow") is True, agents  # the events route below honours follow=true
 
         # 2. Only an enrolled device registers; a token for an environment with no key is kept
         # with a sentence. A question sends one alert, with no words of the question.

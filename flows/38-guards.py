@@ -21,9 +21,7 @@ with flow([response(items), done()], model="gpt-6.1-sol",
     for name in ("pkill", "killall", "kill"):
         (f.cwd / name).write_text("#!/bin/sh\nexit 0\n")
         (f.cwd / name).chmod(0o755)
-    result = f.run("--print=json", "Check guards and the job environment.")
-    assert result.returncode == 0, result.stderr
-    entries = list(f.record(json.loads(result.stdout)["session"]))
+    entries = list(f.record(f.ask("Check guards and the job environment.")["session"]))
     outputs = [e for e in entries if e["kind"] == "result"]
     assert len(outputs) == len(items), outputs
     for n, entry in enumerate(outputs[:3]):
@@ -57,9 +55,7 @@ for stop, bare in (("pkill -9 -f '^sleep 60[01]$'", True), ("env pkill -TERM -x 
     with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
         outside = subprocess.Popen(["sleep", "600"])
         try:
-            result = f.run("--print=json", "Stop my matching jobs.")
-            assert result.returncode == 0, result.stderr
-            entries = list(f.record(json.loads(result.stdout)["session"]))
+            entries = list(f.record(f.ask("Stop my matching jobs.")["session"]))
             signal_only = next(e for e in entries if e["kind"] == "result" and e["call"] == "signal_only")
             assert signal_only["outcome"] == "error", signal_only
             stopped = next(e for e in entries if e["kind"] == "result" and e["call"] == "stop_owned")

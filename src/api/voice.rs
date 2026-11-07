@@ -9,6 +9,11 @@ struct Kept {
     settings: VoiceSettings,
     #[serde(default)]
     day: String,
+    /// 1 once a save has written it. Before then every save wrote the old defaults of 3,000
+    /// characters and $10, so each load of a file without it treats exactly those as unset (no
+    /// limit); the next save writes 1, and a value saved after that stays as set.
+    #[serde(default)]
+    v: u8,
 }
 /// No spoken text crosses to the owner, only its reserved character count; or a live call's
 /// `seconds`, charged at $0.05 a minute and never refused.
@@ -34,10 +39,15 @@ pub(super) fn owns(app: &App, owner: &str) -> bool {
     owner.is_empty() || owner == &*app.id
 }
 async fn owner(app: &App) -> Result<(), Refusal> {
-    if owns(app, &app.controller.config().await.server.shared) {
+    let id = app.controller.config().await.server.shared;
+    if owns(app, &id) {
         return Ok(());
     }
-    Err(bad("Use the voice settings owner shown in status."))
+    let found = app.peers.owner(app, &id).await;
+    let name = found.map_or(id, |(owner, _)| owner.name);
+    Err(bad(format!(
+        "The voice settings are kept on {name}, the paired server [server] shared names; change them there."
+    )))
 }
 /// The one read/change/write operation, serialized through rename and fsync by the owner.
 async fn change(app: &App, change: Option<Change>) -> Result<Granted, Refusal> {
@@ -64,103 +74,112 @@ async fn change(app: &App, change: Option<Change>) -> Result<Granted, Refusal> {
         kept.settings.used_today = 0;
         kept.settings.call_used_today = 0.0;
     }
-    let (s, mut sound, mut terminal) = (&mut kept.settings, Sound::Phone, None);
-    match change {
-        Some(Change::Settings(fields)) => {
-            let mut merged = serde_json::to_value(&*s).map_err(other("Reading voice settings"))?;
-            fields.into_iter().for_each(|(k, v)| merged[k] = v);
-            let mut new: VoiceSettings = serde_json::from_value(merged)
-                .map_err(|e| bad(format!("Invalid voice settings: {e}; send each field in the form GET /v1/voice returns.")))?;
-            let short = |s: &mut String, n| *s = s.chars().take(n).collect();
-            short(&mut new.voice, 128);
-            short(&mut new.call_voice, 128);
-            new.families.retain(|family, voice| {
-                short(voice, 128);
-                crate::protocol::FAMILIES.contains(&family.as_str())
-            });
-            let time = |s: &str| {
-                s.len() == 5 && s.as_bytes()[2] == b':' && s.parse::<jiff::civil::Time>().is_ok()
-            };
-            if new
-                .quiet
-                .as_ref()
-                .is_some_and(|q| !time(&q.from) || !time(&q.to))
-            {
-                return Err(bad("Quiet hours must use HH:MM, from 00:00 through 23:59."));
-            }
-            (new.used_today, new.call_used_today) = (s.used_today, s.call_used_today);
-            *s = new;
-        }
-        Some(Change::Reserve(r)) if r.seconds > 0.0 => s.call_used_today += r.seconds / 1200.0,
-        Some(Change::Reserve(r)) => {
-            terminal = app
-                .activity
-                .lock()
-                .await
-                .iter()
-                .filter(|(_, at)| at.elapsed() < Duration::from_secs(60))
-                .max_by_key(|(_, at)| **at)
-                .map(|(id, _)| id.clone());
-            let why = if s.when == VoiceWhen::Never {
-                Some("Voice notes are off; write instead.")
-            } else if s.when == VoiceWhen::Away && terminal.is_some() && !r.requested {
-                Some(
-                    "The person is at their computer; write instead, unless they asked for a voice note.",
-                )
-            } else if r.characters == 0 || r.characters > if s.memos { 1000 } else { 300 } {
-                Some("This voice note is too long or empty; write instead, or shorten it.")
-            } else if r.characters > s.daily_characters.saturating_sub(s.used_today) {
-                Some("The daily voice character limit is reached; write instead.")
-            } else {
-                None
-            };
-            if let Some(why) = why {
-                return Err(bad(why));
-            }
-            let time = jiff::Zoned::now().strftime("%H:%M").to_string();
-            let quiet = s
-                .quiet
-                .as_ref()
-                .filter(|q| q.from != q.to)
-                .is_some_and(|q| {
-                    if q.from < q.to {
-                        time >= q.from && time < q.to
-                    } else {
-                        time >= q.from || time < q.to
-                    }
-                });
-            sound = match (quiet, terminal.is_some()) {
-                (true, _) => Sound::Silent,
-                (_, true) => Sound::Terminal,
-                _ => Sound::Phone,
-            };
-            if sound != Sound::Terminal {
-                terminal = None;
-            }
-            s.used_today += r.characters;
-        }
-        None => {
-            return Ok(Granted {
-                settings: kept.settings,
-                sound,
-                terminal,
-            });
-        }
+    if std::mem::replace(&mut kept.v, 1) == 0 {
+        let s = &mut kept.settings;
+        s.daily_characters = s.daily_characters.filter(|n| *n != 3000);
+        s.call_daily_dollars = s.call_daily_dollars.filter(|d| *d != 10.0);
     }
-    s.gain_db = s.gain_db.clamp(-20.0, 20.0);
-    s.expressiveness = s.expressiveness.clamp(0.0, 1.0);
-    let bytes = serde_json::to_vec(&kept).map_err(other("Writing voice.json"))?;
-    super::save(&app.home, "voice.json", &bytes)
-        .await
-        .map_err(other("Saving voice settings"))?;
+    let (s, changed) = (&mut kept.settings, change.is_some());
+    let (sound, terminal) = match change {
+        None => (Sound::Phone, None),
+        Some(Change::Settings(fields)) => {
+            *s = set(s, fields)?;
+            (Sound::Phone, None)
+        }
+        Some(Change::Reserve(r)) if r.seconds > 0.0 => {
+            s.call_used_today += r.seconds / 1200.0;
+            (Sound::Phone, None)
+        }
+        Some(Change::Reserve(r)) => voice_note(app, s, &r).await?,
+    };
+    if changed {
+        s.gain_db = s.gain_db.clamp(-20.0, 20.0);
+        s.expressiveness = s.expressiveness.clamp(0.0, 1.0);
+        let bytes = serde_json::to_vec(&kept).map_err(other("Writing voice.json"))?;
+        let saved = super::save(&app.home, "voice.json", &bytes).await;
+        saved.map_err(other("Saving voice settings"))?;
+    }
+    let settings = kept.settings;
     Ok(Granted {
-        settings: kept.settings,
+        settings,
         sound,
         terminal,
     })
 }
+/// `s` with `fields` changed, each in the form GET /v1/voice returns; the day's counts stay.
+fn set(
+    s: &VoiceSettings,
+    fields: serde_json::Map<String, Value>,
+) -> Result<VoiceSettings, Refusal> {
+    let mut merged = serde_json::to_value(s).map_err(other("Reading voice settings"))?;
+    fields.into_iter().for_each(|(k, v)| merged[k] = v);
+    let mut new: VoiceSettings = serde_json::from_value(merged).map_err(|e| {
+        bad(format!(
+            "Invalid voice settings: {e}; send each field in the form GET /v1/voice returns."
+        ))
+    })?;
+    let short = |s: &mut String, n| *s = s.chars().take(n).collect();
+    short(&mut new.voice, 128);
+    short(&mut new.call_voice, 128);
+    new.families.retain(|family, voice| {
+        short(voice, 128);
+        crate::protocol::FAMILIES.contains(&family.as_str())
+    });
+    let time =
+        |s: &str| s.len() == 5 && s.as_bytes()[2] == b':' && s.parse::<jiff::civil::Time>().is_ok();
+    if (new.quiet.as_ref()).is_some_and(|q| !time(&q.from) || !time(&q.to)) {
+        return Err(bad("Quiet hours must use HH:MM, from 00:00 through 23:59."));
+    }
+    (new.used_today, new.call_used_today) = (s.used_today, s.call_used_today);
+    Ok(new)
+}
+
+/// A voice note's `r.characters`, counted toward the day once it may be made: how it sounds,
+/// silent in quiet hours, else on the terminal the person used in the last minute, else on the
+/// phone; and that terminal. Or why it may not be made.
+async fn voice_note(
+    app: &App,
+    s: &mut VoiceSettings,
+    r: &Reserve,
+) -> Result<(Sound, Option<String>), Refusal> {
+    let terminal = (app.activity.lock().await.iter())
+        .filter(|(_, at)| at.elapsed() < Duration::from_secs(60))
+        .max_by_key(|(_, at)| **at)
+        .map(|(id, _)| id.clone());
+    let left = (s.daily_characters).map_or(u32::MAX, |d| d.saturating_sub(s.used_today));
+    let why = if s.when == VoiceWhen::Never {
+        Some("Voice notes are off; write instead.")
+    } else if s.when == VoiceWhen::Away && terminal.is_some() && !r.requested {
+        Some("The person is at their computer; write instead, unless they asked for a voice note.")
+    } else if r.characters == 0 {
+        Some("This voice note is empty; write instead.")
+    } else if r.characters > left {
+        Some("The daily voice character limit is reached; write instead.")
+    } else {
+        None
+    };
+    if let Some(why) = why {
+        return Err(bad(why));
+    }
+    let time = jiff::Zoned::now().strftime("%H:%M").to_string();
+    let quiet = (s.quiet.as_ref().filter(|q| q.from != q.to)).is_some_and(|q| {
+        if q.from < q.to {
+            time >= q.from && time < q.to
+        } else {
+            time >= q.from || time < q.to
+        }
+    });
+    s.used_today += r.characters;
+    Ok(match (quiet, terminal) {
+        (true, _) => (Sound::Silent, None),
+        (_, Some(terminal)) => (Sound::Terminal, Some(terminal)),
+        _ => (Sound::Phone, None),
+    })
+}
+
+/// The settings, read through the owner on a server that names another.
 pub(super) async fn get(State(app): State<App>) -> Reply<VoiceSettings> {
-    Ok(Json(change(&app, None).await?.settings))
+    Ok(Json(ask(&app, None).await?.settings))
 }
 pub(super) async fn put(
     State(app): State<App>,

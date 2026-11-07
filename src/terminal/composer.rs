@@ -10,7 +10,7 @@ use ratatui::{
     text::{Line, Span},
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, Ref, RefCell},
     collections::VecDeque,
     ops::Range,
 };
@@ -45,7 +45,7 @@ pub struct Composer {
     anchor: Option<usize>,
     // The column Up and Down keep to across short rows.
     goal: Option<usize>,
-    window: RefCell<Option<Window>>,
+    window: RefCell<Window>,
     // The words' wrapped rows and the width they were counted at, until the words change.
     wrapped: Cell<Option<(usize, usize)>>,
     columns: Cell<usize>,
@@ -57,16 +57,18 @@ pub struct Composer {
     pub chosen: Option<usize>,
 }
 
-// The visible rows around the cursor, kept until the cursor, width, height, selection or the
-// skills list (by its allocation and length) changes.
-#[derive(Clone, Default)]
+// The visible rows around the cursor, kept until the words, cursor, width, height, selection or
+// the skills list (by its allocation and length) changes; none kept while `key` is none.
+#[derive(Default)]
 struct Window {
-    key: (usize, usize, usize, Option<usize>, (usize, usize)),
+    key: Option<WindowKey>,
     rows: VecDeque<Line<'static>>,
     row: usize,
     column: usize,
     first: usize,
 }
+
+type WindowKey = (usize, usize, usize, Option<usize>, (usize, usize));
 
 fn flags(k: KeyEvent) -> (bool, bool, bool, bool) {
     let alt = k.modifiers.intersects(Mods::ALT | Mods::META);
@@ -77,7 +79,7 @@ fn flags(k: KeyEvent) -> (bool, bool, bool, bool) {
 impl Composer {
     /// Replaces the words, with the cursor at their end.
     pub fn replace(&mut self, text: String) {
-        (*self.window.get_mut(), *self.wrapped.get_mut()) = (None, None);
+        (*self.window.get_mut(), *self.wrapped.get_mut()) = Default::default();
         (self.goal, self.anchor, self.cursor, self.text) = (None, None, text.len(), text);
     }
 
@@ -102,7 +104,7 @@ impl Composer {
     }
 
     fn save(&mut self) {
-        (*self.window.get_mut(), *self.wrapped.get_mut()) = (None, None);
+        (*self.window.get_mut(), *self.wrapped.get_mut()) = Default::default();
         self.goal = None;
         self.undo_bytes -= self
             .redo
@@ -130,7 +132,7 @@ impl Composer {
             self.anchor,
         ));
         (self.cursor, self.anchor, self.goal) = (cursor, anchor, None);
-        (*self.window.get_mut(), *self.wrapped.get_mut()) = (None, None);
+        (*self.window.get_mut(), *self.wrapped.get_mut()) = Default::default();
         self.bound_undo();
     }
 
@@ -138,11 +140,17 @@ impl Composer {
     /// false, changing nothing, past the 1 MiB cap.
     fn insert(&mut self, s: &str) -> bool {
         // The raw bytes are checked before any cleaned copy is made.
-        let selected = self.selection();
-        if self.text.len() - selected.as_ref().map_or(0, Range::len) + s.len() > DRAFT_BYTES {
-            return false;
+        let selected = self.selection().map_or(0, |range| range.len());
+        let fits = self.text.len() - selected + s.len() <= DRAFT_BYTES;
+        if fits {
+            self.put(s);
         }
+        fits
+    }
+
+    fn put(&mut self, s: &str) {
         let s = screen_safe(s).replace("\r\n", "\n").replace('\r', "\n");
+        let selected = self.selection();
         self.save();
         if let Some(range) = selected {
             self.cursor = range.start;
@@ -151,7 +159,6 @@ impl Composer {
         self.anchor = None;
         self.text.insert_str(self.cursor, &s);
         self.cursor += s.len();
-        true
     }
 
     /// The cursor's byte offset in the words.
@@ -169,6 +176,30 @@ impl Composer {
     pub fn append(&mut self, s: &str) -> bool {
         (self.cursor, self.anchor) = (self.text.len(), None);
         self.insert(s)
+    }
+
+    /// Puts `earlier`'s words a line ahead of these, one undo step: the composer holding images
+    /// keeps them, these when both do, and the cursor stays on its words; true when `earlier`'s
+    /// images were dropped. Never refused: two pieces that each fit may hold up to 2 MiB
+    /// together, taking no more words until shortened.
+    pub fn join(&mut self, mut earlier: Composer) -> bool {
+        if self.images.is_empty() && (!earlier.images.is_empty() || self.text.is_empty()) {
+            std::mem::swap(self, &mut earlier);
+            if !earlier.text.is_empty() {
+                (self.cursor, self.anchor) = (self.text.len(), None);
+                self.put(&format!("\n{}", earlier.text));
+            }
+            return false;
+        }
+        if earlier.text.is_empty() {
+            return false;
+        }
+        let (cursor, anchor) = (self.cursor, self.anchor);
+        (self.cursor, self.anchor) = (0, None);
+        self.put(&format!("{}\n", earlier.text));
+        let n = self.cursor;
+        (self.cursor, self.anchor) = (cursor + n, anchor.map(|at| at + n));
+        earlier.active_images().next().is_some()
     }
 
     fn previous(&self) -> usize {
@@ -351,7 +382,8 @@ impl Composer {
         match self.wrapped.get() {
             Some((at, rows)) if at == columns => rows,
             _ => {
-                let rows = (self.height(columns, usize::MAX)).max(self.text.split('\n').count());
+                let rows = Self::height(&self.text, columns, usize::MAX)
+                    .max(self.text.split('\n').count());
                 self.wrapped.set(Some((columns, rows)));
                 rows
             }
@@ -359,9 +391,9 @@ impl Composer {
     }
 
     // Wrapped rows of the words, counted up to `cap`.
-    fn height(&self, columns: usize, cap: usize) -> usize {
+    fn height(text: &str, columns: usize, cap: usize) -> usize {
         let mut count = 0;
-        visit_wrap(&[Span::raw(&self.text)], columns, |_, _, _| {
+        visit_wrap(&[Span::raw(text)], columns, |_, _, _| {
             count += 1;
             count < cap
         });
@@ -370,22 +402,15 @@ impl Composer {
 
     // Give the proposal and its key/cost hint room on narrow terminals too.
     fn content_height(&self, app: &App, columns: usize, cap: usize) -> usize {
-        if app.suggestion().is_none() {
-            return self.height(columns, cap);
-        }
-        let mut count = 0;
-        visit_wrap(&[Span::raw(hint(app))], columns, |_, _, _| {
-            count += 1;
-            count < cap
-        });
-        count
+        let hint = app.suggestion().map(|_| hint(app));
+        Self::height(hint.as_deref().unwrap_or(&self.text), columns, cap)
     }
 
-    fn window(&self, columns: usize, visible: usize, skills: &[Skill]) -> Window {
+    fn window(&self, columns: usize, visible: usize, skills: &[Skill]) -> Ref<'_, Window> {
         let names = (skills.as_ptr() as usize, skills.len());
-        let key = (self.cursor, columns, visible, self.anchor, names);
-        if let Some(window) = self.window.borrow().as_ref().filter(|w| w.key == key) {
-            return window.clone();
+        let key = Some((self.cursor, columns, visible, self.anchor, names));
+        if self.window.borrow().key == key {
+            return self.window.borrow();
         }
         let mut window = Window {
             key,
@@ -432,8 +457,8 @@ impl Composer {
             n += 1;
             !found || window.rows.len() < visible
         });
-        *self.window.borrow_mut() = Some(window.clone());
-        window
+        *self.window.borrow_mut() = window;
+        self.window.borrow()
     }
 
     // The start or end of the cursor's wrapped row.
@@ -471,15 +496,18 @@ impl Composer {
     // Moves to the wrapped row above or below at the goal column; false at the first or last.
     fn vertical(&mut self, down: bool) -> bool {
         let columns = self.columns.get().max(1);
-        let current = self.window(columns, 1, &[]);
+        let (row, column) = {
+            let current = self.window(columns, 1, &[]);
+            (current.row, current.column)
+        };
         let Some(target) = (if down {
-            current.row.checked_add(1)
+            row.checked_add(1)
         } else {
-            current.row.checked_sub(1)
+            row.checked_sub(1)
         }) else {
             return false;
         };
-        let goal = self.goal.unwrap_or(current.column);
+        let goal = self.goal.unwrap_or(column);
         let Some(at) = self.offset(columns, target, goal) else {
             return false;
         };
@@ -567,22 +595,6 @@ impl Composer {
             return None;
         }
         self.columns.set(r.width as usize);
-        let window = match self.text.is_empty() {
-            true => {
-                let mut rows = VecDeque::new();
-                let hint = [Span::raw(hint(app))];
-                visit_wrap(&hint, r.width as usize, |parts, _, _| {
-                    rows.push_back(to_line(parts));
-                    rows.len() < r.height as usize
-                });
-                Window {
-                    rows,
-                    ..Window::default()
-                }
-            }
-            false => self.window(r.width as usize, r.height as usize, &app.skills),
-        };
-        self.area.set((r, window.first));
         // The hint is grey, and brighter while Tab browses, as the cockpit drew it.
         let ink = match (self.text.is_empty(), app.selected.is_some()) {
             (true, false) => GRAY,
@@ -590,6 +602,18 @@ impl Composer {
             (false, _) => words,
         };
         let ink = style(ink, BEZEL);
+        if self.text.is_empty() {
+            self.area.set((r, 0));
+            let mut y = r.y;
+            visit_wrap(&[Span::raw(hint(app))], r.width as usize, |parts, _, _| {
+                line(b, r, y, &to_line(parts), ink);
+                y += 1;
+                y < r.bottom()
+            });
+            return Some((r.x, r.y));
+        }
+        let window = self.window(r.width as usize, r.height as usize, &app.skills);
+        self.area.set((r, window.first));
         for (y, row) in (r.y..).zip(&window.rows) {
             line(b, r, y, row, ink);
         }

@@ -11,7 +11,8 @@ use crate::children;
 use crate::config::{Config, Settings};
 use crate::protocol::{
     AgentView, Answer, Body, Brand, Child, ChildRequest, Effort, EntryId, Image, Input, Listed,
-    Live, ModelSettings, Origin, Phone, SessionId, Speed, State, Thread, Trigger, Ui, UsageWindow,
+    Live, Millis, ModelSettings, Origin, Phone, SessionId, Speed, State, Thread, Trigger, Ui,
+    UsageWindow, now,
 };
 use crate::record::{self, Record, Replay, Summary};
 use crate::residents::Deliveries;
@@ -61,7 +62,7 @@ struct Inner {
     /// Woken whenever a session answers inputs, so an internal input waiting for room retries.
     space: Notify,
     /// When this server started: a live call recorded as starting earlier is no longer running.
-    started: crate::protocol::Millis,
+    started: Millis,
 }
 
 /// The controller-wide stream: a row per agent, with its own readings, and the config notice.
@@ -120,12 +121,12 @@ impl Controller {
                 idle: Mutex::default(),
                 status: Mutex::new(status),
                 naming: tokio::sync::Mutex::new(()),
-                started: crate::protocol::now(),
+                started: now(),
                 space: Notify::new(),
             }),
         };
         let quiet = &controller.inner.devices.quiet;
-        quiet.store(config.provider_only, std::sync::atomic::Ordering::Relaxed);
+        quiet.store(config.provider_only, Ordering::Relaxed);
         controller.inner.children.post.start(&controller);
         for session in record::live(&controller.inner.home).await? {
             let _ = controller.tell(&session, |s| Box::pin(s.restart())).await;
@@ -240,19 +241,29 @@ impl Controller {
     /// after the rebuilt context during a rebuild. At most 64 wait unread by the model: past that
     /// a person's input or an answer is refused `Full`, and any other input waits for room.
     pub(crate) async fn admit(&self, session: &SessionId, input: Input) -> Result<EntryId, Error> {
+        let wait = !matches!(input.from, Origin::Person | Origin::Answer { .. });
+        self.with_room(wait, move || {
+            let given = input.clone();
+            // A person's input continues a closed child as `continue` does (Trey, 2026-10-31).
+            self.ask(session, |s| Box::pin(s.take(given, false)))
+        })
+        .await
+    }
+
+    /// `attempt`'s answer, tried again each time a session answers inputs while it is refused
+    /// `Full` and `wait` holds.
+    async fn with_room<T, F: Future<Output = Result<T, Error>>>(
+        &self,
+        wait: bool,
+        mut attempt: impl FnMut() -> F,
+    ) -> Result<T, Error> {
         loop {
             let space = self.inner.space.notified();
             tokio::pin!(space);
             space.as_mut().enable();
-            let given = input.clone();
-            // A person's input continues a closed child as `continue` does (Trey, 2026-10-31).
-            match self.ask(session, |s| Box::pin(s.take(given, false))).await {
-                Err(Error::Full(_))
-                    if !matches!(input.from, Origin::Person | Origin::Answer { .. }) =>
-                {
-                    space.await
-                }
-                admitted => return admitted,
+            match attempt().await {
+                Err(Error::Full(_)) if wait => space.await,
+                answer => return answer,
             }
         }
     }
@@ -350,20 +361,12 @@ impl Controller {
             .summaries
             .configure(config.residents.keys().cloned());
         let quiet = &self.inner.devices.quiet;
-        quiet.store(config.provider_only, std::sync::atomic::Ordering::Relaxed);
-        let mut changed = Vec::new();
-        if config.server.address != self.inner.address {
-            changed.push("server.address");
-        }
+        quiet.store(config.provider_only, Ordering::Relaxed);
         let notice = if !settings.errors.is_empty() {
             Some(settings.errors.join(" "))
         } else {
-            (!changed.is_empty()).then(|| {
-                format!(
-                    "{} changed; restart Razor to apply it.",
-                    changed.join(" and ")
-                )
-            })
+            (config.server.address != self.inner.address)
+                .then(|| "server.address changed; restart Razor to apply it.".into())
         };
         let plugins = self.inner.plugins.load(&config.plugins).await;
         let notice = notice
@@ -466,7 +469,7 @@ impl Controller {
                 || !s.jobs.is_empty()
                 || !s.questions.is_empty()
                 || !s.mail_questions.is_empty()
-                || crate::protocol::now().saturating_sub(s.at) < after
+                || now().saturating_sub(s.at) < after
                 || self.ask(&id, Session::waiting).await.unwrap_or(true)
             {
                 continue;
@@ -541,7 +544,7 @@ impl Status {
     fn open(&mut self, session: &SessionId, change: i32, seen: Option<EntryId>) {
         if let Some(mut row) = self.agents.get(session).cloned() {
             row.terminals = row.terminals.saturating_add_signed(change);
-            row.looked_at = Some(crate::protocol::now());
+            row.looked_at = Some(now());
             row.seen = seen.or(row.seen);
             self.row(row);
         }

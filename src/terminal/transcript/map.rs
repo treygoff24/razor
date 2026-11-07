@@ -5,7 +5,7 @@ use crate::protocol::{Body, End, Entry, EntryId, Outcome, SessionId};
 use crate::terminal::{App, text::*};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 use reqwest::Method;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// What a cell can show, weakest first, its glyph and tone; the route names each in snake case.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize)]
@@ -79,24 +79,21 @@ pub(in crate::terminal) fn show(app: &mut App, id: &SessionId) {
     app.spawn(|api| async move {
         let path = format!("v1/sessions/{id}/marks");
         let read = api.json(Method::GET, &path, None).await;
-        let read = read.ok().and_then(|v| serde_json::from_value(v).ok());
+        let read: Option<Vec<(EntryId, Mark)>> =
+            read.ok().and_then(|v| serde_json::from_value(v).ok());
         move |app: &mut App| {
             if let (Some(t), Some(read)) = (app.transcripts.get_mut(&id), read)
                 && let Some(marks) = &mut t.marks
             {
-                seed(marks, read, &t.withdrawn);
+                // A full page leaves older marks unread.
+                let full = read.len() >= 4096;
+                marks.from = Some(if full { read[0].0.0 } else { 0 });
+                for (id, mark) in read.into_iter().filter(|(id, _)| !t.withdrawn.contains(id)) {
+                    marks.put(id, mark);
+                }
             }
         }
     });
-}
-
-// The route's newest 4,096 marks, oldest first: when it returned all 4,096, older ids are unread.
-fn seed(marks: &mut Marks, read: Vec<(EntryId, Mark)>, withdrawn: &BTreeSet<EntryId>) {
-    let full = read.len() >= 4096;
-    marks.from = Some(if full { read[0].0.0 } else { 0 });
-    for (id, mark) in read.into_iter().filter(|(id, _)| !withdrawn.contains(id)) {
-        marks.put(id, mark);
-    }
 }
 
 impl Transcript {

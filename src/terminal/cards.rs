@@ -215,7 +215,7 @@ impl<'a> Card<'a> {
                 _ if i + 1 == count => Span::styled("╰", style(rule, GLASS)),
                 _ => Span::styled("│", style(rule, GLASS)),
             };
-            let mut row = vec![bold(mark, CYAN), edge, span(" ", GRAY)];
+            let mut row = vec![strong(mark, CYAN), edge, span(" ", GRAY)];
             row.extend(match i {
                 0 => self.identity(size, room, (detail, width < SHORT), open),
                 1 => self.doing(room),
@@ -240,8 +240,11 @@ impl<'a> Card<'a> {
         let (detail, short) = say;
         let clock = width(&self.clock);
         let compact = size == Size::Compact;
-        let context = usize::from(compact && fill(self.agent).is_some()) * 6;
-        let reserve = clock + context + 2;
+        // A compact card reads its context number beside its name.
+        let context = fill(self.agent)
+            .filter(|_| compact)
+            .map(|_| number(self.agent, false));
+        let reserve = clock + usize::from(context.is_some()) * 6 + 2;
         let name = clip(&self.agent.name, room.saturating_sub(reserve).max(1));
         let mid = room.saturating_sub(width(&name) + clock + 2);
         let ink = match (open, self.over) {
@@ -252,20 +255,20 @@ impl<'a> Card<'a> {
         let mut row = vec![if self.over {
             span(name, ink)
         } else {
-            bold(name, ink)
+            strong(name, ink)
         }];
         if size == Size::Mini && mid >= 6 {
             row.push(span("  ", GRAY));
             row.extend(match &self.doing {
                 Doing::Call(mark, target, _) => vec![
-                    bold(*mark, GREEN),
+                    strong(*mark, GREEN),
                     span(" ", GRAY),
                     span(clip(target, mid.saturating_sub(4)), MAGENTA),
                 ],
                 _ => self.doing(mid.saturating_sub(2)),
             });
         }
-        let model = (size == Size::Compact && detail.model).then(|| self.model(short));
+        let model = (compact && detail.model).then(|| self.model(short));
         let words = width(" · ") + width(self.word);
         if let Some(m) = model.filter(|m| width(m) + width(" · ") + words <= mid) {
             row.extend([span(" · ", GRAY_DIM), span(m, GRAY)]);
@@ -273,10 +276,9 @@ impl<'a> Card<'a> {
         if size != Size::Mini && words <= mid {
             row.extend([span(" · ", GRAY_DIM), span(self.word, self.tone)]);
         }
-        if compact && fill(self.agent).is_some() {
-            let number = number(self.agent, false);
+        if let Some(number) = context {
             let at = room.saturating_sub(clock + 2 + number.width());
-            if used(&row) + 2 <= at {
+            if spans_width(&row) + 2 <= at {
                 pad(&mut row, at);
                 row.push(number);
             }
@@ -291,7 +293,7 @@ impl<'a> Card<'a> {
         match &self.doing {
             Doing::Call(mark, target, clock) => {
                 let target_room = room.saturating_sub(width(mark) + 3 + width(clock));
-                let mut row = vec![bold(*mark, GREEN), span(" ", GRAY)];
+                let mut row = vec![strong(*mark, GREEN), span(" ", GRAY)];
                 row.push(span(clip(target, target_room), MAGENTA));
                 pad(&mut row, room.saturating_sub(width(clock)));
                 row.push(span(clock.clone(), GRAY));
@@ -316,22 +318,19 @@ impl<'a> Card<'a> {
         }
     }
 
-    // The model where the list has room for it.
-    fn right(&self, detail: Detail, short: bool) -> Vec<Span<'static>> {
-        let ink = if self.over { GRAY_DIM } else { GRAY };
-        let model = detail.model.then(|| span(self.model(short), ink));
-        model.into_iter().collect()
-    }
-
-    fn right_needs(&self, detail: Detail, short: bool) -> usize {
-        let right = used(&self.right(detail, short));
-        if right > 0 { right + 2 } else { 0 }
+    // The columns the model takes at the vitals' right with its gap; none where the list
+    // leaves it out.
+    fn model_room(&self, detail: Detail, short: bool) -> usize {
+        if detail.model {
+            width(&self.model(short)) + 2
+        } else {
+            0
+        }
     }
 
     // The context as a bar and its number, then at the right the model.
     fn vitals(&self, room: usize, detail: Detail, short: bool) -> Vec<Span<'static>> {
-        let right = self.right(detail, short);
-        let free = room.saturating_sub(1 + NUMBER + self.right_needs(detail, short));
+        let free = room.saturating_sub(1 + NUMBER + self.model_room(detail, short));
         let cells = if detail.bar > 0 {
             detail.bar.min(free)
         } else {
@@ -346,9 +345,10 @@ impl<'a> Card<'a> {
             GRAY,
         ));
         row.push(number);
-        if !right.is_empty() {
-            pad(&mut row, room.saturating_sub(used(&right)));
-            row.extend(right);
+        if detail.model {
+            let model = self.model(short);
+            pad(&mut row, room.saturating_sub(width(&model)));
+            row.push(span(model, if self.over { GRAY_DIM } else { GRAY }));
         }
         clip_spans(row, room)
     }
@@ -361,37 +361,30 @@ impl<'a> Card<'a> {
             false => prefix,
         };
         let (long, short) = (self.model(false), self.model(true));
-        let mut tiers = vec![
+        // The long model only from `SHORT` columns; the last tier is taken when none fits.
+        let tiers = [
+            (&long, true, true),
             (&short, true, true),
             (&short, true, false),
             (&short, false, false),
         ];
-        if room >= SHORT {
-            tiers.insert(0, (&long, true, true));
-        }
         let need = |(m, s, c): (&String, bool, bool)| {
             let state = if s { 3 + width(self.word) } else { 0 };
             3 + width(m) + state + if c { 3 + width(&self.clock) } else { 0 }
         };
         let (head, name) = (width(&prefix), width(&self.agent.name));
-        let pick = tiers
-            .iter()
-            .copied()
-            .find(|t| head + name + need(*t) <= room);
-        let (model, state, clock) = pick.unwrap_or(tiers[tiers.len() - 1]);
-        let shown = clip(
-            &self.agent.name,
-            room.saturating_sub(head + need((model, state, clock)))
-                .max(6.min(name)),
-        );
-        let name_ink = if self.over { GRAY } else { WHITE };
+        let mut fitting = tiers[usize::from(room < SHORT)..].iter().copied();
+        let tier = fitting
+            .find(|t| head + name + need(*t) <= room)
+            .unwrap_or(tiers[3]);
+        let (model, state, clock) = tier;
+        let columns = room.saturating_sub(head + need(tier)).max(6.min(name));
+        let ink = style([WHITE, GRAY][usize::from(self.over)], GLASS);
+        let ink = [ink, ink.add_modifier(Modifier::BOLD)][usize::from(selected)];
         let mut row = vec![
             span(prefix, GRAY_DIM),
-            Span::styled(shown, style(name_ink, GLASS)),
+            Span::styled(clip(&self.agent.name, columns), ink),
         ];
-        if selected {
-            row[1].style = row[1].style.add_modifier(Modifier::BOLD);
-        }
         row.extend([span(" · ", GRAY_DIM), span(model.clone(), GRAY)]);
         if state {
             row.push(span(format!(" · {}", self.word), self.tone));
@@ -424,7 +417,7 @@ pub fn detail(cards: &[&Card], columns: usize, size: Size) -> Detail {
     }
     let bar = |model: bool| {
         let each = cards.iter().map(|c| {
-            room.saturating_sub(1 + NUMBER + c.right_needs(Detail { model, bar: 0 }, short))
+            room.saturating_sub(1 + NUMBER + c.model_room(Detail { model, bar: 0 }, short))
         });
         each.min().unwrap_or(0).min(BAR.1)
     };
@@ -593,8 +586,8 @@ fn lifetime(app: &App, agent: &AgentView, now: u64) -> Option<u64> {
         .map(|at| until.saturating_sub(at))
 }
 
-// A child's context as a share of its window, held to one; none while unmeasured.
-fn fill(agent: &AgentView) -> Option<f64> {
+/// An agent's context as a share of its window, held to one; none while unmeasured.
+pub(super) fn fill(agent: &AgentView) -> Option<f64> {
     let (context, window) = agent.context.zip(agent.window)?;
     (window > 0).then(|| (context as f64 / window as f64).min(1.))
 }
@@ -612,7 +605,7 @@ pub fn number(agent: &AgentView, over: bool) -> Span<'static> {
         ink => ink,
     };
     if f >= 0.7 {
-        bold(text, ink)
+        strong(text, ink)
     } else {
         span(text, ink)
     }
@@ -668,16 +661,13 @@ fn dim(row: &mut [Span]) {
     }
 }
 
-fn bold(text: impl Into<std::borrow::Cow<'static, str>>, ink: Color) -> Span<'static> {
+// Bold words in `ink` on the glass.
+fn strong(text: impl Into<std::borrow::Cow<'static, str>>, ink: Color) -> Span<'static> {
     Span::styled(text, style(ink, GLASS).add_modifier(Modifier::BOLD))
 }
 
-fn used(row: &[Span]) -> usize {
-    row.iter().map(|s| width(&s.content)).sum()
-}
-
 fn pad(row: &mut Vec<Span<'static>>, to: usize) {
-    let have = used(row);
+    let have = spans_width(row);
     if have < to {
         row.push(span(" ".repeat(to - have), GRAY));
     }

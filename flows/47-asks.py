@@ -146,6 +146,10 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN + '[server]\nname="box"\nre
         t.shown("INBOX · 2 unread", "HOSTILE_LINE")
         assert server.send(f,"PUT",receipt+"/read").status == 200
         t.shown("INBOX · 1 unread")
+        # With motion off a delivery under a minute old reads `<1m`, and once the reload and the
+        # top bar's highlights have passed the screen falls quiet: nothing turns each second.
+        (f.home / ".razor/config.toml").open("a").write("[ui]\nmotion = false\n")
+        assert any(not t.pump(1.5, lambda _: True) for _ in range(10)) and "<1m" in t.text(), t.text()
         # At phone width the clock and the pane's picture draw in half blocks.
         t.resize(40, 40)
         t.until(lambda t: t.screen.display[0][39] == "┐")
@@ -255,9 +259,11 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
         (f.cwd / "release").touch()
         t.shown(until("again"))
         assert shown(t, "SWITCH_47"), t.text()
-        assert json.loads(sorted(f.requests.glob("[0-9]*.body"))[-1].read_bytes())["model"] == "gpt-6.1-sol"
+        assert json.loads(f.sent()[-1])["model"] == "gpt-6.1-sol"
         (f.cwd / "again").touch()
-        t.shown("kept-visible")
+        # A reply's name line says the model that wrote it, not the one the next turn will use.
+        sign = lambda t: next(l for l in t.screen.display[find(t, "kept-visible")[0]::-1] if "❖" in l)
+        t.until(lambda t: "kept-visible" in t.text() and "Gpt 6.1 sol ❖" in sign(t))
         # Over the floor the picker asks; `2` stages a handover, which the input carries.
         t.send("/model\r")
         t.shown("60k tokens uncached")

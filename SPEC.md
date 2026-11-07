@@ -80,7 +80,7 @@ F2 or `/agents` opens the list by default with its keys, and Left at the start o
 
 Left from the list beside a session, F3 or the list's ⤢ opens the agents overview (Trey, 2026-11-05: "I need some sort of a holistic view of, 'In these projects, you have these agents running. They are working on this high-level objective that you set for this session, and what they are currently doing at the present moment is X.' And then I can click into any one of them or keyboard my way into any one of them."): the whole screen, the selected view's groups at their depths, each agent's server, project, headline as its goal, its question, failure, latest words and running call, and its helpers beside it, one line an agent when that does not fit, scrolling last. It takes the list's keys: Up and Down move between agents and folded groups, Space folds the selected agent's group, Enter or Right unfolds a selected folded group, and Left does nothing. Enter, Right or a click opens an agent through the same guarded switch, folding the overview into the list beside it, and F3 or Escape folds it back into the view beneath without switching. Motion off or under 80 columns makes the fold instant, and under 80 columns Left goes from the session straight to the overview.
 
-The addressed session has a cyan edge and tint in the list; its hiding row or the border identifies it when folded or scrolled away. `/quit` or `/done` with the list open addresses the next open row below, else above. A session's closing turn says "closing after this turn" in its working line and list row. The four-row cyan top bar centres the displayed session's headline beside the two-row clock, followed by `agent · repo · branch · N changed`; the agent name clips first. Its top edge carries context used/window and percentage, a green fill and fixed amber/red marks at 70%/90%. The normal transcript has no separate context tape. The composer and question band always address the actual recipient. Ctrl-T and the status chip open the status pane, at the inbox when deliveries are unread; it shows every paired server's deliveries and shared read state. Paired sessions open, accept input, answer and stop through their owner.
+The addressed session has a cyan edge and tint in the list; its hiding row or the border identifies it when folded or scrolled away. `/quit` or `/done` with the list open addresses the next open top-level row below, else above (a root or a resident’s thread, never another tree’s helper), if the person is still on the closed session: a closed helper addresses its parent, and with no such row the closed session stays on screen; one who moved on while its last turn ran stays where they are, and a new agent's unsent words wait for its composer while another session is addressed (Trey, 2026-11-06: "It just switched me to a different agent, and I didn't want to"). A session's closing turn says "closing after this turn" in its working line and list row. The four-row cyan top bar centres the displayed session's headline beside the two-row clock, followed by `agent · repo · branch · N changed`; the agent name clips first. Its top edge carries context used/window and percentage, a green fill and fixed amber/red marks at 70%/90%. The normal transcript has no separate context tape. The composer and question band always address the actual recipient. Ctrl-T and the status chip open the status pane, at the inbox when deliveries are unread; it shows every paired server's deliveries and shared read state. Paired sessions open, accept input, answer and stop through their owner.
 
 Every terminal keyboard action has a configurable binding under `[ui.keys.<context>]` in the existing TOML config, for example `[ui.keys.global]` with `prefix = ["Ctrl-A"]`. Missing actions inherit defaults; `[]` unbinds. The shipped data catalogue uses the same format and supplies the plain descriptions shown by `/keys`. Accepted live settings compile once; unknown actions, malformed keys and collisions within a context retain the terminal's last valid bindings and show an error. Hints show effective keys. Trey approved this redesign and configurable keys on 2026-11-02.
 
@@ -94,7 +94,7 @@ Back at a session that no one has looked at, and the person has not written in, 
 
 **Speed.** Sessions choose Standard, Fast or Ultrafast independently of model and effort. `/model` and `/fast` show the same choices, costs and unavailable reasons; `/fast on`, `/fast off` and `/fast ultrafast` stage the next input. The picker uses configurable keys. `/model` and the phone show each model's switch as the tokens it reads without the prompt cache; when the conversation can be kept and holds at least `handover_tokens`, one key or tap chooses between keeping it and a handover note (Trey, 2026-11-03). The status suffix states the requested speed; a provider downgrade is a recorded notice. Config and `--speed` choose new root defaults; children start at Standard unless explicitly given another speed, even under a fast parent. The API exposes the same choices for phone clients. Trey approved the design on 2026-11-02: "design for the speed stuff approved".
 
-**Starting.** `razor`, `razor "first message"` (an image may come with it), `--model`, `--effort`, `--speed`, `--resume <id>`, `--continue`, `--agents`, `--print`. A first positional word without whitespace must name a command; otherwise Razor refuses it with the available commands and how to send a one-word message (open Razor and type it, or use `razor --print <word>`), while a positional sentence and every `--print` message stay messages. `--agents` opens the terminal app with the agents list showing and focused, and the person’s most recently active top-level session on the right, across paired servers using the list’s existing activity times. With none it keeps the blank start; startup creates no session; plain `razor` keeps its existing start (Trey, 2026-11-02). The config holds the other settings and is live. `--print` is the headless form, what `claude -p` is today ("We definitely need support for Claude -p equivalent headless calls"): the prompt from the argument or standard input; the session runs to its end with no terminal; the answer on standard output as text, or with `--print json` the final message and the session id, or with `--print stream` the same event stream the API server serves, one JSON object per line; `--resume` and `--continue` apply to it. It is in version one, not a fast follow: it is the smallest client of the API server, and the numbered end-to-end flows drive the binary through it. The web app is a separate repository; macOS and iOS come from wrapping it, not beside it. Clients depend on the API; the core never depends on a client; the API is versioned.
+**Starting.** `razor`, `razor "first message"` (an image may come with it), `--model`, `--effort`, `--speed`, `--resume <id>`, `--continue`, `--agents`, `--print`. A first positional word without whitespace must name a command; otherwise Razor refuses it with the available commands and how to send a one-word message (open Razor and type it, or use `razor --print <word>`), while a positional sentence and every `--print` message stay messages. `--agents` opens the terminal app with the agents list showing and focused, and on the right the top-level session the person last wrote to, across paired servers, by the time of the person’s last input on each row. With none it keeps the blank start; startup creates no session; plain `razor` keeps its existing start (Trey, 2026-11-02). The config holds the other settings and is live. `--print` is the headless form, what `claude -p` is today ("We definitely need support for Claude -p equivalent headless calls"): the prompt from the argument or standard input; the session runs to its end with no terminal; the answer on standard output as text, or with `--print json` the final message and the session id, or with `--print stream` the same event stream the API server serves, one JSON object per line; `--resume` and `--continue` apply to it. It is in version one, not a fast follow: it is the smallest client of the API server, and the numbered end-to-end flows drive the binary through it. The web app is a separate repository; macOS and iOS come from wrapping it, not beside it. Clients depend on the API; the core never depends on a client; the API is versioned.
 
 **Deployment packs.** A directory, as above.
 
@@ -139,24 +139,24 @@ Prompt-cache discipline is a rule of the architecture: the default GPT profile's
 
 ## 6. Budgets
 
-The ceiling is 76,535 lines: non-blank, non-comment lines of source (Rust, TypeScript, the flows' language, shell) in this repository, counted by one checked-in counter the gate runs per module from the first commit; the table's rows bind the same way; Razor-specific code moved into another repository counts here too. A raise needs Trey's written yes. Starting table:
+The ceiling is 76,598 lines: non-blank, non-comment lines of source (Rust, TypeScript, the flows' language, shell) in this repository, counted by one checked-in counter the gate runs per module from the first commit; the table's rows bind the same way; Razor-specific code moved into another repository counts here too. A raise needs Trey's written yes. Starting table:
 
 | Module | Lines |
 | --- | ---: |
-| Protocol and types | 1,765 |
+| Protocol and types | 1,760 |
 | Session controller | 3,382 |
-| Record and rebuild | 2,280 |
-| Context, prompts, profiles | 2,318 |
-| Model paths (Responses loop, Claude bridge in TypeScript) | 2,934 |
-| Tool service, MCP, skills | 3,943 |
-| Shell and jobs | 748 |
-| Children, mail, schedules, memory client | 5,809 |
-| API server and configuration | 9,627 |
+| Record and rebuild | 2,276 |
+| Context, prompts, profiles | 2,298 |
+| Model paths (Responses loop, Claude bridge in TypeScript) | 2,888 |
+| Tool service, MCP, skills | 3,941 |
+| Shell and jobs | 742 |
+| Children, mail, schedules, memory client | 5,792 |
+| API server and configuration | 9,573 |
 | Extension surface (events, command hooks, JavaScript plugins; provisional until its events are named) | 2,000 |
-| Terminal app | 27,331 |
-| Flows, stand-ins, eval runner | 15,056 |
-| Performance harness | 666 |
-| **Total** | **76,535** |
+| Terminal app | 27,404 |
+| Flows, stand-ins, eval runner | 15,210 |
+| Performance harness | 657 |
+| **Total** | **76,598** |
 
 A raise changes only this table's numbers and the ceiling above; the maintainers keep each raise's record, with its measured counts and the ruling that granted it.
 

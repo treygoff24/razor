@@ -143,16 +143,13 @@ fn keep(top: usize, row: usize, shown: usize, rows: usize) -> usize {
 }
 
 impl Grid {
-    fn items<'t>(
-        &'t self,
-        t: &'t Table,
-        tab: Option<usize>,
-    ) -> Box<dyn Iterator<Item = usize> + 't> {
-        match tab {
-            None => Box::new(self.results.iter().copied()),
-            Some(0) => Box::new(self.frequent.iter().copied()),
-            Some(n) => Box::new(t.tabs[n - 1].clone()),
-        }
+    fn items<'t>(&'t self, t: &'t Table, tab: Option<usize>) -> impl Iterator<Item = usize> + 't {
+        let (items, range) = match tab {
+            None => (self.results.as_slice(), 0..0),
+            Some(0) => (self.frequent.as_slice(), 0..0),
+            Some(n) => (&[][..], t.tabs[n - 1].clone()),
+        };
+        items.iter().copied().chain(range)
     }
     fn layout(&self, t: &Table) -> Layout {
         let cols = self.size.get().0.max(1);

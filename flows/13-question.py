@@ -1,7 +1,6 @@
 """A child's question interrupts a wait; the parent's answer reaches the child, under a header naming
 the parent and the question. A researcher outside git works in its parent's folder and is told
 Razor's researcher text."""
-import json
 import re
 from pathlib import Path
 from driver import flow
@@ -12,9 +11,7 @@ replies = [agent(root, "start", name="asker13", kind="researcher", brief="Ask wh
            agent(root, "wait", children=["asker13"], timeout_ms=600000), reply(root, text="Question received."),
            message(child, "question", text="Which exact marker?"), reply(child, text="Waiting for the parent.")]
 with flow(replies) as f:
-    first = f.run("--print=json", root, timeout=30)
-    assert first.returncode == 0, first.stderr
-    parent = json.loads(first.stdout)["session"]
+    parent = f.ask(root, timeout=30)["session"]
     children = [p.parent.name for p in (f.home / ".razor/sessions").glob("*/record.jsonl")
                 if list(f.record(p.parent.name))[0].get("child")]
     sid = children[0]
@@ -35,12 +32,11 @@ with flow(replies) as f:
                 agent(root, "wait", children=["asker13"]),
                 agent(root, "settle", child="asker13", decision="discard"), reply(root),
                 agent(child, "finish", status="finished", report="Used copper-heron-13.")]
-    second = f.run("--resume", parent, "--print=json", "Answer the child.")
-    assert second.returncode == 0, second.stderr
+    f.ask("--resume", parent, "Answer the child.")
     answers = [e for e in f.record(sid) if e["kind"] == "input" and e["text"] == "Use copper-heron-13."]
     assert len(answers) == 1, answers
     assert answers[0]["from"]["mail"]["kind"] == {"answer": {"question": question}}, answers
-    requests = [p.read_text() for p in sorted(f.requests.glob("*.body")) if p.stem.isdigit()]
+    requests = f.sent()
     assert any(child in request and "Use copper-heron-13." in request for request in requests), "the admitted answer never reached the model"
     header = rf"{f.cwd.name} \(your parent\) answers #{question[1]}: Use copper-heron-13\."
     assert any(re.search(header, request) for request in requests), "the answer reached the model without its header"

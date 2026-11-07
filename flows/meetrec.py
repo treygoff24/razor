@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import select
 import sys
-import time
 import uuid
 import wave
 

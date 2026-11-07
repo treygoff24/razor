@@ -35,9 +35,7 @@ with flow([]) as f:
 
 said = lambda text: response([{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}])
 with flow([done(), said("Checked."), said("Fast."), done(), response([call("bash", '{"command": "until [ -e go ]; do sleep .05; done"}')]), done()], model="sol", config=PLAIN + '\n[server]\naddress="127.0.0.1:0"\n[providers.slow]\nbase_url="{standin}"') as f:
-    seeded = f.run("--print=json", "Seed the call.")
-    assert seeded.returncode == 0, seeded.stderr
-    session = json.loads(seeded.stdout)["session"]
+    session = f.ask("Seed the call.")["session"]
     config = f.home / ".razor/config.toml"
     async def refused(which, reason):
         seen = await phone(f, which)
@@ -56,7 +54,7 @@ with flow([done(), said("Checked."), said("Fast."), done(), response([call("bash
     assert [e["type"] for e in seen] == ["ready", "chose", "refused"] and seen[0]["model"] == "gpt-6.1-sol" and seen[1]["model"] == "gpt-6.1-terra" and seen[1]["handover"], seen
     handed = [(e.get("model"), e.get("effort"), e.get("handover")) for e in server.until(f, session, lambda es: es[-2].get("text") == "Checked.") if e.get("voice_call")]
     assert handed == [("gpt-6.1-terra", "high", True)], handed
-    asked = json.loads(sorted(f.requests.glob("[0-9]*.body"))[-1].read_text())
+    asked = json.loads(f.sent()[-1])
     parts = [p["text"] for m in asked["input"] if m.get("role") == "user" for p in m["content"]]
     assert asked["model"] == "gpt-6.1-terra" and parts[-1].endswith("Check it.") and "Check it." not in (rest := "".join(parts[:-1])) and "context was rebuilt" in rest, parts
     # A held choice the session no longer takes (Fast came after it) never costs the person's words:
@@ -88,7 +86,7 @@ with flow([done(), said("Checked."), said("Fast."), done(), response([call("bash
     ends = [e for e in server.until(f, session, lambda es: set(held) <= {i for e in es if e["kind"] == "turn_end" for i in e["inputs"]}) if e["kind"] == "turn_end"]
     assert ends[-1]["end"] == "done" and set(held) <= set(ends[-1]["inputs"]), ends[-1]
     assert all(sum(e["inputs"].count(i) for e in ends) == 1 for i in held), ends
-    current = json.loads(sorted(f.requests.glob("[0-9]*.body"))[-1].read_bytes())
+    current = json.loads(f.sent()[-1])
     assert current["model"] == "gpt-6.1-terra" and all(json.dumps(current).count(f"Held {i}.") == 1 for i in range(63)), current
     with serve([], refuse=401) as url:
         config.write_text(config.read_text().replace(quiet, url))

@@ -21,7 +21,7 @@ ask = ["../../scripts/notify.sh"]
 # notify = ["curl", "-fsS", "-o", "/dev/null", "https://ntfy.sh/your-unguessable-topic", "--data-raw"]
 # ask = ["curl", "-fsS", "-o", "/dev/null", "https://ntfy.sh/your-unguessable-topic", "--data-raw"]
 
-# Replies read aloud (the ▶ beside the newest reply) and short voice notes from agents, through
+# Replies read aloud (the ▶ beside the newest reply) and voice notes from agents, through
 # ElevenLabs while ELEVENLABS_API_KEY is set (`razor keys` stores it); without the key, each one
 # says how to add it. macOS plays them with afplay; Linux needs `play`, below.
 speech = ["../../scripts/speech.py"]

@@ -5,7 +5,6 @@ import select
 import socket
 import socketserver
 import threading
-import time
 from driver import flow
 from terminal import Terminal
 from responses import done
@@ -60,7 +59,5 @@ threading.Thread(target=answer, daemon=True).start()
 with flow([], config='[server]\naddress = "127.0.0.1:0"') as f:
     server.start(f)
     assert f.run('devices', 'add', 'stand', '--address', '127.0.0.1:%d' % peer.getsockname()[1]).returncode == 0
-    deadline = time.monotonic() + 15
-    while not any(s['name'] == 'stand' and s['silent'] is None for s in json.loads(server.send(f, 'GET', '/status').readline())['servers']):
-        assert time.monotonic() < deadline, "the peer's unknown line kept it silent"
-        time.sleep(0.2)
+    server.wait(lambda: any(s['name'] == 'stand' and s['silent'] is None for s in json.loads(server.send(f, 'GET', '/status').readline())['servers']),
+                15, "the peer's unknown line kept it silent")

@@ -134,9 +134,9 @@ pub(super) async fn spoken(
             .await
             .map_err(|e| bad(format!("Speech failed: {e}; write instead.")))?;
         let mut bytes = Vec::new();
-        // A malformed or missing sidecar only flattens the waveform; retain at most 64 KiB.
+        // A malformed or missing sidecar only flattens the waveform; retain at most 1 MiB.
         if let Ok(file) = app.controller.file(&id, &metadata).await {
-            let _ = file.take(64 << 10).read_to_end(&mut bytes).await;
+            let _ = file.take(1 << 20).read_to_end(&mut bytes).await;
         }
         #[derive(Default, serde::Deserialize)]
         #[serde(default)]

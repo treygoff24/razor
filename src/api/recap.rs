@@ -1,6 +1,6 @@
 //! A recap for the person (docs/design/api.md), never recorded or put in a model context.
 
-use super::{App, Page, Refusal};
+use super::{App, Page, Refusal, cut};
 use crate::profiles::{self, Transport};
 use crate::protocol::{Body, Entry, EntryId, SessionId};
 use crate::record::{Summary, target};
@@ -153,9 +153,4 @@ fn ends(text: String, bytes: usize) -> String {
     let half = bytes.saturating_sub(CUT.len()) / 2;
     let end = text.ceil_char_boundary(text.len() - half);
     format!("{}{CUT}{}", cut(&text, half), &text[end..])
-}
-
-/// The longest prefix within `bytes`, ending on a character boundary.
-fn cut(text: &str, bytes: usize) -> &str {
-    &text[..text.floor_char_boundary(bytes)]
 }

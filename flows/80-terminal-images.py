@@ -10,21 +10,12 @@ import os
 import re
 import struct
 import threading
-import zlib
 
 from driver import REPLIES, Reply, flow
+from png import chunk, png
 from responses import PLAIN, message, response
 import server
 from terminal import END, Terminal
-
-
-def chunk(kind, data):
-    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
-
-
-def png(width, height, pixels):
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)) + chunk(
-        b"IDAT", zlib.compress(pixels, 1)) + chunk(b"IEND", b"")
 
 
 # Two saturated colours with a diagonal edge: half-block pairs differ at any useful size.
@@ -418,9 +409,7 @@ cases = [(kind, (REPLIES / f"terminal-{kind}.webp").read_bytes(), kind in ("loss
          for kind in webps]
 # A valid 16-bit image above the old half-sized pixel cap but within the shared cap.
 deep_row = b"\0" + bytes((255, 255, 0, 0, 0, 0)) * 2048
-deep = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 2048, 2200, 16, 2, 0, 0, 0))
-        + chunk(b"IDAT", zlib.compress(deep_row * 2200, 1)) + chunk(b"IEND", b""))
-cases.append(("png-16bit", deep, True))
+cases.append(("png-16bit", png(2048, 2200, deep_row * 2200, depth=16), True))
 # A harmless one-pixel canvas mismatch, keeping the actual compressed image at 96×96.
 extended = (REPLIES / "terminal-metadata.webp").read_bytes()
 cases.append(("webp-dimensions", extended[:24] + (96).to_bytes(3, "little") + extended[27:], False))

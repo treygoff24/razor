@@ -79,7 +79,7 @@ for model in ("opus", "gpt-6.1-sol"):
         # The killed job's end notice starts no turn of its own: after Escape the agent stays quiet.
         entries = server.until(f, session, lambda es: any(e["kind"] == "job" and e["event"] == "ended" for e in es))
         time.sleep(1)
-        assert len(list(f.requests.glob("[0-9]*.body"))) == 1, "the stopped job's notice started a turn"
+        assert len(f.sent()) == 1, "the stopped job's notice started a turn"
         ends = [e for e in entries if e["kind"] == "job" and e["event"] == "ended"]
         assert len(ends) == 1 and ends[0]["job"] == job["job"] and "signal" in ends[0]["end"], ends
         later = server.post(f, path + "/input", {"text": "Run the next command."})["entry"]
@@ -119,7 +119,7 @@ for restart in (True, False):
             (f.cwd / "release").touch()
             server.until(f, session, lambda es: any(e.get("event") == "ended" for e in es))
             time.sleep(1)
-            assert len(list(f.requests.glob("[0-9]*.body"))) == 1, "after a restart the stopped job's end started a turn"
+            assert len(f.sent()) == 1, "after a restart the stopped job's end started a turn"
         server.post(f, f"/sessions/{session}/input", {"text": "Go on."})
         entries = server.until(f, session, lambda es: sum(e["kind"] == "turn_end" for e in es) == 2)
         told = [e["text"] for e in entries if e["kind"] == "input" and e["from"] == "razor"]

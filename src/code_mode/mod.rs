@@ -34,6 +34,27 @@ pub(crate) struct Run {
     pub(crate) reply: oneshot::Sender<Result<Value, Error>>,
 }
 
+impl Run {
+    /// Settles the script's promise with the call's recorded result: a command that ran (an
+    /// object `end`) resolves even when its outcome is an error, any other error rejects, and a
+    /// result that is not JSON resolves as its text.
+    pub(crate) fn answer(self, output: String, error: bool) {
+        let value = serde_json::from_str::<Value>(&output);
+        let ran = value.as_ref().is_ok_and(|v| v["end"].is_object());
+        let _ = self.reply.send(if error && !ran {
+            Err(Error::Refused(output))
+        } else {
+            Ok(value.unwrap_or(Value::String(output)))
+        });
+    }
+
+    /// Refuses a call that arrived after its turn ended.
+    pub(crate) fn late(self) {
+        let late = "The turn ended before this call was admitted.";
+        let _ = self.reply.send(Err(Error::Refused(late.into())));
+    }
+}
+
 /// A cell or call failure the model reads; `Other` is a machine failure with its cause.
 #[derive(Debug)]
 pub(crate) enum Error {
@@ -155,6 +176,20 @@ impl CodeMode {
         running.insert(id.clone(), cell.clone());
         drop(running);
         self.output(&id, Some(cell), yield_ms, cap).await
+    }
+
+    /// An `exec` or `wait` call as the profile normalized it: exec's input is its source.
+    pub(crate) async fn call(
+        &self,
+        call: CallId,
+        (action, input): (String, Value),
+        nested: &[Declaration],
+        stop: watch::Receiver<bool>,
+    ) -> Result<String, Error> {
+        match (action.as_str(), input) {
+            ("exec", Value::String(source)) => self.exec(call, source, nested.into(), stop).await,
+            (_, input) => self.wait(input).await,
+        }
     }
 
     /// Codex's wait: `cell_id`, `yield_time_ms` (10,000), `max_tokens` (10,000) and `terminate`.

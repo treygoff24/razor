@@ -5,7 +5,8 @@
 //! doctor`; then main opens the terminal app if they want it. Setup writes to standard error,
 //! which is never buffered, so a prompt shows before its answer is read.
 
-use super::{Config, Error, mcp::replace, pack};
+use super::pack::{self, replace};
+use super::{Config, Error};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use serde_json::Value;
 use std::io::{self, IsTerminal};
@@ -21,7 +22,7 @@ use toml_edit::DocumentMut;
 pub(crate) const PORTS: RangeInclusive<u16> = 7433..=7442;
 
 /// The optional keys `razor keys` asks for: the web providers' and ElevenLabs' for voice.
-pub fn names() -> impl Iterator<Item = &'static str> {
+pub(crate) fn names() -> impl Iterator<Item = &'static str> {
     (crate::tools::web::keys().map(|(name, _)| name)).chain(["ELEVENLABS_API_KEY"])
 }
 
@@ -182,15 +183,13 @@ pub async fn run(home: &Path, console: bool) -> Result<bool, Error> {
         ran(Command::new(&razor).arg("install"));
     }
     let check = (claude && loaded.claude.sign_in.is_empty()).then_some(&[][..]);
-    let missing = crate::api::ready::credentials(home, check, None).await;
-    if claude && (console || missing.get("Claude").is_some_and(Option::is_some)) {
-        let signed = crate::claude::login(console).await;
-        signed.unwrap_or_else(|e| {
-            eprintln!(
-                "{e} Run razor setup{}.",
-                if console { " --console" } else { "" }
-            )
-        });
+    let missing = crate::api::credentials(home, check, None).await;
+    if claude
+        && (console || missing.get("Claude").is_some_and(Option::is_some))
+        && let Err(e) = crate::claude::login(console).await
+    {
+        let again = if console { " --console" } else { "" };
+        eprintln!("{e} Run razor setup{again}.");
     }
     if chatgpt && missing.get("ChatGPT sign-in").is_some_and(Option::is_some) {
         ran(Command::new(&razor).arg("login"));
@@ -279,11 +278,8 @@ fn other(settings: &mut DocumentMut) -> Result<(String, String, String), Error> 
     };
     let (url, host) = ask(prompt, help, read)?;
     let read = |id: &str| Some(id.to_owned()).filter(|id| !id.is_empty());
-    let id = ask(
-        "The model id it serves",
-        "type the id the endpoint knows",
-        read,
-    )?;
+    let (prompt, help) = ("The model id it serves", "type the id the endpoint knows");
+    let id = ask(prompt, help, read)?;
     let prompt = "Its context window in tokens, if you know it [unknown]";
     let read = |typed: &str| match typed.parse::<i64>() {
         _ if typed.is_empty() => Some(None),
@@ -388,9 +384,8 @@ async fn address() -> Option<String> {
         .iter()
         .filter_map(|ip| ip.as_str()?.parse::<IpAddr>().ok())
         .find(IpAddr::is_ipv4)?;
-    let mut ports = PORTS.clone();
     let mut port = None;
-    for candidate in &mut ports {
+    for candidate in PORTS {
         if tokio::net::TcpListener::bind((ip, candidate)).await.is_ok() {
             port = Some(candidate);
             break;
@@ -457,7 +452,7 @@ fn letters(typed: &str) -> String {
 }
 
 /// A shipped tool, with PATH as the fallback for source builds.
-pub fn tool(name: &str) -> std::path::PathBuf {
+pub(crate) fn tool(name: &str) -> std::path::PathBuf {
     super::shipped(name).unwrap_or(name.into())
 }
 
@@ -490,7 +485,7 @@ fn line(prompt: &str) -> Result<String, Error> {
 }
 
 /// A [y/N] question: whether the answer starts with y.
-pub fn yes(question: &str) -> Result<bool, Error> {
+pub(crate) fn yes(question: &str) -> Result<bool, Error> {
     Ok(line(&format!("{question} [y/N]"))?.starts_with(['y', 'Y']))
 }
 

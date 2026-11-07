@@ -71,7 +71,7 @@ Escape stops what the agent is doing. Ctrl-C twice quits the app; the session ke
 | Helpers on their own branches | An agent hands a task to a helper that works in its own git worktree and reports back; its work is then merged or discarded. |
 | Agents on a schedule | An agent defined in your settings wakes at set times, in its own folder with its own memory, and sends you notes or questions. |
 | Memory | Each project keeps a note on where the work stands and your decisions in your own words, and every new session starts with both. |
-| Voice | Replies read aloud, voice notes you record, and short spoken notes from agents. |
+| Voice | Replies read aloud, voice notes you record, and spoken notes from agents. |
 | A browser, desktop apps and web search | Agents drive a real browser with [agent-browser](https://github.com/vercel-labs/agent-browser) and operate desktop apps with [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-driver), both shipped with Razor, and search the web through Exa, Parallel or Firecrawl, or their model's own search. |
 | Several machines | Pair the Razor servers on your machines over Tailscale, and see each one's agents from the others. |
 | Extensions | MCP servers, your own scripts as tools, plugins that can change or refuse what agents do, and `razor --print` for scripts. |

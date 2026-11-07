@@ -11,6 +11,7 @@ use crate::protocol::{
     AgentView, Body, CloseReason, End, Entry, EntryId, Environment, Follow, Following, Input, Live,
     Millis, NotificationLevel, Push, SessionId, State, now,
 };
+use crate::record::Summary;
 use aws_lc_rs::rand::SystemRandom;
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
 use axum::http::StatusCode;
@@ -218,41 +219,10 @@ impl Sender {
                         && s.last_end == Some(End::Done)
                         && !s.idle_handover
                         && s.close_reason != Some(CloseReason::Idle);
-                    // Read the end's input boundary, not the delivery channel: status may win
-                    // that race. A note's own push replaces only this turn's finished alert.
-                    let (mut noted, mut senders) = (false, Vec::new());
-                    if done
-                        && let Ok(line) = self.app.controller.get(&session, s.last).await
-                        && let Ok(Entry {
-                            body: Body::TurnEnd { inputs, .. },
-                            ..
-                        }) = serde_json::from_str::<Entry>(&line)
-                    {
-                        if let Some(first) = inputs.iter().min()
-                            && let Ok(deliveries) = self.app.deliveries.list(None, 256, &[]).await
-                        {
-                            noted = deliveries.iter().any(|d| {
-                                d.session == session
-                                    && d.file.is_none()
-                                    && d.url.is_none()
-                                    && d.entry > *first
-                                    && d.entry < s.last
-                            });
-                        }
-                        for input in inputs {
-                            if let Ok(line) = self.app.controller.get(&session, input).await
-                                && let Ok(Entry {
-                                    body:
-                                        Body::Input(Input {
-                                            device: Some(d), ..
-                                        }),
-                                    ..
-                                }) = serde_json::from_str::<Entry>(&line)
-                            {
-                                senders.push(d);
-                            }
-                        }
-                    }
+                    let (noted, senders) = match done {
+                        true => self.answered(&s).await,
+                        false => (false, Vec::new()),
+                    };
                     let kind =
                         (stuck.then_some("stuck")).or((done && !noted).then_some("finished"));
                     let alert = |kind| (kind, session.clone(), Some(s.last), senders);
@@ -262,6 +232,50 @@ impl Sender {
             }
         }
         self.rows.insert(session, row);
+    }
+
+    /// The turn that ended at `s.last`: whether the session noted something to the person during
+    /// it, whose own push replaces the turn's finished alert, and the devices that sent the inputs
+    /// it answered. Read from the end's input boundary, not the delivery channel: status may win
+    /// that race.
+    async fn answered(&self, s: &Summary) -> (bool, Vec<String>) {
+        let session = &s.session;
+        let end = async {
+            let line = self.app.controller.get(session, s.last).await.ok()?;
+            match serde_json::from_str::<Entry>(&line).ok()?.body {
+                Body::TurnEnd { inputs, .. } => Some(inputs),
+                _ => None,
+            }
+        };
+        let (mut noted, mut senders) = (false, Vec::new());
+        let Some(inputs) = end.await else {
+            return (noted, senders);
+        };
+        if let Some(first) = inputs.iter().min()
+            && let Ok(deliveries) = self.app.deliveries.list(None, 256, &[]).await
+        {
+            noted = deliveries.iter().any(|d| {
+                d.session == *session
+                    && d.file.is_none()
+                    && d.url.is_none()
+                    && d.entry > *first
+                    && d.entry < s.last
+            });
+        }
+        for input in inputs {
+            if let Ok(line) = self.app.controller.get(session, input).await
+                && let Ok(Entry {
+                    body:
+                        Body::Input(Input {
+                            device: Some(d), ..
+                        }),
+                    ..
+                }) = serde_json::from_str::<Entry>(&line)
+            {
+                senders.push(d);
+            }
+        }
+        (noted, senders)
     }
 
     /// Queues the alert for each device with a token whose level and mutes let it through. Its
@@ -452,14 +466,8 @@ fn activity(
     event: &str,
     priority: u8,
 ) -> Message {
-    let (at, date) = (
-        now() / 1000,
-        if event == "end" {
-            "dismissal-date"
-        } else {
-            "stale-date"
-        },
-    );
+    let at = now() / 1000;
+    let date = ["stale-date", "dismissal-date"][usize::from(event == "end")];
     let mut payload = json!({"aps": {"timestamp": at, "event": event, "content-state": following}});
     payload["aps"][date] = json!(at + STALE);
     Message(device, push, "liveactivity", priority, payload)

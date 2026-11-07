@@ -3,7 +3,7 @@
 //! With motion on, a clicked card grows into the split, and shrinks back to it after.
 use super::motion::{Moving, ease_out, progress};
 use super::tools::rim::Rim;
-use super::view::{self, Action, Hit, PHONE, Question};
+use super::view::{self, Action, Hit, PHONE};
 use super::{App, cards, gauge, picker, text::*, tools};
 use crate::protocol::{SessionId, State};
 use crate::terminal::bindings;
@@ -75,7 +75,6 @@ pub fn draw(
     app: &mut App,
     b: &mut Buffer,
     area: Rect,
-    question: Question,
     now: u64,
     hits: &mut Vec<Hit>,
 ) -> Option<(u16, u16)> {
@@ -98,7 +97,7 @@ pub fn draw(
         true => app.composer.phone_rows(app, right.width, right.height),
         false => app.composer.rows(app, right.width, right.height),
     };
-    let stack = view::band(app, &question, right.width, right.height, now);
+    let stack = view::band(app, right.width, right.height, now);
     let stack = stack.min(right.height.saturating_sub(card));
     let rest = right.height.saturating_sub(card + stack);
     let header = match right.height {
@@ -122,13 +121,10 @@ pub fn draw(
     view::transcript(app, b, transcript, &focus, now, hits);
     family(app, b, at(transcript.bottom(), band), &focus, now, hits);
     let stack = at(right.y + rest, stack);
-    view::stack(app, b, stack, question, now, hits);
+    view::stack(app, b, stack, now, hits);
     let editor = at(stack.bottom(), card);
-    picker::draw(
-        app,
-        b,
-        at(transcript.y, editor.y.saturating_sub(transcript.y)),
-    );
+    let above = editor.y.saturating_sub(transcript.y);
+    picker::draw(app, b, at(transcript.y, above));
     let cursor = match phone {
         true => app.composer.phone(app, b, editor, hits),
         false => app.composer.draw(app, b, editor, now, hits),
@@ -258,33 +254,17 @@ fn card(app: &App, hits: &[Hit], child: &SessionId) -> Option<[i32; 4]> {
 // transcript and the way back.
 fn main(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit>) {
     let Some(id) = app.root.clone() else { return };
-    let agent = app.agents.get(&id);
-    super::topbar::draw(
-        app,
-        b,
-        Rect::new(r.x, r.y, r.width, r.height.min(4)),
-        agent,
-        false,
-        now,
-    );
+    let bar = Rect::new(r.x, r.y, r.width, r.height.min(4));
+    super::topbar::draw(app, b, bar, app.agents.get(&id), false, now);
     if r.height < 7 {
         return;
     }
-    let tape = if r.width >= 80 {
-        gauge::columns(app)
-    } else {
-        0
-    };
+    let tape = gauge::columns(app) * u16::from(r.width >= 80);
     let body = Rect::new(r.x + tape, r.y + 4, r.width - tape, r.height - 4);
+    let column = Rect::new(r.x, body.y, tape, body.height);
     match tape {
         0 => gauge::horizontal(app, b, Rect { height: 1, ..body }, Some(&id), now),
-        _ => gauge::draw(
-            app,
-            b,
-            Rect::new(r.x, body.y, tape, body.height),
-            Some(&id),
-            now,
-        ),
+        _ => gauge::draw(app, b, column, Some(&id), now),
     }
     let top = u16::from(tape == 0);
     let transcript = Rect::new(body.x, body.y + top, body.width, body.height - top - 1);
@@ -292,21 +272,17 @@ fn main(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit>) {
     let footer = Rect::new(body.x, r.bottom() - 1, body.width, 1);
     fill(b, footer, style(GRAY_DIM, RECESS));
     // Questions waiting on the main side are counted, in cyan.
-    let root = app.root.as_ref().and_then(|root| app.agents.get(root));
-    let asks = root.map_or(0, |a| a.asks.len());
-    let more = if asks > 0 {
-        format!("{asks} for you · ")
-    } else {
-        String::new()
+    let asks = app.agents.get(&id).map_or(0, |a| a.asks.len());
+    let more = match asks {
+        0 => String::new(),
+        n => format!("{n} for you · "),
     };
-    let (room, ink) = (
-        footer.width.saturating_sub(2),
+    let words = format!("main · paused · {more}<composer.back> to go back");
+    let (words, ink) = (
+        bindings::text(app, &words),
         [GRAY, CYAN][usize::from(asks > 0)],
     );
-    let words = bindings::text(
-        app,
-        &format!("main · paused · {more}<composer.back> to go back"),
-    );
+    let room = footer.width.saturating_sub(2);
     put(b, footer.x + 2, footer.y, &words, room, style(ink, RECESS));
     hits.push((footer, Action::Back));
 }
@@ -334,18 +310,12 @@ fn ancestry(app: &App, b: &mut Buffer, r: Rect, id: &SessionId, hits: &mut Vec<H
             (false, 0) => style(GRAY, GLASS),
             (false, _) => style(DATA, GLASS),
         };
-        let (lead, ink) = if i == 0 {
-            ("‹ ", GRAY)
-        } else {
-            (" › ", GRAY_DIM)
-        };
+        let (lead, ink) = [(" › ", GRAY_DIM), ("‹ ", GRAY)][usize::from(i == 0)];
         let start = put(b, x, r.y, lead, right.saturating_sub(x), style(ink, GLASS));
         x = put(b, start, r.y, name, right.saturating_sub(start), words);
         if session != id && x > start {
-            hits.push((
-                Rect::new(start, r.y, x - start, 1),
-                Action::Child(session.clone()),
-            ));
+            let at = Rect::new(start, r.y, x - start, 1);
+            hits.push((at, Action::Child(session.clone())));
         }
     }
 }

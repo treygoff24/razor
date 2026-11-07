@@ -1,4 +1,4 @@
-use super::{Children, Error, TEXT, branch, files, find, git, other, refuse, remote};
+use super::{Children, Error, TEXT, branch, files, find, other, refuse, remote};
 use crate::config;
 use crate::controller::Controller;
 use crate::protocol::Speed;
@@ -61,7 +61,7 @@ pub(super) enum Agent {
     },
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 pub(super) struct Start {
     pub(super) name: String,
     pub(super) server: Option<String>,
@@ -169,11 +169,7 @@ impl Children {
                     to: String::new(),
                     id: (caller.clone(), at),
                     kind: MailKind::Note,
-                    from: if caller_summary.name.is_empty() {
-                        caller.to_string()
-                    } else {
-                        caller_summary.name.clone()
-                    },
+                    from: super::message::sender(&caller_summary),
                     project: super::project(&caller_summary),
                     text: brief,
                 };
@@ -324,43 +320,30 @@ impl Children {
             Some(_) => start.brief.clone(),
             None => start.text(&parent, &children).await?,
         };
-        let cwd = parent.cwd.join(start.cwd.clone().unwrap_or_default());
-        if let Some(server) = &start.server {
-            let root = controller
-                .summary(&super::remote::root(controller, caller).await?)
-                .await?;
-            if root
-                .child
-                .as_ref()
-                .is_some_and(|c| c.parent.address().is_some())
-            {
-                return refuse(
-                    "A remote child's subtree starts children on its own server; omit server.",
-                );
-            }
-            // Validate enrollment before recording an outstanding task.
-            if controller.devices().peer(server).await.is_none() {
-                return refuse(format!(
-                    "{server} is not paired; pair it before starting a child."
-                ));
-            }
-        }
-        let cwd = if start.server.is_some() {
-            cwd
-        } else {
-            fs::canonicalize(cwd)
-                .await
-                .map_err(other("opening the child's folder"))?
-        };
-        let found = match (&start.server, &start.placement) {
-            (None, Placement::Worktree) => git::plan(&cwd).await?,
-            _ => None,
-        };
         let session = SessionId::new();
-        let dir = self.dir(&session);
-        let (worktree, cwd) = match found {
-            Some((worktree, inside)) => (Some(worktree), dir.join("worktree").join(inside)),
-            None => (None, cwd),
+        let cwd = parent.cwd.join(start.cwd.clone().unwrap_or_default());
+        let (worktree, cwd) = match &start.server {
+            Some(server) => {
+                let root = remote::root(controller, caller).await?;
+                if (controller.summary(&root).await?.child)
+                    .is_some_and(|c| c.parent.address().is_some())
+                {
+                    return refuse(
+                        "A remote child's subtree starts children on its own server; omit server.",
+                    );
+                }
+                // Validate enrollment before recording an outstanding task.
+                if controller.devices().peer(server).await.is_none() {
+                    return refuse(format!(
+                        "{server} is not paired; pair it before starting a child."
+                    ));
+                }
+                (None, cwd)
+            }
+            None => {
+                let worktree = matches!(start.placement, Placement::Worktree);
+                self.place(&session, cwd, worktree).await?
+            }
         };
         let held = self.starts.lock().await;
         let taken = remote::names(controller, caller).await?;
@@ -383,24 +366,30 @@ impl Children {
         let mut input = Input::new(Origin::Mail { id, kind, from }, text);
         input.video = start.video;
         // A local child's record comes first; the parent's `Started` is the task its reports name.
-        let remote = start.server.as_ref().map(|server| session.on(server));
-        if remote.is_none() {
-            let (id, choice) = (Some(session.clone()), (Some(effort), Some(speed)));
-            let child = Some(child.clone());
-            let model = Some(model.clone());
-            controller
-                .create(cwd.clone(), model, choice, id, child, None)
-                .await?;
-        }
-        let started = remote.clone().unwrap_or_else(|| session.clone());
+        let recorded = match &start.server {
+            Some(server) => session.on(server),
+            None => {
+                let (id, choice) = (Some(session.clone()), (Some(effort), Some(speed)));
+                let child = Some(child.clone());
+                let model = Some(model.clone());
+                controller
+                    .create(cwd.clone(), model, choice, id, child, None)
+                    .await?;
+                session.clone()
+            }
+        };
         let event = ChildEvent::Started(child.clone());
         let started = Body::Child {
-            session: started,
+            session: recorded.clone(),
             event,
         };
         input.child_task = Some(controller.append(caller, started).await?);
         drop(held);
-        if let (Some(server), Some(remote)) = (&start.server, remote) {
+        let stopped = Body::Child {
+            session: recorded.clone(),
+            event: ChildEvent::Stopped,
+        };
+        if let Some(server) = &start.server {
             let request = ChildRequest::Start {
                 session,
                 child,
@@ -414,32 +403,21 @@ impl Children {
             let result = controller.devices().child(server, &request).await;
             return match result {
                 Ok(mut value) => {
-                    value["session"] = json!(remote);
+                    value["session"] = json!(recorded);
                     Ok(value)
                 }
                 Err(e) => {
-                    controller
-                        .append(
-                            caller,
-                            Body::Child {
-                                session: remote.clone(),
-                                event: ChildEvent::Stopped,
-                            },
-                        )
-                        .await?;
+                    controller.append(caller, stopped).await?;
                     refuse(format!(
-                        "Starting child {remote} failed; inspect its session and use agent stop before retrying: {e}"
+                        "Starting child {recorded} failed; inspect its session and use agent stop before retrying: {e}"
                     ))
                 }
             };
         }
         if let Some(worktree) = &worktree
-            && let Err(e) = git::add(worktree, &dir.join("worktree"), &branch(&session)).await
+            && let Err(e) = self.checkout(&session, worktree).await
         {
-            let (session, event) = (session, ChildEvent::Stopped);
-            controller
-                .append(caller, Body::Child { session, event })
-                .await?;
+            controller.append(caller, stopped).await?;
             return Err(e);
         }
         controller.admit(&session, input).await?;

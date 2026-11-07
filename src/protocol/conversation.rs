@@ -1,6 +1,6 @@
 //! The messages both model paths exchange with the session controller.
 
-use super::{Body, CallId, EntryId, Image, Native, SessionId, Usage, UsageWindow};
+use super::{Body, CallId, Effort, EntryId, Image, Native, SessionId, Speed, Usage, UsageWindow};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -13,8 +13,8 @@ pub(crate) enum ToBridge {
         open: u64,
         cwd: PathBuf,
         model: String,
-        effort: crate::protocol::Effort,
-        speed: crate::protocol::Speed,
+        effort: Effort,
+        speed: Speed,
         resume: Option<Resume>,
         /// The system prompt, read from the startup list.
         prompt: String,
@@ -31,8 +31,8 @@ pub(crate) enum ToBridge {
     Effort {
         session: SessionId,
         model: String,
-        effort: crate::protocol::Effort,
-        speed: crate::protocol::Speed,
+        effort: Effort,
+        speed: Speed,
         /// A changed effort's fact: a busy Claude turn yields with one notice at its boundary.
         notice: Option<EntryId>,
     },
@@ -59,7 +59,7 @@ pub(crate) enum ToBridge {
         settle: bool,
         /// On the Claude path, images the cell's nested results named, shown after its output.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        images: Vec<super::Image>,
+        images: Vec<Image>,
     },
     /// Escape: the turn stops and the path ends it stopped itself; the conversation goes on.
     Interrupt { session: SessionId },

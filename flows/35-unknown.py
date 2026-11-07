@@ -42,6 +42,6 @@ with flow(replies) as f:
     rebuilds = [e for e in entries if e["kind"] == "rebuild"]
     assert len(rebuilds) == 1 and rebuilds[0]["trigger"] == "restart", rebuilds
     assert (f.cwd / "runs.txt").read_text() == "ran\n", "the command ran again"
-    fresh = json.loads((f.requests / "002.body").read_bytes())
+    fresh = f.request(2)
     assert "runs.txt" in json.dumps(fresh["messages"]), "the rebuilt context omits the call"
     assert "toolu_dies" not in json.dumps(fresh["messages"]), "the old call was replayed as a tool_use"

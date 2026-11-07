@@ -1,5 +1,6 @@
 //! A session's append-only JSONL record: one read at open, then indexed reads and a fold.
 
+mod calls;
 mod cursor;
 mod rebuild;
 mod reply;
@@ -7,14 +8,18 @@ mod runs;
 mod search;
 mod summary;
 mod text;
+pub(crate) use calls::{action, ask, target};
 pub(crate) use cursor::Summaries;
 pub(crate) use reply::{Hold, reply, shown};
 pub use search::backfill;
 pub(crate) use search::search;
-pub(crate) use summary::{ChildSummary, Meeting, MeetingState, Summary, ask, preview, target};
+pub(crate) use summary::{ChildSummary, Meeting, MeetingState, Summary, preview};
 pub(crate) use text::{call_line, calls_left_out, handover, heard, interrupted, length};
 
-use crate::protocol::{Body, Child, Entry, EntryId, JobEvent, Native, SessionId, Thread, now};
+use crate::protocol::{
+    Body, Child, ChildEvent, Entry, EntryId, JobEvent, Millis, ModelSettings, Native, SessionId,
+    Thread, now,
+};
 use std::{
     fmt,
     io::{BufRead as _, ErrorKind},
@@ -34,7 +39,7 @@ pub(crate) const UNKNOWN: &str = include_str!("text/unknown.md");
 pub(crate) const STOPPED: &str = include_str!("text/stopped.md");
 
 /// What `recall` answers for a thinking entry, in any session (RULES.md 16).
-pub(crate) const REASONING: &str = include_str!("../controller/session/reasoning.md");
+pub(crate) const REASONING: &str = include_str!("text/reasoning.md");
 pub(crate) const UPKEEP: &str = include_str!("text/upkeep.md");
 
 /// The one separator between a turn's closing Text blocks, also used when bounding reports.
@@ -48,7 +53,7 @@ pub fn closing_text(texts: &[String]) -> String {
 /// One session task owns the writer; readers use fixed byte ranges of the same file.
 pub(crate) struct Record {
     /// The last entry's time at open, before recovery can append anything.
-    pub(crate) last_activity: crate::protocol::Millis,
+    pub(crate) last_activity: Millis,
     dir: PathBuf,
     marker: PathBuf,
     /// Whether the marker exists; after a crash it may be stale until `mark` settles it.
@@ -70,7 +75,7 @@ impl Record {
         session: &SessionId,
         cwd: PathBuf,
         model: String,
-        settings: crate::protocol::ModelSettings,
+        settings: ModelSettings,
         profile_version: String,
         name: String,
         child: Option<Child>,
@@ -103,7 +108,7 @@ impl Record {
             file,
             failed: false,
             offsets: vec![0],
-            summary: Summary::new(session, &cwd, &model, settings),
+            summary: Summary::new(session),
         };
         record
             .append(
@@ -128,11 +133,6 @@ impl Record {
         let dir = home.join("sessions").join(session.as_str());
         let path = dir.join("record.jsonl");
         let file = open(&dir, session).await?;
-        let damaged = |line, why| Error::Damaged {
-            session: session.clone(),
-            line,
-            why,
-        };
         let reader = BufReader::with_capacity(64 * 1024, file);
         let mut offsets = vec![0];
         let mut summary: Option<Summary> = None;
@@ -140,7 +140,7 @@ impl Record {
             offsets.push(offsets[offsets.len() - 1] + size);
         })
         .await?;
-        let summary = summary.ok_or_else(|| damaged(1, "the record is empty".into()))?;
+        let summary = summary.ok_or_else(|| damaged(session, 1, EMPTY.into()))?;
         let file = OpenOptions::new()
             .append(true)
             .open(&path)
@@ -176,15 +176,15 @@ impl Record {
                 .await
                 .map_err(io("cutting off a failed append"))?;
         }
-        let remote_task = matches!(&body, Body::Child { session, event:
-            crate::protocol::ChildEvent::Started(_) | crate::protocol::ChildEvent::Continued }
-            if session.address().is_some());
-        if remote_task
-            || matches!(
-                body,
-                Body::Input(_) | Body::Rebuild { .. } | Body::Job(JobEvent::Started { .. })
-            )
-        {
+        let live = match &body {
+            Body::Child {
+                session,
+                event: ChildEvent::Started(_) | ChildEvent::Continued,
+            } => session.address().is_some(),
+            Body::Input(_) | Body::Rebuild { .. } | Body::Job(JobEvent::Started { .. }) => true,
+            _ => false,
+        };
+        if live {
             self.mark(true).await?;
         }
         let entry = Entry {
@@ -285,7 +285,8 @@ impl Record {
         serde_json::from_str(&self.get(id).await?).map_err(|e| self.damaged(id, e.to_string()))
     }
 
-    /// Open stored lines after a cursor, ending at the current boundary; a missing record is Missing at open.
+    /// Open stored lines after a cursor, ending at the current boundary; a missing record is
+    /// Missing at open.
     pub(crate) async fn replay(&self, after: EntryId) -> Result<Replay, Error> {
         self.range(
             (after.0 as usize).min(self.offsets.len() - 1),
@@ -325,11 +326,7 @@ impl Record {
     }
 
     fn damaged(&self, id: EntryId, why: String) -> Error {
-        Error::Damaged {
-            session: self.summary.session.clone(),
-            line: id.0,
-            why,
-        }
+        damaged(&self.summary.session, id.0, why)
     }
 }
 
@@ -445,6 +442,15 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
     let done = tokio::task::spawn_blocking(f).await;
     done.map_err(|e| io("scanning the sessions")(std::io::Error::other(e)))
 }
+
+/// The record cannot be read at `line`, for the reason `why` gives.
+fn damaged(session: &SessionId, line: u64, why: String) -> Error {
+    let session = session.clone();
+    Error::Damaged { session, line, why }
+}
+
+/// A record with no complete line: its Start never landed.
+const EMPTY: &str = "the record is empty";
 
 fn io(doing: &'static str) -> impl FnOnce(std::io::Error) -> Error {
     move |source| Error::Io { doing, source }

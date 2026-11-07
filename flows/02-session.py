@@ -5,6 +5,7 @@ import subprocess
 import threading
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import chat
 from driver import BINARY, REPLIES, Reply, flow
 from terminal import Terminal
 import server
@@ -14,9 +15,7 @@ prompt = "Hello"
 # An immediate chat reply sends its live words before committing them. Print must subscribe
 # before admitting input, including on resume; stored entries cannot replay these lines. A relay
 # holds the real input acknowledgment until the turn ends, making the scheduling gap repeatable.
-chunks = [{"choices": [{"index": 0, "delta": {"reasoning_content": "Fast thought.", "content": "Fast reply."}}]},
-          {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}]
-fast = Reply(("".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n").encode())
+fast = chat.reply({"reasoning_content": "Fast thought.", "content": "Fast reply."})
 with flow([fast] * 4, model="glm-5.3-flash",
           config='[providers.runinfra]\nbase_url = "{standin}"\n', env={"RUNINFRA_API_KEY": "flow-key"}) as f:
     server.start(f)
@@ -70,9 +69,7 @@ with flow([Reply((REPLIES / "hello.sse").read_bytes())]) as f:
     (f.cwd / "AGENTS.md").write_text("flow agents rules\n@shared.md\n@absent.md\n")
     (f.cwd / "shared.md").write_text("flow shared include\n")
     (f.cwd / "CLAUDE.md").write_text("flow claude rules\n")
-    result = f.run(prompt, "--print=json", "--speed", "fast")
-    assert result.returncode == 0, result.stderr
-    answer = json.loads(result.stdout)
+    answer = f.ask(prompt, "--speed", "fast")
     assert answer["message"] == "flow reply", answer
     session = answer["session"]
     entries = list(f.record(session))
@@ -83,7 +80,7 @@ with flow([Reply((REPLIES / "hello.sse").read_bytes())]) as f:
     assert texts == ["flow reply"], texts
     assert entries[-1]["inputs"] == [inputs[0]["id"]], entries[-1]
     assert entries[-1]["end"] == "done", entries[-1]
-    request = json.loads((f.requests / "001.body").read_bytes())
+    request = f.request(1)
     assert request.get("speed") == "fast", request
     assert prompt in json.dumps(request["messages"]), request
     system = request["system"][-1]["text"]
@@ -106,7 +103,7 @@ with flow([Reply((REPLIES / "hello.sse").read_bytes())],
     (f.cwd / "AGENTS.md").write_text("flow agents rules")
     result = f.run("--print=json", input=prompt)
     assert result.returncode == 0, result.stderr
-    request = json.loads((f.requests / "001.body").read_bytes())
+    request = f.request(1)
     assert request.get("speed") in (None, "standard"), request
     system = request["system"][-1]["text"]
     assert system.startswith(f"flow note a\n\nflow note b\n\nContents of {f.cwd.resolve()}/AGENTS.md:\n\nflow agents rules\n\n# Your tools"), system

@@ -5,7 +5,7 @@ use super::{
     text::*,
     view::{Action, Hit, PHONE},
 };
-use crate::protocol::{Ask, EntryId, SessionId};
+use crate::protocol::{Ask, SessionId};
 use crate::terminal::bindings;
 use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, text::Span};
 
@@ -49,7 +49,7 @@ fn wrapped(text: &str, columns: u16) -> Vec<std::ops::Range<usize>> {
         if !last || !parts.is_empty() {
             let line = &text[range.clone()];
             let start = range.start + line.len() - line.trim_start().len();
-            rows.push(start..range.start + line.trim_end().len());
+            rows.push(start..(range.start + line.trim_end().len()).max(start));
         }
         true
     });
@@ -69,12 +69,8 @@ pub fn rows(app: &App, ask: &Ask, width: u16, height: u16) -> u16 {
 }
 
 /// Draws the band; only an option shown in full is a click and number target.
-pub fn draw(
-    app: &App,
-    b: &mut Buffer,
-    r: Rect,
-    (session, _, q): &(SessionId, EntryId, Ask),
-) -> Vec<Hit> {
+pub fn draw(app: &App, b: &mut Buffer, r: Rect, q: &Ask) -> Vec<Hit> {
+    let session = &q.id.0;
     let mut hits = Vec::new();
     if r.width < 3 || r.height == 0 {
         return hits;
@@ -208,8 +204,10 @@ fn options_rows(
             (dy, full) = (dy + 1, last);
             dy < tall && !last
         });
-        let action =
-            [Action::Cut, Action::Option(q.id.clone(), n.into())][usize::from(full)].clone();
+        let action = match full {
+            true => Action::Option(q.id.clone(), n.into()),
+            false => Action::Cut,
+        };
         hits.push((Rect::new(r.x, y, r.width, tall), action));
     }
 }

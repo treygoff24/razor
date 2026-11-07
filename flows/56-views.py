@@ -9,10 +9,9 @@ import mcp
 import os
 import shutil
 from dataclasses import replace
-from types import SimpleNamespace
 import time
-from driver import flow
-from model import agent, message, reply
+from driver import Reply, flow
+from model import agent, message, reply, tool
 from server import Local, send, stop, until, wait
 from terminal import Terminal
 
@@ -20,18 +19,23 @@ replies = [agent("RESIDENT_56", "start", name="resident-kid56", brief="Deliver a
            reply("RESIDENT_56", text="Started."),
            agent("You are resident-kid56,", "start", name="resident-grandkid56", brief="Wait.", placement="in_place"),
            reply("You are resident-grandkid56,", "Bash", {"command": "sleep 60"}),
-           reply("You are resident-kid56,", "mcp__razor__deliver", {"line": "resident-unread56", "url": "https://example.com/resident56"}),
+           tool("You are resident-kid56,", "deliver", line="resident-unread56", url="https://example.com/resident56"),
            reply("You are resident-kid56,", text="Idle with a delivery."),
            reply("THREAD_56", text="thread56"), reply("voice-words56", text="voice56"), reply("FLOW_A56", text="alpha-visible"), reply("FLOW_B56", text="beta-visible"),
-           reply("FLOW_C56", "mcp__razor__deliver", {"line": "unread56", "url": "https://example.com/unread56"}), reply("FLOW_C56", text="loose-visible"), reply("STEER_56", "Bash", {"command": "printf observed56"}),
+           tool("FLOW_C56", "deliver", line="unread56", url="https://example.com/unread56"), reply("FLOW_C56", text="loose-visible"), reply("STEER_56", "Bash", {"command": "printf observed56"}),
            reply("STEER_56", text="steered"),
-           reply("WORK_56", "Bash", {"command": "sleep 60"}),
+           reply("WORK_56", "Bash", {"command": "sleep 600", "timeout": 600000}),
            message("ASK_56", "question", text="Choose 56", options=["yes", "no"]),
            reply("ASK_56", text="answered56"),
            reply("You are kid56,", "Bash", {"command": "sleep 2"}),
-           reply("You are kid56,", "mcp__razor__mcp__ask56__form", {}),
+           tool("You are kid56,", "mcp__ask56__form"),
            agent("CHILD_56", "start", name="kid56", brief="Wait.", placement="in_place"),
-           reply("CHILD_56", text="parent56")]
+           reply("CHILD_56", text="parent56"),
+           reply("You are helper56,", "Bash", {"command": "sleep 600", "timeout": 600000}),
+           agent("LEAD_56", "start", name="helper56", brief="Work.", placement="in_place"),
+           message("LEAD_56", "question", text="Lead asks 56", options=["yes", "no"]),
+           reply("LEAD_56", text="asked56"), reply("LEAD_56", text="led56"),
+           Reply(b'{"type": "error", "error": {"type": "permission_error", "message": "Failed56."}}', status=403, match="FAIL_56")]
 # The recorder and the transcriber are stand-ins for devices: a steady tone, and one phrase.
 voice = 'capture = ["/usr/bin/python3", "-c", "import os,struct,time\\nwhile 1: os.write(1,struct.pack(\'<h\',5000)*1600); time.sleep(.1)"]\ntranscribe = ["/bin/sh", "-c", "cat >/dev/null; echo voice-words56"]\n'
 with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress = "127.0.0.1:0"\n[mcp.ask56]\nurl = "{external.url}/mcp"\ntools = ["form"]') as f:
@@ -72,13 +76,55 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
         def session(where, home, text):
             made = request(home, "POST", "/sessions", {"cwd": str(where.cwd)})["session"]
             request(home, "POST", f"/sessions/{made}/input", {"text": text})
-            path = home / "sessions" / made / "record.jsonl"
-            records = SimpleNamespace(record=lambda _: map(json.loads, path.read_bytes().split(b"\n")[:-1]))
-            until(records, made, lambda es: es[-1]["kind"] == "turn_end")
+            until(where, made, lambda es: es[-1]["kind"] == "turn_end")
             return made
 
         there = session(alpha, a, "FLOW_A56")
         here, unclaimed = session(beta, b, "FLOW_B56"), session(loose, b, "FLOW_C56")
+
+        def layout(home, version, test=lambda _: True):
+            layouts, deadline = {}, time.monotonic() + 30
+            with status(home, "?views=true") as stream:
+                for l in map(json.loads, iter(stream.readline, b"")):
+                    assert time.monotonic() < deadline, f"Views never reached version {version}"
+                    if l["kind"] == "views":
+                        layouts.update((v["name"], v) for v in l["layouts"])
+                        l["layouts"] = [layouts[n] for n in l["names"] if n in layouts]
+                        if l["version"] == version and not l["error"] and test(l): return l
+
+        # 0. The Default view groups by state: an asking root is listed once, in NEEDS YOU with its
+        # working helper under it, and the list, the overview and its census show it once.
+        lead = request(a, "POST", "/sessions", {"cwd": str(loose.cwd)})["session"]
+        request(a, "PUT", f"/sessions/{lead}/name", "lead56")
+        request(a, "POST", f"/sessions/{lead}/input", {"text": "LEAD_56"})
+        helper = next(e["session"] for e in until(f, lead, lambda es: any(e["kind"] == "child" for e in es)) if e["kind"] == "child")
+        needing = lambda l: next(s["sessions"] for s in l["layouts"][0]["sections"] if s["kind"] == "needs_you") == [{"session": lead, "depth": 0}, {"session": helper, "depth": 1}]
+        sections = layout(a, 0, lambda l: any(s["kind"] == "needs_you" for s in l["layouts"][0]["sections"]) and needing(l))["layouts"][0]["sections"]
+        assert not any(r["session"] in (lead, helper) for s in sections if s["kind"] != "needs_you" for r in s["sessions"]), sections
+        with Terminal(alpha, "--resume", there, columns=160, rows=50) as t:
+            t.shown("alpha-visible")
+            t.send("\x1bOQ")
+            t.shown("NEEDS YOU", "helper56", " ◆ 1 NEED YOU ")
+            assert sum(" lead56 " in line[:t.screen.display[0].index("┌")] for line in t.screen.display) == 1, t.text()  # in the list
+            t.send("\x1bOR")
+            t.shown("◆ 1 ASK", "helper56")  # in the census and, with its helper, in a tile
+            for _ in range(6):
+                if t.pump(0.3, lambda t: any("▶ lead56 " in line for line in t.screen.display)):
+                    break
+                t.send("k")
+            else:
+                raise AssertionError("k never reached lead56 in the overview:\n" + t.text())
+        request(a, "POST", f"/sessions/{helper}/stop", {})  # stopped before its call ends and asks the model again
+        ask = [e for e in f.record(lead) if e["kind"] == "call"][-1]["id"]
+        request(a, "POST", f"/sessions/{lead}/asks/{ask}", {"option": 0})
+        until(f, lead, lambda es: any(e.get("text") == "led56" for e in es))
+        # The person's turn with the helper fails, so it makes no report and waits on them: its
+        # row under its root reads the error, as its own row would, never idle.
+        request(a, "POST", f"/sessions/{helper}/input", {"text": "FAIL_56"})
+        with Terminal(alpha, "--resume", there, columns=160, rows=50) as t:
+            t.shown("alpha-visible")
+            t.send("\x1bOQ")
+            t.shown("▲ helper56  error")
 
         # 1. The owner serves version 0; a write through B is forwarded and both read version 1,
         # an old view's `claims` saved as `matches`.
@@ -100,16 +146,6 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
         assert request(a, "GET", "/views") == saved
 
         # 3. Layouts carry only resolved ids, agree across both servers, and reconnect whole.
-        def layout(home, version, test=lambda _: True):
-            layouts, deadline = {}, time.monotonic() + 30
-            with status(home, "?views=true") as stream:
-                for l in map(json.loads, iter(stream.readline, b"")):
-                    assert time.monotonic() < deadline, f"Views never reached version {version}"
-                    if l["kind"] == "views":
-                        layouts.update((v["name"], v) for v in l["layouts"])
-                        l["layouts"] = [layouts[n] for n in l["names"] if n in layouts]
-                        if l["version"] == version and not l["error"] and test(l): return l
-
         resolved = layout(b, 1)
         assert resolved["names"] == ["Work"] and "views" not in resolved, resolved
         atlas = next(s for s in resolved["layouts"][0]["sections"] if s["id"] == "group/g56")
@@ -222,8 +258,9 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
             t.until(lambda t: "❯" in t.screen.display[y(names[here])][:52])
             t.pump(1)
             assert "beta-visible" not in conversation() and "steered" in conversation(), t.text()
-            records = list(map(json.loads, (b / "sessions" / here / "record.jsonl").read_text().splitlines()))
+            records = list(beta.record(here))
             assert all(e.get("end") != "stopped" for e in records), records[-3:]
+            request(b, "POST", f"/sessions/{here}/stop", {})  # stopped before its call ends and asks the model again
             t.send("\r\x19")
             t.shown("── USAGE", "AGENTS · WORK", "beta-visible")
             t.send("/view Other\r")

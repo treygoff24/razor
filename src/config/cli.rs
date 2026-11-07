@@ -1,6 +1,6 @@
 //! Local settings commands share the loader's validation and the MCP editor's atomic writer.
 
-use super::{Error, Settings, mcp, pack};
+use super::{Error, Settings, pack};
 use crate::protocol::McpScope;
 use std::path::Path;
 use toml_edit::{DocumentMut, Item, Key, Table, Value};
@@ -116,20 +116,17 @@ fn edit(
         }
         parent.insert(key, value);
     } else if !remove(document.as_item_mut(), keys) {
-        return Ok(format!(
-            "{} has no override for {}.",
-            path.display(),
-            args[1]
-        ));
+        let (path, key) = (path.display(), &args[1]);
+        return Ok(format!("{path} has no override for {key}."));
     }
     let after = document.to_string();
     settings.check_edit(&path, &after, project)?;
     if !project && let Some(home) = path.parent() {
         super::make_home(home)?;
     }
-    mcp::replace(&path, &before, &after)?;
+    pack::replace(&path, &before, &after)?;
     if project && scope == McpScope::Private && before.is_empty() {
-        let _ = mcp::exclude_private(&path);
+        let _ = pack::exclude_private(&path);
     }
     Ok(format!("Saved {} in {}.", args[1], path.display()))
 }

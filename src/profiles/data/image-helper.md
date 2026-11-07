@@ -1,0 +1,1 @@
+To make or edit an image, start a GPT helper with the agent tool using model `sol` and ask it to report the image file's path. You can view or deliver that file.

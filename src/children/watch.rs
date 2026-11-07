@@ -1,8 +1,8 @@
 //! A video's watcher: a child Razor starts on a Gemini model when the model reading a video
 //! cannot see it (docs/design/video.md).
 
-use super::agent::{Kind, Placement, Start};
-use super::{Children, message::words, project};
+use super::agent::{Placement, Start};
+use super::{Children, project, words};
 use crate::controller::{self, Controller};
 use crate::protocol::{Body, Entry, EntryId, Input, Origin, SessionId, video_type};
 use crate::record::length;
@@ -108,18 +108,13 @@ impl Children {
                 .replace("{words}", &words.collect::<String>());
             let config = controller.settings(parent).await?.config;
             let start = Start {
-                task: None,
                 name: name.clone(),
-                server: None,
                 brief,
-                shared_brief: None,
-                kind: Kind::Worker,
                 cwd: Some(folder),
                 model: Some(config.children.watcher),
-                effort: None,
-                speed: None,
                 placement: Placement::InPlace,
                 video: Some(video),
+                ..Start::default()
             };
             self.start(controller, parent, entry, start).await
         };

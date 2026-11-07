@@ -171,10 +171,10 @@ pub(in crate::terminal) fn line(
         right.push(span(format!("{} ", clock(call.entry.at, call.zone)), GRAY));
     }
     right.push(span("▸", GRAY));
-    let rw: usize = right.iter().map(|s| width(&s.content)).sum();
+    let rw = spans_width(&right);
     let room = columns.saturating_sub(rw + 1);
     let mut left = clip_spans(left, room);
-    let used: usize = left.iter().map(|s| width(&s.content)).sum();
+    let used = spans_width(&left);
     left.push(span(" ".repeat(columns.saturating_sub(used + rw)), DATA));
     left.extend(right);
     let next = if age.is_some() {
@@ -299,7 +299,7 @@ pub(super) fn card(call: &Call<'_>, columns: usize, now: u64) -> Vec<Row> {
     for line in lines {
         let mut spans = vec![span("    ", DATA), span("│ ", BEZEL_HI)];
         let words = clip_spans(line.spans, inner);
-        let used: usize = words.iter().map(|s| width(&s.content)).sum();
+        let used = spans_width(&words);
         spans.extend(words);
         spans.push(span(
             format!("{} │", " ".repeat(inner.saturating_sub(used))),

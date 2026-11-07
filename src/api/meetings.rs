@@ -281,12 +281,8 @@ async fn listed(app: &App, id: &SessionId, meeting: &str) -> Result<Listed> {
 async fn answer(app: &App, id: &SessionId, m: &Listed) -> Result<Value> {
     let mut status = advance(&m.meeting.folder).await?;
     let readers = app.meetings.readers.lock().await;
-    status["lag_s"] = json!(
-        readers
-            .get(&(id.clone(), m.meeting.id.clone()))
-            .copied()
-            .flatten()
-    );
+    let reader = (id.clone(), m.meeting.id.clone());
+    status["lag_s"] = json!(readers.get(&reader).copied().flatten());
     status["reply"] = json!(m.reply.chars().take(160).collect::<String>());
     Ok(status)
 }
@@ -669,15 +665,8 @@ async fn end(
         Some(_) => {}
     }
     if m.meeting.state == MeetingState::Recording {
-        fact(
-            &app,
-            &id,
-            &meeting,
-            CallEvent::Ended {
-                reason: CallReason::Ended,
-            },
-        )
-        .await?;
+        let reason = CallReason::Ended;
+        fact(&app, &id, &meeting, CallEvent::Ended { reason }).await?;
     }
     Ok(Json(answer(&app, &id, &m).await?))
 }
@@ -691,15 +680,8 @@ async fn cancel(State(app): State<App>, Path((id, meeting)): At) -> Reply {
     if session["phase"] != "canceled" {
         command(&["cancel", &m.meeting.folder]).await?;
     }
-    fact(
-        &app,
-        &id,
-        &meeting,
-        CallEvent::Ended {
-            reason: CallReason::Canceled,
-        },
-    )
-    .await?;
+    let reason = CallReason::Canceled;
+    fact(&app, &id, &meeting, CallEvent::Ended { reason }).await?;
     Ok(Json(answer(&app, &id, &m).await?))
 }
 

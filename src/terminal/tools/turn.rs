@@ -2,7 +2,9 @@
 use super::*;
 use crate::protocol::{End, EntryId, JobEvent};
 use crate::terminal::motion::{Presence, ease_in_out, ease_out, played};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
+
+pub(super) mod runs;
 
 /// Facts from neighbouring mounted entries; never retained beyond the transcript window.
 #[derive(Clone, Default)]
@@ -12,7 +14,7 @@ pub(in crate::terminal) struct Place {
     /// unseen, the person's return plus 80 ms for each replayed call above it; 0, settled, for the
     /// rest of the unseen and while the person is still away. `None` while the call runs.
     pub(in crate::terminal) beat: Option<u64>,
-    pub(in crate::terminal) run: Option<(EntryId, usize)>,
+    pub(in crate::terminal) run: Option<Arc<runs::Run>>,
     pub(in crate::terminal) fixed: Option<u64>,
     pub(in crate::terminal) first: bool,
     /// A reply sits between this call and the turn's call before it: the call's rows start with
@@ -39,12 +41,7 @@ pub(in crate::terminal) struct Place {
     pub(in crate::terminal) open: usize,
     asking: bool,
     pub(in crate::terminal) job: Option<JobId>,
-    run_at: u64,
-    // The run's calls' own times added up, which its `looked` row shows.
-    run_ms: u64,
     index: usize,
-    // Of the run this call folds into: how many of each kind of look, and the last one's name.
-    routine: [(usize, String); 5],
 }
 
 /// A turn's end, on each of its calls' places.
@@ -138,10 +135,8 @@ pub(in crate::terminal) fn places(
             };
             night = (start, end, false);
         }
-        if let Some(place) = places
-            .get_mut(&e.id)
-            .filter(|_| e.at >= night.0 && !night.2)
-        {
+        if e.at >= night.0 && !night.2 {
+            let place = places.entry(e.id).or_default();
             let ran = place.finished.unwrap_or(e.at).saturating_sub(e.at);
             place.cat = !outcomes.contains_key(&e.id) || ran >= 2000;
             night.2 = place.cat;
@@ -220,9 +215,7 @@ fn beats(
     let unseen = unseen.filter(|at| presence.missed(*at)).count();
     let (first, mut i) = (unseen.saturating_sub(10), 0);
     for e in calls {
-        let Some(place) = places.get_mut(&e.id) else {
-            continue;
-        };
+        let place = places.entry(e.id).or_default();
         place.beat = end(e, place).map(|at| match presence.missed(at) {
             false => at,
             true => {
@@ -313,15 +306,14 @@ fn locate<'a>(
     // This turn's failures by position, each with its fixing call's position and fix's instant.
     let mut flaws: Vec<(usize, Option<(usize, u64)>)> = Vec::new();
     for (i, entry) in calls.iter().enumerate() {
-        if let Some(place) = places.get_mut(&entry.id) {
-            (place.threads, place.open) = (threads, open);
-            place.tie = ties(entry).then_some(open);
-            place.first = i == 0;
-            place.closes = i + 1 == calls.len();
-            place.calls = calls.len();
-            place.failed = failed;
-            place.asking = asking;
-        }
+        let place = places.entry(entry.id).or_default();
+        (place.threads, place.open) = (threads, open);
+        place.tie = ties(entry).then_some(open);
+        place.first = i == 0;
+        place.closes = i + 1 == calls.len();
+        place.calls = calls.len();
+        place.failed = failed;
+        place.asking = asking;
         open += usize::from(ties(entry));
         let Body::Call { name, input, .. } = &entry.body else {
             continue;
@@ -333,14 +325,10 @@ fn locate<'a>(
         let key = (kind(name), target);
         match outcomes.get(&entry.id) {
             Some(Outcome::Success) => {
-                let at = places
-                    .get(&entry.id)
-                    .and_then(|p| p.beat)
-                    .map(|at| at.saturating_add(900));
+                let at = places.get(&entry.id).and_then(|p| p.beat);
+                let at = at.map(|at| at.saturating_add(900));
                 for id in failures.remove(&key).into_iter().flatten() {
-                    if let Some(place) = places.get_mut(&id) {
-                        place.fixed = at;
-                    }
+                    places.entry(id).or_default().fixed = at;
                     let flaw = flaws.iter_mut().find(|(f, _)| calls[*f].id == id);
                     if let (Some((_, fix)), Some(at)) = (flaw, at) {
                         *fix = Some((i, at));
@@ -353,18 +341,15 @@ fn locate<'a>(
             }
             _ => {}
         }
-        if routine_kind(name, input).is_some() && outcomes.get(&entry.id) == Some(&Outcome::Success)
-        {
+        if runs::kind(name, input).is_some() && outcomes.get(&entry.id) == Some(&Outcome::Success) {
             routine.push(*entry);
         } else {
-            locate_run(&mut routine, places, fold);
+            runs::locate(&mut routine, places, fold);
         }
     }
-    locate_run(&mut routine, places, fold);
+    runs::locate(&mut routine, places, fold);
     for (j, entry) in calls.iter().enumerate() {
-        if let Some(place) = places.get_mut(&entry.id) {
-            place.joined = joined(&flaws, j);
-        }
+        places.entry(entry.id).or_default().joined = joined(&flaws, j);
     }
     let Some(mut ended) = end.filter(|_| !live) else {
         return;
@@ -373,13 +358,12 @@ fn locate<'a>(
     let fixed = |e: &&&Entry| places.get(&e.id).is_some_and(|p| p.fixed.is_some());
     ended.fixed = calls.iter().filter(fixed).count();
     for entry in calls {
-        if let Some(place) = places.get_mut(&entry.id) {
-            place.ended = Some(ended.clone());
-        }
+        places.entry(entry.id).or_default().ended = Some(ended.clone());
     }
-    if let Some(place) = calls.last().and_then(|e| places.get_mut(&e.id))
+    if let Some(last) = calls.last()
         && ended.whole
     {
+        let place = places.entry(last.id).or_default();
         place.shape = calls.iter().map(|e| mark(e, outcomes.get(&e.id))).collect();
     }
 }
@@ -410,7 +394,7 @@ pub(super) fn gap(joined: Option<u64>, call: &Call<'_>, now: u64, motion: bool) 
 // A call's mark on its turn's closing line, in its kind's colour; a failure's in amber.
 fn mark(entry: &Entry, outcome: Option<&Outcome>) -> (&'static str, Color) {
     let (name, input) = match &entry.body {
-        Body::Call { name, input, .. } => (kind(name), input),
+        Body::Call { name, input, .. } => (shown(name, input), input),
         _ => ("", &Value::Null),
     };
     match (outcome, name) {
@@ -424,154 +408,6 @@ fn mark(entry: &Entry, outcome: Option<&Outcome>) -> (&'static str, Color) {
         (_, "message") if input["type"] == "question" => ("▪", rgb(0x2b90a1)),
         _ => ("▪", GRAY),
     }
-}
-
-// What a look names when it is the only one of its kind: the file, pattern, place or query.
-fn looked(kind: usize, input: &Value) -> String {
-    let field = |keys: &[&str]| keys.iter().find_map(|k| input[*k].as_str()).unwrap_or("");
-    match kind {
-        0 => field(&["path", "file_path"])
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .into(),
-        1 => field(&["pattern", "query"]).into(),
-        2 => field(&["path"]).into(),
-        3 => match field(&["query"]) {
-            "" => input["id"]
-                .as_u64()
-                .map_or(String::new(), |id| format!("#{id}")),
-            query => format!("“{query}”"),
-        },
-        _ => String::new(),
-    }
-}
-
-// The looks that fold: reads, code searches, lists, recalls and waits; a web search does not.
-fn routine_kind(name: &str, input: &Value) -> Option<usize> {
-    match kind(name) {
-        "read" => Some(0),
-        "search" => Some(1),
-        "list" => Some(2),
-        "memory" | "recall" => Some(3),
-        "agent" if input["action"] == "wait" => Some(4),
-        _ => None,
-    }
-}
-
-// A run of three or more successful looks folds at `fold`, once its turn has ended.
-fn locate_run(run: &mut Vec<&Entry>, places: &mut BTreeMap<EntryId, Place>, fold: u64) {
-    if run.len() >= 3 {
-        let (mut counts, mut ms): ([(usize, String); 5], u64) = Default::default();
-        for entry in run.iter() {
-            if let Body::Call { name, input, .. } = &entry.body
-                && let Some(i) = routine_kind(name, input)
-            {
-                counts[i] = (counts[i].0 + 1, looked(i, input));
-            }
-            let place = places.get(&entry.id);
-            ms += (place.and_then(|p| p.finished)).map_or(0, |f| f.saturating_sub(entry.at));
-        }
-        for (index, entry) in run.iter().enumerate() {
-            if let Some(place) = places.get_mut(&entry.id) {
-                place.run = Some((run[0].id, run.len()));
-                (place.run_at, place.run_ms) = (fold, ms);
-                place.index = index;
-                place.routine = counts.clone();
-            }
-        }
-    }
-    run.clear();
-}
-
-pub(super) fn fold(call: &Call<'_>, columns: usize, now: u64, motion: bool) -> Option<Vec<Row>> {
-    let (_, count) = call.place.run?;
-    if now < call.place.run_at {
-        return None;
-    }
-    let (k, stands, summary) = folding(call, now, motion);
-    if !summary && stands {
-        // The tick stays on the rail while the row folds away.
-        let mut line = row::draw(call, columns, now, motion);
-        for part in line.spans.iter_mut().skip(1) {
-            part.style.fg = part
-                .style
-                .fg
-                .map(|ink| mix(ink, GLASS, 0.75 * (k / 0.6).min(1.)));
-        }
-        return Some(vec![Row::plain(line)]);
-    }
-    if !summary {
-        return Some(Vec::new());
-    }
-    let k = ((k - 0.4) / 0.6).clamp(0., 1.);
-    let figure = if columns >= usize::from(PHONE) {
-        format!("{count} calls")
-    } else {
-        String::new()
-    };
-    let to =
-        columns.saturating_sub(if columns >= usize::from(PHONE) { 11 } else { 0 } + width(&figure));
-    let text = holds(&call.place.routine, to.saturating_sub(16));
-    let end = 13 + width(&text);
-    let mut words = Line::from(vec![
-        span("┼", tone(call, now, motion)),
-        span("   looked   ", mix(GLASS, GRAY, k)),
-        span(text, mix(GLASS, rgb(0xc849ae), k)),
-        span(dots(end, to), mix(GLASS, rgb(0x3d464f), k)),
-        span(figure, mix(GLASS, GRAY, k)),
-    ]);
-    if columns >= usize::from(PHONE) {
-        let took = dur(call.place.run_ms);
-        let gap = columns.saturating_sub(3 + width(&took) + words.width());
-        let took = format!("{}{took}", " ".repeat(gap));
-        words.spans.push(span(took, mix(GLASS, GRAY, k)));
-    }
-    let action = Some(crate::terminal::transcript::Action::Unfold(call.entry.id));
-    Some(vec![Row {
-        action,
-        ..Row::plain(words)
-    }])
-}
-
-// The longest of four wordings that fits `room`, the kinds most first: `read theme.rs`, then
-// `read 3 files · searched twice`, then `3 read · 2 searches`, then `3 read, 2 search`.
-fn holds(routine: &[(usize, String); 5], room: usize) -> String {
-    let mut kinds: Vec<_> = (0..5).filter(|&i| routine[i].0 > 0).collect();
-    kinds.sort_by_key(|&i| std::cmp::Reverse(routine[i].0));
-    let times = |n| match n {
-        1 => "once".into(),
-        2 => "twice".into(),
-        n => format!("{n} times"),
-    };
-    let phrase = |i: usize, level: usize| {
-        let (n, name) = (routine[i].0, &routine[i].1);
-        let (one, s) = (n == 1 && level == 0 && !name.is_empty(), plural(n));
-        match (i, level) {
-            (_, 3) => format!("{n} {}", ["read", "search", "list", "recall", "wait"][i]),
-            (0, 2) => format!("{n} read"),
-            (1, 2) => format!("{n} search{}", if n == 1 { "" } else { "es" }),
-            (2, 2) => format!("{n} listed"),
-            (3, 2) => format!("{n} recall{s}"),
-            (0, _) if one => format!("read {name}"),
-            (0, _) => format!("read {n} file{s}"),
-            (1, _) if one => format!("searched {name}"),
-            (2, _) if one => format!("listed {name}"),
-            (2, _) => format!("listed {n}"),
-            (3, _) if one => format!("recalled {name}"),
-            (1, _) => format!("searched {}", times(n)),
-            (3, _) => format!("recalled {}", times(n)),
-            _ => format!("waited {}", times(n)),
-        }
-    };
-    let words = |level| {
-        let parts: Vec<_> = kinds.iter().map(|&i| phrase(i, level)).collect();
-        parts.join([" · ", ", "][usize::from(level == 3)])
-    };
-    (0..4)
-        .map(words)
-        .find(|w| width(w) <= room)
-        .unwrap_or_else(|| clip(&words(3), room))
 }
 
 pub(super) fn tone(call: &Call<'_>, now: u64, motion: bool) -> Color {
@@ -678,30 +514,7 @@ fn took(ms: u64) -> String {
 }
 
 pub(super) fn next(call: &Call<'_>, now: u64, motion: bool, mut next: Next) -> Next {
-    if call.place.run.is_some() {
-        let at = call.place.run_at;
-        let count = |time| fold_count(call, time, motion);
-        let current = count(now);
-        let phases = [
-            at,
-            at.saturating_add(300),
-            at.saturating_add(301),
-            at.saturating_add(450),
-            at.saturating_add(750),
-        ];
-        if let Some(until) = phases
-            .into_iter()
-            .filter(|at| *at > now && count(*at) != current)
-            .min()
-        {
-            next.size = next.size.min(change(now, until, count));
-        }
-        if now >= at && now < at.saturating_add(750) && motion {
-            next.look = next.look.min(now.saturating_add(83));
-        } else if now >= at.saturating_add(750) && call.place.index > 0 {
-            next = Next::NEVER;
-        }
-    }
+    next = runs::next(call, now, motion, next);
     // A spark reaching the gap above, or the closing line's.
     let below = call.place.ended.as_ref().filter(|_| call.place.closes);
     let below = below.and_then(|e| e.joined);
@@ -719,25 +532,4 @@ pub(super) fn next(call: &Call<'_>, now: u64, motion: bool, mut next: Next) -> N
     }
     next.look = next.look.min(next.size);
     next
-}
-
-fn fold_count(call: &Call<'_>, now: u64, motion: bool) -> usize {
-    if now < call.place.run_at {
-        return 1;
-    }
-    let (_, stands, summary) = folding(call, now, motion);
-    usize::from(stands || summary)
-}
-
-// How far a run's fold has played, whether this row still stands, and whether it is the row
-// that becomes the run's `looked` summary.
-fn folding(call: &Call<'_>, now: u64, motion: bool) -> (f64, bool, bool) {
-    let k = played(motion, now, call.place.run_at, 750);
-    let count = call.place.run.map_or(0, |(_, count)| count);
-    let removed = (count as f64 * ease_in_out((k / 0.6).clamp(0., 1.))).round() as usize;
-    (
-        k,
-        call.place.index >= removed,
-        k > 0.4 && call.place.index == 0,
-    )
 }

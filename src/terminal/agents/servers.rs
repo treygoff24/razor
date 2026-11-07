@@ -1,7 +1,9 @@
 //! The top of the agents list: one line for the servers and one for the residents, each folded
 //! to what needs the person (a silent server, a usage window from 70%, a resident asking or
 //! failed) and opening into its table.
-use super::{App, agents, agents::on, cards::tone, status::Row, text::*, view::Action};
+use super::super::{App, cards, text, text::*, view::Action};
+use super::panel::{self, Tone, on};
+use super::sections::{Row, addressed, agent_rows, framed};
 use crate::protocol::{ResidentDay, RunState, Server, SessionId, State, views::SectionKind};
 use ratatui::text::{Line, Span};
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,19 +15,34 @@ pub(super) fn rows(app: &App, width: usize, now: u64) -> Vec<Row> {
     out
 }
 
+// The servers line, `▸ servers · all 2 answer · work 7-day 40%`, the fullest window and its
+// server's own word, marked as the list's headings are and without its word where that would not
+// fit; opened, the machines' table.
 fn servers(app: &App, width: usize, now: u64) -> Vec<Row> {
     let usage = usage(app, now);
-    let state = silent(app, now).map_or_else(
+    let mut line = vec![silent(app, now).map_or_else(
         || span(format!("all {} answer", app.servers.len()), GRAY),
         |s| Span::styled(s, bold(AMBER, GLASS)),
-    );
-    let mut parts = vec![vec![state]];
-    if let Some(((_, name), p)) = usage.iter().max_by(|a, b| a.1.total_cmp(b.1)) {
-        let name = span(format!("{name} "), tone(p / 100., 0.9));
-        parts.push(vec![name, reading(Some(*p))]);
+    )];
+    if let Some(((server, name), p)) = usage.iter().max_by(|a, b| a.1.total_cmp(b.1)) {
+        let whose = (app.servers.iter()).find(|s| s.name == *server);
+        let name = format!("{} {name} ", whose.map_or("", realm));
+        let name = span(name.trim_start().to_owned(), cards::tone(p / 100., 0.9));
+        line.extend([span(" · ", GRAY_DIM), name, reading(Some(*p))]);
     }
-    let mut out = vec![folded(app, "servers", parts, width)];
-    if !app.list.toggled.contains("servers") {
+    let action = Action::Section("servers".into());
+    let open = app.list.toggled.contains("servers");
+    let used = spans_width(&line);
+    if 2 + "servers".len() + 3 + used <= width {
+        line.splice(0..0, [span("servers", GRAY), span(" · ", GRAY_DIM)]);
+    }
+    let mark = match app.list.open && app.list.selected.as_ref() == Some(&action) {
+        true => "❯",
+        false => ["▸", "▾"][usize::from(open)],
+    };
+    line.insert(0, span(format!("{mark} "), GRAY));
+    let mut out = vec![Row(Line::from(line), Some(action), None)];
+    if !open {
         return out;
     }
     // Right edges of the load, memory, memory used, 5-hour and 7-day columns.
@@ -55,7 +72,7 @@ fn servers(app: &App, width: usize, now: u64) -> Vec<Row> {
             out.push(match s.silent {
                 Some(at) => {
                     let words = format!(" ⊘ {}  no answer {}m", realm(s), age(at, now));
-                    Row(Line::from(span(words, AMBER)), None, Vec::new())
+                    Row(Line::from(span(words, AMBER)), None, None)
                 }
                 None => placed([(0, name), (hour, window("5-hour")), (week, window("7-day"))]),
             });
@@ -111,36 +128,33 @@ fn residents(app: &App, width: usize, now: u64) -> Vec<Row> {
     if all.is_empty() {
         return Vec::new();
     }
-    let (action, tone) = (Action::Section("residents".into()), agents::tone(None));
+    let (action, tone) = (Action::Section("residents".into()), panel::tone(None));
     let open = app.list.toggled.contains("residents");
     let next = (all.iter().filter_map(|(_, r)| r.upcoming.first())).min_by_key(|(_, at)| at);
     let next = next.map_or(String::new(), |(_, at)| {
         format!(" · NEXT {}", hhmm(app, *at))
     });
-    let held = agents::count(all.len(), "RESIDENT");
+    let held = panel::count(all.len(), "RESIDENT");
     let held = format!(" {held}{next} {}", ["▸ ", ""][usize::from(open)]);
     let held = on(held, tone.soft, tone.ground, false);
-    let mut top = [agents::shut(width), agents::top(width, true)][usize::from(open)].clone();
+    let mut top = [panel::shut(width), panel::top(width, true)][usize::from(open)].clone();
     if app.list.open && app.list.selected.as_ref() == Some(&action) {
         top.replace_range(..3, "❯");
     }
-    let at = width.saturating_sub(super::text::width(&held.content) + 2);
-    let parts = vec![
-        (2, agents::named(None, "Residents", tone)),
-        (at, vec![held]),
-    ];
-    let top = agents::over(&top, tone.frame, tone.ground, parts);
-    let mut out = vec![Row(Line::from(top), Some(action), Vec::new())];
+    let at = width.saturating_sub(text::width(&held.content) + 2);
+    let parts = vec![(2, panel::named(None, "Residents", tone)), (at, vec![held])];
+    let top = panel::over(&top, tone.frame, tone.ground, parts);
+    let mut out = vec![Row(Line::from(top), Some(action), None)];
     if !open {
         return out;
     }
     for (i, (id, r)) in all.iter().enumerate() {
-        let gap = agents::framed(Span::raw(" "), Vec::new(), width, tone, None);
-        out.extend((i > 0).then(|| Row(gap, None, Vec::new())));
+        let gap = framed(Span::raw(" "), Vec::new(), width, tone, None);
+        out.extend((i > 0).then_some(Row(gap, None, None)));
         out.extend(resident(app, (id, r), width, tone, now));
     }
-    let foot = agents::foot(width, true, None, [tone.frame, tone.soft, tone.ground]);
-    out.push(Row(foot.into(), None, Vec::new()));
+    let foot = panel::foot(width, true, None, [tone.frame, tone.soft, tone.ground]);
+    out.push(Row(foot.into(), None, None));
     out
 }
 
@@ -150,7 +164,7 @@ fn resident(
     app: &App,
     (id, r): (&SessionId, &ResidentDay),
     width: usize,
-    tone: agents::Tone,
+    tone: Tone,
     now: u64,
 ) -> Vec<Row> {
     let (agent, g) = (app.agents.get(id), tone.ground);
@@ -177,49 +191,31 @@ fn resident(
         .skip_while(|r| &r.session != id)
         .skip(1);
     let kids: Vec<_> = kids.take_while(|r| r.depth > 0).collect();
-    let room = width.saturating_sub(10 + super::text::width(&words));
+    let room = width.saturating_sub(10 + text::width(&words));
     let name = clip(r.session.as_str(), room);
-    let gap = " ".repeat(room.saturating_sub(super::text::width(&name)) + 1);
-    let arrow = on(
-        ["▾ ", "▸ "][usize::from(shut)],
-        [GRAY, CYAN][usize::from(selected)],
-        g,
-        true,
-    );
-    let (mark, name) = (
+    let gap = " ".repeat(room.saturating_sub(text::width(&name)) + 1);
+    let arrow = ["▾ ", "▸ "][usize::from(shut)];
+    let content = vec![
+        on(arrow, [GRAY, CYAN][usize::from(selected)], g, true),
         on(format!("{mark} "), ink, g, false),
         on(name, WHITE, g, true),
-    );
-    let content = vec![
-        arrow,
-        mark,
-        name,
         on(format!("{gap}{words}"), GRAY, g, false),
     ];
-    let mut line = agents::framed(Span::raw(" "), content, width, tone, None);
+    let mut line = framed(Span::raw(" "), content, width, tone, None);
     let hides = kids.iter().any(|r| app.focus.as_ref() == Some(&r.session));
-    agents::addressed(&mut line, app.focus.as_ref() == Some(id) || shut && hides);
-    let folds = vec![(1, Action::Section(fold))];
-    let mut body = vec![Row(line, Some(Action::Agent(id.clone())), folds)];
+    addressed(&mut line, app.focus.as_ref() == Some(id) || shut && hides);
+    let (press, fold) = (Action::Agent(id.clone()), Action::Section(fold));
+    let mut body = vec![Row(line, Some(press), Some(fold))];
     if shut {
         return body;
     }
     let new = Action::Thread(id.clone());
-    let lead = on(
-        [" ", "❯"][usize::from(app.list.selected.as_ref() == Some(&new))],
-        CYAN,
-        g,
-        true,
-    );
-    let line = agents::framed(
-        lead,
-        vec![on("  + New thread", CYAN, g, false)],
-        width,
-        tone,
-        None,
-    );
-    body.push(Row(line, Some(new), Vec::new()));
-    body.extend(agents::agent_rows(app, kids, width, tone, now));
+    let picked = app.list.selected.as_ref() == Some(&new);
+    let lead = on([" ", "❯"][usize::from(picked)], CYAN, g, true);
+    let content = vec![on("  + New thread", CYAN, g, false)];
+    let line = framed(lead, content, width, tone, None);
+    body.push(Row(line, Some(new), None));
+    body.extend(agent_rows(app, kids, width, tone, now));
     body
 }
 
@@ -228,42 +224,25 @@ pub(super) fn hhmm(app: &App, at: u64) -> String {
     zoned(at, app.zone.as_ref()).map_or_else(String::new, |t| t.strftime("%H:%M").to_string())
 }
 
-/// `▸ word · part · part`, marked as the list's headings are; without `word` when that would not
-/// fit `width`.
-fn folded(app: &App, word: &str, parts: Vec<Vec<Span<'static>>>, width: usize) -> Row {
-    let action = Action::Section(word.into());
-    let mark = match app.list.open && app.list.selected.as_ref() == Some(&action) {
-        true => "❯",
-        false => ["▾", "▸"][usize::from(!app.list.toggled.contains(word))],
-    };
-    let mut body: Vec<_> = parts.join(&span(" · ", GRAY_DIM));
-    let used: usize = body.iter().map(|s| super::text::width(&s.content)).sum();
-    if 2 + word.len() + 3 + used <= width {
-        body.splice(0..0, [span(word.to_owned(), GRAY), span(" · ", GRAY_DIM)]);
-    }
-    body.insert(0, span(format!("{mark} "), GRAY));
-    Row(Line::from(body), Some(action), Vec::new())
-}
-
 /// Cells left to right, each ending at its column where it fits, and at least one space after
 /// the one before it (the first, after the edge).
 fn placed(cells: impl IntoIterator<Item = (usize, Span<'static>)>) -> Row {
     let mut x = 0;
     let mut out = Vec::new();
     for (at, s) in cells {
-        let n = super::text::width(&s.content);
+        let n = text::width(&s.content);
         let start = at.saturating_sub(n).max(x + 1);
         out.push(span(" ".repeat(start - x), GRAY));
         x = start + n;
         out.push(s);
     }
-    Row(Line::from(out), None, Vec::new())
+    Row(Line::from(out), None, None)
 }
 
 /// A percentage, amber from 70 and red from 90; `–` when unmeasured.
 fn reading(p: Option<f64>) -> Span<'static> {
     p.map_or(span("–", GRAY_DIM), |p| {
-        span(format!("{p:.0}%"), tone(p / 100., 0.9))
+        span(format!("{p:.0}%"), cards::tone(p / 100., 0.9))
     })
 }
 

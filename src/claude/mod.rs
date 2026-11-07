@@ -40,9 +40,9 @@ struct Bridge {
 
 impl Bridge {
     /// Start the bridge in `dir()`. There is no config key: nobody tunes it, and swapping the
-    /// one bridge would stop every Claude session. Its lines arrive
-    /// on the returned receiver, each with the share of the 64 MiB budget it holds; dropping
-    /// that returns the line's bytes. A line over 64 MiB stops the bridge.
+    /// one bridge would stop every Claude session. Its lines arrive on the returned receiver,
+    /// each with the share of the 64 MiB budget it holds; dropping that returns the line's bytes.
+    /// A line over 64 MiB stops the bridge.
     async fn start() -> Result<(Bridge, Lines), Error> {
         let dir = dir().await?;
         let main = dir.join("main.ts");
@@ -56,10 +56,7 @@ impl Bridge {
                 ErrorKind::NotFound => Error::Missing(
                     "Node is not on PATH; the Claude bridge needs Node 22.18 or later.".into(),
                 ),
-                _ => Error::Io {
-                    doing: "starting the Claude bridge",
-                    source: e,
-                },
+                _ => io("starting the Claude bridge")(e),
             })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             return Err(Error::Exited);
@@ -122,7 +119,6 @@ pub(crate) async fn dir() -> Result<PathBuf, Error> {
 /// The sign-in the SDK's bundled Claude Code CLI in `dir` finds in this environment, as its own
 /// `auth status` reports it: the method, never a credential. `Missing` says what to do.
 pub(crate) async fn sign_in(dir: &Path) -> Result<String, Error> {
-    let io = |doing| move |source| Error::Io { doing, source };
     let mut status = Command::new(cli(dir).await?);
     status
         .args(["auth", "status"])
@@ -133,7 +129,7 @@ pub(crate) async fn sign_in(dir: &Path) -> Result<String, Error> {
         .output()
         .await
         .map_err(io("asking the Claude Code CLI for its sign-in"))?;
-    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap_or_default();
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap_or_default();
     if status["loggedIn"] != true {
         let sentence = "Claude is not signed in; run razor setup.";
         return Err(Error::Missing(sentence.into()));
@@ -155,13 +151,12 @@ pub(crate) async fn login(console: bool) -> Result<(), Error> {
     login
         .args(["auth", "login"])
         .args(console.then_some("--console"));
-    let (ran, doing) = (login.status().await, "starting the Claude sign-in");
-    ran.map(drop).map_err(|source| Error::Io { doing, source })
+    let ran = login.status().await;
+    ran.map(drop).map_err(io("starting the Claude sign-in"))
 }
 
 /// The platform's own Claude Code CLI inside the SDK's packages in `dir`.
 async fn cli(dir: &Path) -> Result<PathBuf, Error> {
-    let io = |doing| move |source| Error::Io { doing, source };
     let packages = tokio::fs::read_dir(dir.join("node_modules/@anthropic-ai")).await;
     let mut packages = packages.map_err(io("reading the Claude bridge"))?;
     // The platform's own package: npm installs only the ones that fit this machine.
@@ -221,7 +216,6 @@ pub(crate) async fn answer(
     prompt: &str,
     text: &str,
 ) -> Result<String, Error> {
-    let io = |doing| move |source| Error::Io { doing, source };
     // Its own error may quote what the host said back, a provider's key included.
     let key = env["ANTHROPIC_API_KEY"]
         .as_str()
@@ -269,7 +263,7 @@ pub(crate) async fn answer(
         .await
         .map_err(io("reading the answer"))?;
     let status = run.wait().await.map_err(io("waiting for the answer"))?;
-    let answer: serde_json::Value = serde_json::from_slice(&answer).unwrap_or_default();
+    let answer: Value = serde_json::from_slice(&answer).unwrap_or_default();
     match (
         status.success(),
         answer["is_error"].as_bool(),
@@ -368,3 +362,7 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+fn io(doing: &'static str) -> impl FnOnce(std::io::Error) -> Error {
+    move |source| Error::Io { doing, source }
+}

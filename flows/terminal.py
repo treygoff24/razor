@@ -79,10 +79,14 @@ class Terminal:
     def send(self, text):
         os.write(self.fd, text.encode() if isinstance(text, str) else text)
 
+    def find(self, words):
+        """The row and cell column of the first displayed occurrence of `words`."""
+        return next((y, wcswidth(line[:line.index(words)]))
+                    for y, line in enumerate(self.screen.display) if words in line)
+
     def click(self, words):
         """Click the first displayed occurrence, using its actual cell coordinates."""
-        row, column = next((y, wcswidth(line[:line.index(words)]))
-                           for y, line in enumerate(self.screen.display) if words in line)
+        row, column = self.find(words)
         self.send(f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m")
 
     def resize(self, rows, columns):

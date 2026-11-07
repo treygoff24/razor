@@ -19,9 +19,7 @@ handover = reply(("toolu_changed", "Bash", {"command": "printf kingfisher > king
                  ("toolu_handover", "mcp__razor__handover", {"note": first_note}))
 with flow([handover] + [Reply((REPLIES / f"{name}.sse").read_bytes()) for name in ("recall", "done")]) as f:
     f.base()
-    result = f.run("--print=json", ask)
-    assert result.returncode == 0, result.stderr
-    answer = json.loads(result.stdout)
+    answer = f.ask(ask)
     assert answer["message"] == "flow done", answer
     entries = list(f.record(answer["session"]))
     assert entries[1]["kind"] == "input" and entries[1]["text"] == ask, entries[1]
@@ -39,7 +37,7 @@ with flow([handover] + [Reply((REPLIES / f"{name}.sse").read_bytes()) for name i
     conversations = {e["native"]["claude"]["conversation"] for e in entries if e.get("native")}
     assert len(conversations) == 2, conversations
     assert len([e for e in entries if e["kind"] == "start"]) == 1, entries
-    fresh = json.loads((f.requests / "002.body").read_bytes())
+    fresh = f.request(2)
     assert ask in json.dumps(fresh["messages"]), fresh
     assert rebuilds[0]["note"].strip() in json.dumps(fresh["messages"]), fresh
 
@@ -75,9 +73,7 @@ large = response([call("agent", json.dumps(wait), "call_wait")]).body
 replies = [Reply(large.replace(b'"input_tokens": 100', b'"input_tokens": 200000')),
            response([call("handover", json.dumps({"note": wait_note}), "call_note")]), done()]
 with flow(replies, model="gpt-6.1-sol", config=PLAIN + "[rebuild]\nthreshold = 0.5") as f:
-    result = f.run("--print=json", ask, timeout=10)
-    assert result.returncode == 0, result.stderr
-    entries = list(f.record(json.loads(result.stdout)["session"]))
+    entries = list(f.record(f.ask(ask, timeout=10)["session"]))
     waited = next(e for e in entries if e["kind"] == "result" and e["call"] == "call_wait")
     rebuilds = [e["trigger"] for e in entries if e["kind"] == "rebuild"]
     assert waited["output"] == "null" and rebuilds == ["threshold"], (waited, rebuilds)
@@ -100,9 +96,7 @@ for model in ("opus", "gpt-6.1-sol"):
                message(("rebuilt_wait", "bash", {"command": "while [ ! -e rebuilt_go ]; do sleep 0.05; done"})),
                message(), message()]
     with flow(replies, model=model, config=PLAIN) as f:
-        first = f.run("--print=json", ask)
-        assert first.returncode == 0, first.stderr
-        session = json.loads(first.stdout)["session"]
+        session = f.ask(ask)["session"]
         path = f"/sessions/{session}"
         admitted = server.post(f, path + "/handover", {})["entry"]
         waiting = server.until(f, session, lambda es: any(
@@ -121,12 +115,11 @@ for model in ("opus", "gpt-6.1-sol"):
         assert len(rebuilds) == 1 and rebuilds[0]["trigger"] == "handover", rebuilds
         rebuild = rebuilds[0]
         assert rebuild["note"].strip() == note and ask in rebuild["context"], rebuild
-        bodies = [p.read_text() for p in sorted(f.requests.glob("[0-9]*.body"))]
+        bodies = f.sent()
         assert json.dumps(requests[0]["text"])[1:-1] in bodies[1], bodies[1]
-        next_turn = f.run("--resume", session, "--print=json", "Continue the kingfisher work.")
-        assert next_turn.returncode == 0, next_turn.stderr
-        assert json.loads(next_turn.stdout)["message"] == "flow done", next_turn.stdout
-        last = sorted(f.requests.glob("[0-9]*.body"))[-1].read_text()
+        next_turn = f.ask("--resume", session, "Continue the kingfisher work.")
+        assert next_turn["message"] == "flow done", next_turn
+        last = f.sent()[-1]
         assert note in last and "Continue the kingfisher work." in last, last
         assert len([e for e in f.record(session) if e["kind"] == "rebuild"]) == 1
 
@@ -139,9 +132,7 @@ reasoning = {"type": "reasoning", "id": "rs_note", "summary": [{"type": "summary
 replies = [response([reasoning, call("recall", json.dumps({"id": 4}), "call_reasoning")]),
            response([call("handover", json.dumps({"note": note}), "call_noted")]), done()]
 with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
-    result = f.run("--print=json", ask)
-    assert result.returncode == 0, result.stderr
-    entries = list(f.record(json.loads(result.stdout)["session"]))
+    entries = list(f.record(f.ask(ask)["session"]))
     assert entries[3]["kind"] == "thinking" and entries[3]["text"] == thought, entries[:5]
     outputs = {e["call"]: e for e in entries if e["kind"] == "result"}
     assert outputs["call_reasoning"]["outcome"] == "error", outputs["call_reasoning"]
@@ -184,9 +175,7 @@ with wall_clock() as (clock, env, advance):
                      ("idle_note", "mcp__razor__handover", {"note": note})),
                reply(text="flow done"), reply(text="Child heard."), reply(text="Continued.")]
     with flow(replies, config="[sessions]\nidle = 0\nhandover_tokens = 0\nclose_minutes = 60", env=env) as f:
-        first = f.run("--print=json", ask)
-        assert first.returncode == 0, first.stderr
-        session = json.loads(first.stdout)["session"]
+        session = f.ask(ask)["session"]
         child_id = next(e["session"] for e in f.record(session) if e["kind"] == "child")
         server.until(f, child_id, lambda es: any(e["kind"] == "job" for e in es))
         advance(2_999_999)
@@ -210,8 +199,7 @@ with wall_clock() as (clock, env, advance):
         assert len(rebuilds) == 1 and rebuilds[0]["trigger"] == "idle", rebuilds
         assert rebuilds[0]["note"].strip() == note and ask in rebuilds[0]["context"], rebuilds
         assert late in rebuilds[0]["context"]
-        for path in sorted(f.requests.glob("[0-9]*.body")):
-            request = json.loads(path.read_text())
+        for request in map(json.loads, f.sent()):
             blocks = request.get("system", []) + request.get("tools", [])
             blocks += [b for m in request["messages"] for b in m["content"] if isinstance(b, dict)]
             writes = [b["cache_control"] for b in blocks if "cache_control" in b]
@@ -222,7 +210,7 @@ with wall_clock() as (clock, env, advance):
         server.until(f, session, lambda es: any("settled" in e.get("event", {}) for e in es if e["kind"] == "child"))
         assert server.agents(f)[session]["last_activity"] == activity, "idle close's child settlement moved activity"
         resumed = f.run("--resume", session, "--print=json", "Continue the Claude conversation.")
-        assert resumed.returncode == 0 and note in sorted(f.requests.glob("[0-9]*.body"))[-1].read_text(), resumed.stderr
+        assert resumed.returncode == 0 and note in f.sent()[-1], resumed.stderr
 
     # Running jobs hold off maintenance; answering their notice starts a new idle interval.
     advance(0)
@@ -231,9 +219,7 @@ with wall_clock() as (clock, env, advance):
                sized(50_000), sized(50_000), reply(("background_note", "mcp__razor__handover", {"note": note})),
                sized(50_000)]
     with flow(replies, config="[sessions]\nidle = 0\nclose_minutes = 60", env=env) as f:
-        first = f.run("--print=json", ask)
-        assert first.returncode == 0, first.stderr
-        session = json.loads(first.stdout)["session"]
+        session = f.ask(ask)["session"]
         advance(3_600_000)
         time.sleep(1.2)
         assert not any(e.get("closed") or e["kind"] == "rebuild" for e in f.record(session)), "working job handed over or closed"
@@ -248,24 +234,24 @@ with wall_clock() as (clock, env, advance):
         settings = f.home / ".razor/config.toml"
         settings.write_text(settings.read_text().replace("close_minutes = 60", "close_minutes = 0"))
         server.until(f, session, lambda _: unloaded(f, session) and not (f.home / ".razor/live" / session).exists())
-        assert not any(note in p.read_text() for p in f.requests.glob("[0-9]*.body")), "the idle rebuild sent a request"
+        assert not any(note in body for body in f.sent()), "the idle rebuild sent a request"
         resumed = f.run("--resume", session, "--print=json", "Back on Claude.")  # The note opens its first request.
-        assert resumed.returncode == 0 and all(t in sorted(f.requests.glob("[0-9]*.body"))[-1].read_text() for t in (note, "Back on Claude.")), resumed.stderr
+        assert resumed.returncode == 0 and all(t in f.sent()[-1] for t in (note, "Back on Claude.")), resumed.stderr
 
     # A restart inside the idle note turn ends it at its rebuild, with no request nobody asked for.
     advance(0)
     replies = [sized(50_000), reply(("cut_note", "Bash", {"command": "until [ -e cut_go ]; do sleep 0.05; done"})),
                reply(text="Job ended.")]
     with flow(replies, config="[sessions]\nidle = 0\nclose_minutes = 60", env=env) as f:
-        session = json.loads(f.run("--print=json", ask).stdout)["session"]
+        session = f.ask(ask)["session"]
         advance(3_000_000)
         server.until(f, session, lambda es: any(e["kind"] == "job" for e in es))
-        sent = len(list(f.requests.glob("[0-9]*.body")))
+        sent = len(f.sent())
         server.stop(f, signal.SIGKILL)
         server.start(f)
         entries = server.until(f, session, completed)
         assert [e["trigger"] for e in entries if e["kind"] == "rebuild"] == ["idle"], entries[-3:]
-        assert len(list(f.requests.glob("[0-9]*.body"))) == sent, "the restart asked the model again"
+        assert len(f.sent()) == sent, "the restart asked the model again"
         (f.cwd / "cut_go").touch()  # The job's end notice opens the next turn.
         server.until(f, session, lambda es: completed(es) and es[-2].get("text") == "Job ended.")
 
@@ -275,11 +261,8 @@ with wall_clock() as (clock, env, advance):
         replies = [sized(n) if model == "opus" else Reply(done().body.replace(
             b'"input_tokens": 100', f'"input_tokens": {n}'.encode())) for n in (50_000, 49_999)]
         with flow(replies, model=model, config=PLAIN + "[sessions]\nidle = 0", env=env) as f:
-            first = f.run("--print=json", ask)
-            assert first.returncode == 0, first.stderr
-            session = json.loads(first.stdout)["session"]
-            again = f.run("--resume", session, "--print=json", "One smaller request.")
-            assert again.returncode == 0, again.stderr
+            session = f.ask(ask)["session"]
+            f.ask("--resume", session, "One smaller request.")
             if model == "opus":
                 server.until(f, session, lambda _: unloaded(f, session))
             advance(3_000_001)
@@ -308,7 +291,7 @@ with wall_clock() as (clock, env, advance):
     refusal = Reply(b'{"error": {"type": "invalid_request_error", "message": "Refused."}}', status=400)
     with flow([big(message(("idle_ask", "message", {"to": "parent", "type": "question", "text": "Which path?"}))),
                big(message()), big(message()), refusal], model=model, config=PLAIN + "[sessions]\nidle = 0", env=env) as f:
-        session = json.loads(f.run("--print=json", ask).stdout)["session"]
+        session = f.ask(ask)["session"]
         asked = next(e["id"] for e in f.record(session) if e["kind"] == "call")
         advance(3_000_001)
         time.sleep(1.2)
@@ -327,11 +310,11 @@ with wall_clock() as (clock, env, advance):
         advance(0)
         with flow([sized(50_000) if model == "opus" else big(message()), overflow], model=model,
                   config=PLAIN + "[sessions]\nidle = 0", env=env) as f:
-            session = json.loads(f.run("--print=json", ask).stdout)["session"]
+            session = f.ask(ask)["session"]
             advance(3_000_000)
             entries = server.until(f, session, lambda es: completed(es) and any(e["kind"] == "rebuild" for e in es))
             triggers = [e["trigger"] for e in entries if e["kind"] == "rebuild"]
-            assert triggers == ["overflow"] and len(list(f.requests.glob("[0-9]*.body"))) == 2, entries[-3:]
+            assert triggers == ["overflow"] and len(f.sent()) == 2, entries[-3:]
 
     # GPT's default handover, resident report, stable phone history and notification silence.
     advance(0)
@@ -364,7 +347,7 @@ key = {json.dumps(str(apns.key))}
         entries = server.until(f, session, lambda es: completed(es) and any(e["kind"] == "rebuild" for e in es))
         maintenance = [e for e in entries if e["kind"] == "input" and e["from"] == "razor"]
         assert len(maintenance) == 1 and maintenance[0]["trigger"] == "idle", maintenance
-        assert not any(note in p.read_text() for p in f.requests.glob("[0-9]*.body")), "the idle rebuild sent a request"
+        assert not any(note in body for body in f.sent()), "the idle rebuild sent a request"
         assert activity() == original_activity, "handover moved activity"
         inputs = [e for e in entries if e["kind"] == "input"]
         phone = f.run("devices", "add", "phone").stdout.splitlines()[1]
@@ -378,7 +361,7 @@ key = {json.dumps(str(apns.key))}
         with server.send(f, "GET", path + "/events") as stream:
             stream.readline()
             server.until(f, session, lambda _: bool(apns.received))
-        requests = lambda: sum(ask in p.read_text() for p in f.requests.glob("[0-9]*.body"))
+        requests = lambda: sum(ask in body for body in f.sent())
         before = requests()
         advance(3_600_000)
         entries = server.until(f, session, lambda es: es[-1].get("close_reason") == "idle")
@@ -393,10 +376,9 @@ key = {json.dumps(str(apns.key))}
                        or r["body"]["aps"].get("event") == "end" for r in apns.received), apns.received
         assert any(follow["session"] == session for device in json.loads((f.home / ".razor/devices.json").read_text())
                    for follow in device.get("follows", [])), "idle close ended the Live Activity"
-        resumed = f.run("--resume", session, "--print=json", "Continue our conversation.")
-        assert resumed.returncode == 0, resumed.stderr
-        last = sorted(f.requests.glob("[0-9]*.body"))[-1].read_text()  # One request: the note and the person's input.
-        assert json.loads(resumed.stdout)["session"] == session and note in last and "Continue our conversation." in last
+        resumed = f.ask("--resume", session, "Continue our conversation.")
+        last = f.sent()[-1]  # One request: the note and the person's input.
+        assert resumed["session"] == session and note in last and "Continue our conversation." in last
         assert [e["trigger"] for e in f.record(session) if e["kind"] == "rebuild"] == ["idle"] and "close_reason" not in server.agents(f)[session]
 
 # Both native routes preserve their structured overflow reason. The first failed request
@@ -421,7 +403,7 @@ for model in ("opus", "gpt-6.1-sol"):
                 assert str(len(rebuilds[0]["context"].encode())) + " bytes" in answer["error"], answer
             else:
                 assert answer["message"] == "flow done", answer
-            assert len(list(f.requests.glob("[0-9]*.body"))) == 2, "overflow retried in a loop"
+            assert len(f.sent()) == 2, "overflow retried in a loop"
 
 # Non-image native history can still exceed Razor's own cap and rebuild exactly once.
 large_reasoning = "x" * (34 << 20)
@@ -431,9 +413,7 @@ replies = [response([{"type": "reasoning", "id": f"large_{n}", "summary": [],
            for n in range(2)]
 with flow(replies + [done()], model="sol", config=PLAIN) as f:
     (f.cwd / "small.txt").write_text("ok")
-    result = f.run("--print=json", "Keep this request through the cap.", timeout=180)
-    assert result.returncode == 0, result.stderr
-    answer = json.loads(result.stdout)
+    answer = f.ask("Keep this request through the cap.", timeout=180)
     entries = list(f.record(answer["session"]))
     rebuilds = [e for e in entries if e["kind"] == "rebuild"]
     assert len(rebuilds) == 1 and rebuilds[0]["trigger"] == "overflow", rebuilds
@@ -449,23 +429,20 @@ with flow(replies + [done()], model="sol", config=PLAIN) as f:
     small = base64.b64decode(PNG)
     (f.cwd / "small.png").write_bytes(small)
     (f.cwd / "large.png").write_bytes(small.ljust(7_000_000, b"\0"))
-    result = f.run("--print=json", "Inspect the images and keep this request.", timeout=120)
-    assert result.returncode == 0, result.stderr
-    answer = json.loads(result.stdout)
+    answer = f.ask("Inspect the images and keep this request.", timeout=120)
     entries = list(f.record(answer["session"]))
     assert not [e for e in entries if e["kind"] == "rebuild"], "images caused a rebuild"
     outputs = [json.loads(e["output"]) for e in entries if e["kind"] == "result"]
     paths = [Path(output["images"][0]["path"]) for output in outputs]
     assert len(paths) == 10 and all(p.is_file() for p in paths), paths
-    requests = sorted(f.requests.glob("[0-9]*.body"))
-    assert len(requests) == 5, requests
-    def images(path):
-        content = [c for item in json.loads(path.read_bytes())["input"]
-                   for c in item.get("content", [])]
+    requests = f.sent()
+    assert len(requests) == 5, len(requests)
+    def images(body):
+        content = [c for item in json.loads(body)["input"] for c in item.get("content", [])]
         spills = [c["text"] for c in content if "<persisted-output>" in c.get("text", "")]
         inline = [c["image_url"] for c in content if c.get("type") == "input_image"]
         return spills, inline
-    first, between, later, final = [images(p) for p in requests[1:]]
+    first, between, later, final = [images(body) for body in requests[1:]]
     assert all(sum(len(url.split(",", 1)[1]) for url in inline) <= 32 << 20
                for _, inline in (first, between, later, final)), "image budget exceeded"
     assert len(first[0]) == 1 and str(paths[0]) in first[0][0], first[0]
@@ -473,7 +450,7 @@ with flow(replies + [done()], model="sol", config=PLAIN) as f:
     assert first[0] == between[0] == later[0], "small images moved the cutoff"
     assert len(final[1]) == 3, "newest images did not remain inline"
     assert len(final[0]) == 7 and all(str(path) in spill for path, spill in zip(paths, final[0])), final[0]
-    assert all(p.stat().st_size < 64 << 20 for p in requests), "request cap exceeded"
+    assert all(len(body.encode()) < 64 << 20 for body in requests), "request cap exceeded"
 
 # A cell's handover uses the same path on GPT and Claude, including its sentence result.
 for model in ("opus", "sol"):
@@ -483,9 +460,7 @@ for model in ("opus", "sol"):
     end = reply(text="Rebuilt.") if model == "opus" else done()
     config = '[profiles.claude]\ncode_mode = true\n' if model == "opus" else ""
     with flow([end, cell, end], model=model, config=config) as f:
-        first = f.run("--print=json", ask)
-        assert first.returncode == 0, first.stderr
-        session = json.loads(first.stdout)["session"]
+        session = f.ask(ask)["session"]
         asked = server.post(f, f"/sessions/{session}/handover", {})["entry"]
         results = server.until(f, session, lambda es: any(e["kind"] == "result" and e["call"] == "cell" for e in es))
         assert all(e["outcome"] == "success" for e in results if e["kind"] == "result"), results
@@ -495,4 +470,4 @@ for model in ("opus", "sol"):
         assert len(rebuilds) == 1 and rebuilds[0]["note"] == first_note, rebuilds
         results = [e for e in entries if e["kind"] == "result"]
         assert {e["call"] for e in results} == {"cell", "cell:1"} and all(e["outcome"] == "success" for e in results), results
-        assert len(list(f.requests.glob("[0-9]*.body"))) == 3, "the last ask was answered twice"
+        assert len(f.sent()) == 3, "the last ask was answered twice"

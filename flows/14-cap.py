@@ -1,5 +1,4 @@
 """The twenty-first unfinished child is refused; a live cap increase permits it."""
-import json
 from driver import flow
 from model import agent, reply
 
@@ -18,9 +17,7 @@ replies += [part for name in names for part in (
     reply(f"You are {name},", "Bash", {"command": "sleep 180", "run_in_background": True}),
     reply(f"You are {name},", text="Read complete; waiting for further work."))]
 with flow(replies) as f:
-    result = f.run("--print=json", root, timeout=180)
-    assert result.returncode == 0, result.stderr
-    parent = json.loads(result.stdout)["session"]
+    parent = f.ask(root, timeout=180)["session"]
     entries = list(f.record(parent))
     starts = [e for e in entries if e["kind"] == "call" and e["input"].get("action") == "start"]
     assert len(starts) == 22, starts

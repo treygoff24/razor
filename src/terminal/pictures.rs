@@ -74,13 +74,12 @@ impl Room<'_> {
             return Vec::new();
         };
         let blank = Row::on(" ".repeat(usize::from(lead)), bg).frame();
-        let slice = |row| Slice {
-            name: name.clone(),
-            row,
-            cells,
-        };
         let row = |row| Row {
-            picture: Some(slice(row)),
+            picture: Some(Slice {
+                name: name.clone(),
+                row,
+                cells,
+            }),
             lead,
             ..blank.clone()
         };
@@ -303,20 +302,6 @@ impl Pictures {
             .map(|(k, _)| k.clone())
     }
 
-    // Gives up on the row awaited: deletes it by its client id, never reused here, and ends
-    // its picture.
-    fn give_up(&mut self) {
-        if let Some((id, left)) = self.waiting.take() {
-            self.slowest = self
-                .slowest
-                .max(left.map_or(Duration::ZERO, |at| at.elapsed()));
-            self.deletes += &delete(id);
-            if let Some(key) = self.owner(id) {
-                self.fail(&key);
-            }
-        }
-    }
-
     // Ends a picture the terminal refused a row of or did not answer in time: deletes the rows it
     // holds and keeps its half blocks, refused as a copy refused is, so no cells read it again.
     fn fail(&mut self, key: &Key) {
@@ -366,8 +351,10 @@ impl Pictures {
     /// the last frame did not draw stops sending; drawn again, it is read again for the rest.
     pub(super) fn row(&mut self) -> Option<Vec<u8>> {
         self.taken();
-        if self.due().is_some_and(|due| due <= Instant::now()) {
-            self.give_up();
+        if self.due().is_some_and(|due| due <= Instant::now())
+            && let Some((id, _)) = self.waiting
+        {
+            self.answered(id, false);
         }
         let mut out = std::mem::take(&mut self.deletes).into_bytes();
         let Some((key, copy)) = self.sending.as_mut().filter(|_| self.waiting.is_none()) else {

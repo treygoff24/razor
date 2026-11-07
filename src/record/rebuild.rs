@@ -113,14 +113,8 @@ impl Record {
                 .map_err(|e| self.damaged(EntryId(0), e.to_string()))?;
             match entry.body {
                 Body::Call { call, name, input } => {
-                    calls.insert(
-                        call,
-                        (
-                            entry.id,
-                            name,
-                            input.to_string().chars().take(120).collect::<String>(),
-                        ),
-                    );
+                    let input: String = input.to_string().chars().take(120).collect();
+                    calls.insert(call, (entry.id, name, input));
                 }
                 Body::Result { call, outcome, .. } => {
                     if let Some((id, name, input)) = calls.remove(&call) {

@@ -61,7 +61,11 @@ pub async fn install(home: &Path) -> Result<String, Error> {
     let template = if macos { &t.plist } else { &t.unit };
     let shown = file.display().to_string();
     let text = (values.iter()).fold(template.to_string(), |s, (k, v)| s.replace(k, v));
-    write(&file, &text).await?;
+    let written = async {
+        fs::create_dir_all(file.parent().unwrap_or(&file)).await?;
+        fs::write(&file, text).await
+    };
+    written.await.map_err(other("writing the service file"))?;
     let enabled = if macos {
         // SAFETY: `getuid` always succeeds and touches no memory.
         let domain = format!("gui/{}", unsafe { libc::getuid() });
@@ -80,7 +84,7 @@ pub async fn install(home: &Path) -> Result<String, Error> {
     }
     let linger =
         Path::new("/var/lib/systemd/linger").join(std::env::var("USER").unwrap_or_default());
-    let at_boot = !cfg!(target_os = "macos") && fs::try_exists(linger).await.unwrap_or(false);
+    let at_boot = !macos && fs::try_exists(linger).await.unwrap_or(false);
     let sentence = match (enabled, at_boot) {
         (false, _) if existing => {
             return Ok(format!(
@@ -428,14 +432,6 @@ pub async fn desktop(home: PathBuf) {
         }
         eprintln!("Cua Driver's daemon exited ({exit}); starting it again.");
     }
-}
-
-async fn write(file: &Path, text: &str) -> Result<(), Error> {
-    let write = async {
-        fs::create_dir_all(file.parent().unwrap_or(file)).await?;
-        fs::write(file, text).await
-    };
-    write.await.map_err(other("writing the service file"))
 }
 
 /// Whether the command ran and exited 0.

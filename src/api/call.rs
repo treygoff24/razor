@@ -5,7 +5,7 @@
 
 mod writes;
 
-use super::{App, Gone, voice};
+use super::{App, Gone, cut, voice};
 use crate::controller;
 use crate::protocol::{Body, CallEvent, CallReason, Entry, Origin, SessionId, Speaker};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -118,7 +118,7 @@ async fn start(
     let settings = owner
         .map_err(|refusal| (CallReason::Error, refusal.1))?
         .settings;
-    if settings.call_used_today >= settings.call_daily_dollars {
+    if (settings.call_daily_dollars).is_some_and(|cap| settings.call_used_today >= cap) {
         return Err(refused(CallReason::Cap));
     }
     let lines = app
@@ -220,36 +220,29 @@ async fn seed(
     while let Some(Ok(line)) = page.next_line().await {
         let message = match serde_json::from_str::<Entry>(&line).map(|e| e.body) {
             Ok(Body::Input(i)) if matches!(i.from, Origin::Person | Origin::Answer { .. }) => {
-                Some(("user", "input_text", i.text))
+                Some(("user", i.text))
             }
-            Ok(Body::Text { text }) => Some((
-                "assistant",
-                "output_text",
-                crate::record::reply(&text).text.to_owned(),
-            )),
-            Ok(Body::Call { name, input, .. }) => crate::record::ask(&name, &input).map(|ask| {
-                (
-                    "assistant",
-                    "output_text",
-                    ask["text"].as_str().unwrap_or("").into(),
-                )
-            }),
+            Ok(Body::Text { text }) => Some(("assistant", crate::record::reply(&text).text.into())),
+            Ok(Body::Call { name, input, .. }) => crate::record::ask(&name, &input)
+                .map(|ask| ("assistant", ask["text"].as_str().unwrap_or("").into())),
             _ => None,
         };
-        said.extend(message.filter(|(_, _, text)| !text.is_empty()));
+        said.extend(message.filter(|(_, text)| !text.is_empty()));
     }
-    let message =
-        |role, kind, text| json!({"role": role, "content": [{"type": kind, "text": text}]});
+    let message = |role, text| {
+        let kind = ["input_text", "output_text"][usize::from(role == "assistant")];
+        json!({"role": role, "content": [{"type": kind, "text": text}]})
+    };
     let developer = cut(&developer, SEED);
     let mut room = SEED - developer.len();
     let newest = said.iter().rev().take(127);
-    let mut input: Vec<_> = (newest.map_while(|(role, kind, text)| {
+    let mut input: Vec<_> = (newest.map_while(|(role, text)| {
         let text = cut(text, room);
         room -= text.len();
-        (!text.is_empty()).then(|| message(*role, *kind, text))
+        (!text.is_empty()).then(|| message(*role, text))
     }))
     .collect();
-    input.push(message("developer", "input_text", developer));
+    input.push(message("developer", developer));
     input.reverse();
     Ok(input)
 }
@@ -705,11 +698,6 @@ fn pieces(mut text: &str) -> impl Iterator<Item = &str> {
         text = &text[piece.len()..];
         Some(piece).filter(|piece| !piece.is_empty())
     })
-}
-
-/// The longest start of `text` within `max` bytes that ends at a character's boundary.
-fn cut(text: &str, max: usize) -> &str {
-    &text[..text.floor_char_boundary(max)]
 }
 
 fn refused(reason: CallReason) -> (CallReason, String) {

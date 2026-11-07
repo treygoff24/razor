@@ -29,19 +29,18 @@ impl Summaries {
 
     /// The writer's last fold replaces its dormant snapshot when a configured home unloads.
     pub(crate) async fn unload(&self, record: Record) -> Result<(), Error> {
-        if let Some(home) = self.home(&record.summary.session) {
-            *home.lock().await = Cursor {
-                summary: Some(record.summary),
-                offset: record.offsets[record.offsets.len() - 1],
-                file: Some(
-                    record
-                        .file
-                        .metadata()
-                        .await
-                        .map_err(io("reading record metadata"))?,
-                ),
-            };
-        }
+        let Some(home) = self.home(&record.summary.session) else {
+            return Ok(());
+        };
+        let file = record.file.metadata().await;
+        let file = Some(file.map_err(io("reading record metadata"))?);
+        let offset = record.offsets[record.offsets.len() - 1];
+        let summary = Some(record.summary);
+        *home.lock().await = Cursor {
+            summary,
+            offset,
+            file,
+        };
         Ok(())
     }
 
@@ -103,11 +102,9 @@ impl Cursor {
             self.offset += size;
         })
         .await?;
-        self.summary.clone().ok_or_else(|| Error::Damaged {
-            session: session.clone(),
-            line: 1,
-            why: "the record is empty".into(),
-        })
+        self.summary
+            .clone()
+            .ok_or_else(|| damaged(session, 1, EMPTY.into()))
     }
 }
 
@@ -129,27 +126,13 @@ pub(super) async fn fold(
             break;
         }
         let id = state.as_ref().map_or(1, |s| s.last.0 + 1);
-        let damaged = |why| Error::Damaged {
-            session: session.clone(),
-            line: id,
-            why,
-        };
+        let damaged = |why| damaged(session, id, why);
         let entry: Entry = serde_json::from_slice(&line).map_err(|e| damaged(e.to_string()))?;
         if entry.id.0 != id {
             return Err(damaged(format!("its id is {}", entry.id.0)));
         }
         match (&entry.body, &state) {
-            (
-                Body::Start {
-                    cwd,
-                    model,
-                    settings,
-                    ..
-                },
-                None,
-            ) => {
-                *state = Some(Summary::new(session, cwd, model, *settings));
-            }
+            (Body::Start { .. }, None) => *state = Some(Summary::new(session)),
             (Body::Start { .. }, Some(_)) => {
                 return Err(damaged("it is another start entry".into()));
             }

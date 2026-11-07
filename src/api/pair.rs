@@ -1,5 +1,6 @@
 //! Public pairing requests and authenticated, on-demand tailnet discovery.
 use super::*;
+use crate::protocol::Device;
 use std::net::{IpAddr, SocketAddr};
 
 /// This server's name only; no enrollment, session or credential data.
@@ -35,7 +36,8 @@ pub(super) async fn hold(
 
 /// Online tailnet Razor servers, bounded in peers, concurrency, reply bytes and total time.
 pub(super) async fn discover(State(app): State<App>) -> Reply {
-    if app.controller.config().await.provider_only {
+    let config = app.controller.config().await;
+    if config.provider_only {
         return Err(Refusal(StatusCode::FORBIDDEN, crate::devices::QUIET.into()));
     }
     let Some(status) = config::setup::tailnet().await else {
@@ -49,70 +51,9 @@ pub(super) async fn discover(State(app): State<App>) -> Reply {
         .timeout(Duration::from_millis(1500))
         .build()
         .map_err(other("Starting tailnet discovery"))?;
-    let server = app.controller.config().await.server;
-    let port = server
-        .address
-        .as_deref()
-        .and_then(|a| a.rsplit(':').next()?.parse::<u16>().ok());
-    let mut ports = config::setup::PORTS.collect::<Vec<_>>();
-    if let Some(port) = port
-        && !ports.contains(&port)
-    {
-        ports.push(port);
-    }
-    let enrolled = app.devices.list().await;
-    let mut targets = Vec::new();
-    // 256 online peers, at most eleven ports each; no IP ranges or background polling.
-    let peers = status["Peer"]
-        .as_object()
-        .into_iter()
-        .flat_map(|p| p.values())
-        .filter(|p| p["Online"] == true)
-        .take(256)
-        .collect::<Vec<_>>();
-    for port in &ports {
-        for peer in &peers {
-            let ip = peer["TailscaleIPs"][0]
-                .as_str()
-                .and_then(|s| s.parse::<IpAddr>().ok());
-            let Some(ip) = ip else { continue };
-            let dns = peer["DNSName"]
-                .as_str()
-                .unwrap_or_default()
-                .trim_end_matches('.');
-            let address = SocketAddr::new(ip, *port).to_string();
-            let named = format!("{dns}:{port}");
-            if !enrolled.iter().any(|d| {
-                d.address
-                    .as_ref()
-                    .is_some_and(|a| a == &address || a == &named)
-            }) {
-                targets.push((address, dns.to_string()));
-            }
-        }
-    }
+    let targets = targets(&status, &config.server, &app.devices.list().await);
     let mut probes = stream::iter(targets)
-        .map(|(address, dns)| {
-            let client = &client;
-            async move {
-                let response = client
-                    .get(format!("http://{address}/v1/pair"))
-                    .send()
-                    .await
-                    .ok()?
-                    .error_for_status()
-                    .ok()?;
-                let body = Body::from_stream(response.bytes_stream());
-                let body = axum::body::to_bytes(body, 1024).await.ok()?;
-                let value: Value = serde_json::from_slice(&body).ok()?;
-                let name = value["name"].as_str()?;
-                let suggested = dns
-                    .split('.')
-                    .next()
-                    .filter(|n| crate::devices::valid_name(n))?;
-                Some((address, (name.to_string(), suggested.to_string())))
-            }
-        })
+        .map(|(address, dns)| probe(&client, address, dns))
         .buffer_unordered(64);
     let mut found = BTreeMap::new();
     // Keep completed replies if a large tailnet exceeds the five-second scan budget.
@@ -132,4 +73,59 @@ pub(super) async fn discover(State(app): State<App>) -> Reply {
     Ok(Json(
         json!({"servers": servers, "notice": if complete { "" } else { "Discovery timed out; run razor devices find again to look again." }}),
     ))
+}
+
+/// Each online peer's address and name at each port a server may listen on, setup's and this
+/// server's own, unless a device is enrolled at it.
+fn targets(status: &Value, server: &config::Server, enrolled: &[Device]) -> Vec<(String, String)> {
+    let own = (server.address.as_deref()).and_then(|a| a.rsplit(':').next()?.parse::<u16>().ok());
+    let mut ports = config::setup::PORTS.collect::<Vec<_>>();
+    ports.extend(own.filter(|port| !ports.contains(port)));
+    // 256 online peers, at most eleven ports each; no IP ranges or background polling.
+    let peers: Vec<_> = (status["Peer"].as_object().into_iter())
+        .flat_map(|p| p.values())
+        .filter(|p| p["Online"] == true)
+        .take(256)
+        .filter_map(|p| {
+            let ip = p["TailscaleIPs"][0].as_str()?.parse::<IpAddr>().ok()?;
+            let dns = p["DNSName"].as_str().unwrap_or_default();
+            Some((ip, dns.trim_end_matches('.')))
+        })
+        .collect();
+    let mut targets = Vec::new();
+    for port in &ports {
+        for (ip, dns) in &peers {
+            let address = SocketAddr::new(*ip, *port).to_string();
+            let named = format!("{dns}:{port}");
+            let paired =
+                |d: &Device| (d.address.as_ref()).is_some_and(|a| a == &address || a == &named);
+            if !enrolled.iter().any(paired) {
+                targets.push((address, dns.to_string()));
+            }
+        }
+    }
+    targets
+}
+
+/// The name a Razor server at `address` answers with, in at most 1 KiB, and the device name its
+/// tailnet name suggests; None for anything else.
+async fn probe(
+    client: &reqwest::Client,
+    address: String,
+    dns: String,
+) -> Option<(String, (String, String))> {
+    let response = client
+        .get(format!("http://{address}/v1/pair"))
+        .send()
+        .await
+        .ok()?;
+    let body = Body::from_stream(response.error_for_status().ok()?.bytes_stream());
+    let value: Value =
+        serde_json::from_slice(&axum::body::to_bytes(body, 1024).await.ok()?).ok()?;
+    let name = value["name"].as_str()?.to_string();
+    let suggested = dns
+        .split('.')
+        .next()
+        .filter(|n| crate::devices::valid_name(n))?;
+    Some((address, (name, suggested.to_string())))
 }

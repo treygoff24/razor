@@ -19,15 +19,25 @@ pub(crate) use post::Post;
 pub(crate) use turn::Turn;
 
 use crate::controller::{self, Controller};
-use crate::protocol::{Body, EntryId, Input, Origin, ReportStatus, SessionId, Spoken, State};
+use crate::protocol::{
+    Body, EntryId, Input, Origin, ReportStatus, SessionId, Spoken, State, Worktree,
+};
 use crate::record::{ChildSummary, Summary};
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
-use std::{fmt, path::PathBuf, sync::OnceLock};
-use tokio::sync::Mutex;
+use std::collections::BTreeMap;
+use std::sync::{LazyLock, OnceLock};
+use std::{fmt, path::PathBuf};
+use tokio::{fs, sync::Mutex};
 
 /// The most bytes in a first input, a continuation, a headline or an encoded channel post.
 const TEXT: usize = 64 * 1024;
+
+static WORDS: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {
+    // Invariant: the file is compiled into the binary, so it parses in every run of a build or
+    // in none, and the first Post ring of any flow shows which.
+    toml::from_str(include_str!("text/mail.toml")).expect("src/children/text/mail.toml parses")
+});
 
 /// One controller's child, mail and channel actions. It keeps no session state: every fact
 /// it acts on is read from the controller when it acts.
@@ -100,6 +110,41 @@ impl Children {
 
     fn dir(&self, session: &SessionId) -> PathBuf {
         self.home.join("sessions").join(session.as_str())
+    }
+
+    /// Where a child starting in `cwd` works: with `worktree` in a checkout, the same place in
+    /// its own worktree of that checkout, and the checkout; else `cwd` itself, made absolute.
+    async fn place(
+        &self,
+        session: &SessionId,
+        cwd: PathBuf,
+        worktree: bool,
+    ) -> Result<(Option<Worktree>, PathBuf), Error> {
+        let cwd = fs::canonicalize(cwd)
+            .await
+            .map_err(other("opening the child's folder"))?;
+        let found = if worktree {
+            git::plan(&cwd).await?
+        } else {
+            None
+        };
+        Ok(match found {
+            Some((worktree, inside)) => {
+                let cwd = self.dir(session).join("worktree").join(inside);
+                (Some(worktree), cwd)
+            }
+            None => (None, cwd),
+        })
+    }
+
+    /// Checks out the child's own branch at its worktree's base, in its session's folder.
+    async fn checkout(&self, session: &SessionId, worktree: &Worktree) -> Result<(), Error> {
+        git::add(
+            worktree,
+            &self.dir(session).join("worktree"),
+            &branch(session),
+        )
+        .await
     }
 }
 
@@ -207,6 +252,11 @@ fn find(parent: &Summary, name: &str) -> Result<ChildSummary, Error> {
             "This session has no child `{name}`; status lists them."
         )),
     }
+}
+
+/// One of `text/mail.toml`'s texts.
+fn words(key: &str) -> &'static str {
+    WORDS.get(key).map_or("", String::as_str)
 }
 
 /// The sole branch name for a child's existing session, shared with its status row.

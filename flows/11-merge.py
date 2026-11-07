@@ -16,9 +16,7 @@ with flow(replies) as f:
     (f.cwd / "shared.md").write_text("SHARED_BRIEF_11: keep this exact sentence.")
     f.base("shared.md")
     (f.cwd / "base").write_text("uncommitted parent edit")
-    result = f.run("--print=json", root)
-    assert result.returncode == 0, result.stderr
-    parent = json.loads(result.stdout)["session"]
+    parent = f.ask(root)["session"]
     records = [(p.parent.name, list(f.record(p.parent.name)))
                for p in (f.home / ".razor/sessions").glob("*/record.jsonl")]
     children = [(sid, entries) for sid, entries in records if entries[0].get("child")]
@@ -47,7 +45,7 @@ with flow(replies) as f:
     assert not (f.home / ".razor/live" / sid).exists(), "a settled child stayed live"
     reports = [e for e in f.record(parent) if e["kind"] == "input" and isinstance(e["from"], dict) and "report" in e["from"]]
     assert len(reports) == 1 and reports[0]["text"] == "Committed child-marker.", reports
-    requests = [p.read_text() for p in f.requests.glob("*.body") if p.stem.isdigit()]
+    requests = f.sent()
     shown = [request for request in requests if root in request and "Committed child-marker." in request]
     assert shown, "the waiting parent never saw its child's report"
     assert all(request.count("Committed child-marker.") == 1 for request in shown), "wait and the input notice delivered the report twice"

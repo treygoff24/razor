@@ -3,11 +3,11 @@ use super::*;
 use crate::terminal::motion::{ease_in_out, ease_out, played, progress};
 use unicode_segmentation::UnicodeSegmentation;
 
-pub(super) struct Look {
-    pub(super) running: bool,
-    pub(super) arrive: f64,
-    pub(super) flash: f64,
-    pub(super) calm: f64,
+struct Look {
+    running: bool,
+    arrive: f64,
+    flash: f64,
+    calm: f64,
     settle: f64,
     /// With motion off, the finish's still acknowledgement: mark and figure white for 400 ms.
     ack: bool,
@@ -15,7 +15,7 @@ pub(super) struct Look {
     rail: Color,
 }
 
-pub(super) fn look(call: &Call<'_>, now: u64, motion: bool) -> Look {
+fn look(call: &Call<'_>, now: u64, motion: bool) -> Look {
     let running = call.outcome().is_none();
     let delay = if super::card::earned(call) { 900 } else { 0 };
     let settle = call.since(now).map_or(0., |t| progress(t, delay, 760));
@@ -36,7 +36,7 @@ pub(super) fn look(call: &Call<'_>, now: u64, motion: bool) -> Look {
     }
 }
 
-pub(super) fn mark(call: &Call<'_>, lk: &Look) -> (&'static str, Color) {
+fn mark(call: &Call<'_>, lk: &Look) -> (&'static str, Color) {
     if call.asking() {
         return if lk.running {
             ("◇", CYAN)
@@ -80,7 +80,7 @@ pub(super) fn draw(call: &Call<'_>, columns: usize, now: u64, motion: bool) -> L
         return entrance(line, lk.arrive);
     }
     // A finished test run reads as a test of the runner's command, the runner dropped on the phone.
-    let run = call.run().filter(|_| kind == "shell");
+    let run = call.run();
     let command = super::command(kind, input).unwrap_or("");
     let bare = run.and_then(|r| command.strip_prefix(r.runner).filter(|_| phone));
     // A launch's row, and another call about a child that went through, name the child and its
@@ -166,9 +166,7 @@ pub(super) fn draw(call: &Call<'_>, columns: usize, now: u64, motion: bool) -> L
             spans.push(span(format!(" {}", clip(brief, left)), GRAY));
         }
     }
-    let end = start
-        + spans[2..].iter().map(|s| width(&s.content)).sum::<usize>()
-        + if pair.is_some() { facts } else { 0 };
+    let end = start + spans_width(&spans[2..]) + if pair.is_some() { facts } else { 0 };
     if let Some((old, new)) = pair {
         spans.extend([
             span(format!("  {old}"), mix(RED, GLASS, 0.25 * lk.calm)),
@@ -254,10 +252,11 @@ fn search_figure(call: &Call<'_>) -> Option<String> {
         (_, l) if l.starts_with("Found ") => (number(l, 1)?, number(l, 1)?),
         _ => {
             let found = lines.iter().filter(|l| !l.starts_with('['));
-            let mut paths: Vec<_> = found.map(|l| l.split(':').next()).collect();
-            let hits = paths.len();
-            paths.dedup();
-            (hits, paths.len())
+            let (hits, files, _) = found.fold((0, 0, None), |(hits, files, last), line| {
+                let path = line.split(':').next();
+                (hits + 1, files + usize::from(path != last), path)
+            });
+            (hits, files)
         }
     };
     Some(format!("{partial}{hits} in {files} file{}", plural(files)))
@@ -430,14 +429,14 @@ fn leader(
     } else {
         rgb(0x123921)
     };
+    let rest = if lk.flash > 0. {
+        mix(rgb(0x3d464f), WHITE, 1.2 * lk.flash)
+    } else {
+        mix(rgb(0x1f6b37), rgb(0x3d464f), lk.calm)
+    };
     let mut spans = Vec::new();
     for i in end..to {
         let dot = i > end && i + 1 < to && i % 2 == 0;
-        let rest = if lk.flash > 0. {
-            mix(rgb(0x3d464f), WHITE, 1.2 * lk.flash)
-        } else {
-            mix(rgb(0x1f6b37), rgb(0x3d464f), lk.calm)
-        };
         let behind = if forward {
             head as i64 - i as i64
         } else {

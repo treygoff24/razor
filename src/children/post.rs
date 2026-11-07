@@ -2,7 +2,7 @@
 //! one `post watch` per participant, whose mail and mentions ring the session. Every call of the
 //! `post` program is in `bind` and `watch`, so a change in how Post is called touches those two.
 
-use super::message::words;
+use super::words;
 use crate::controller::{Controller, Error};
 use crate::protocol::{Input, Origin, SessionId};
 use crate::shell::Group;

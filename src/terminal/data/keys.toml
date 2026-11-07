@@ -26,6 +26,10 @@
 "left" = ["Left", "h"]
 "right" = ["Right", "l"]
 "accept" = ["Enter"]
+"previous_agent" = []
+"next_agent" = []
+"overview" = []
+"beside" = []
 "fold" = ["Space"]
 "thread" = ["n"]
 "wider" = [">"]
@@ -99,9 +103,11 @@
 "back" = ["Esc"]
 "clear" = ["Ctrl-C"]
 "stash" = ["Ctrl-S"]
+"switch" = []
 
 [keys.line_start]
 "outward" = ["Left"]
+"choose" = []
 
 [keys.draft_end]
 "inward" = ["Right"]
@@ -302,6 +308,10 @@
 "list.left" = "Move to the parent agent or heading; nothing in the overview"
 "list.right" = "Unfold or move into a heading; in the overview, open the selected agent or unfold the selected group"
 "list.accept" = "Open the selected agent or toggle the selected heading"
+"list.previous_agent" = "Select the agent or row above, passing over helpers that do not need you"
+"list.next_agent" = "Select the agent or row below, passing over helpers that do not need you"
+"list.overview" = "Open the overview; nothing in the overview"
+"list.beside" = "Open the selected agent beside the list, its composer taking the keys, or toggle the selected heading"
 "list.fold" = "Fold or unfold the selected heading; in the overview, the selected agent's group"
 "list.group_1" = "Select the first agent of top-level group 1, or that group while it is folded"
 "list.group_2" = "Select the first agent of top-level group 2, or that group while it is folded"
@@ -367,8 +377,10 @@
 "composer.back" = "Leave the current card, answer, split, pane, or pin; otherwise stop"
 "composer.clear" = "Empty the draft while it holds words or images, as one undo step"
 "composer.stash" = "Set the draft aside and empty the box; with an empty draft, bring it back"
+"composer.switch" = "Move the keys between the conversation and the agents list, opening it with this agent selected"
 "suggestion.accept" = "Put the suggested next message in the draft for editing"
 "line_start.outward" = "At the start of a line: a helper's parent, else the agents list beside the session, else the overview"
+"line_start.choose" = "At the start of a line: a helper's parent, else the agents list, which takes the keys with this agent selected"
 "draft_end.inward" = "At the end of the draft with the agents list open: close it, leaving the session alone"
 "targets.next" = "Select the next click target with an empty draft"
 "targets.previous" = "Select the previous click target with an empty draft"

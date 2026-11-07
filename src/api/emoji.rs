@@ -5,15 +5,14 @@ use crate::protocol::{Emoji, EmojiUse, now};
 use axum::extract::{Json, State};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{collections::BTreeMap, path::Path, path::PathBuf};
-use tokio::{io::AsyncReadExt, sync::Mutex};
+use std::{collections::BTreeMap, path::Path};
+use tokio::sync::Mutex;
 
 /// The base emoji the file keeps, and how many the history answers.
 const KEPT: usize = 200;
 const RECENT: usize = 32;
 
 pub(super) struct History {
-    path: PathBuf,
     kept: Mutex<Kept>,
 }
 
@@ -27,12 +26,8 @@ struct Kept {
 impl History {
     /// Reads `emoji.json`, at most 1 MiB; a missing or unreadable file is an empty history.
     pub(super) async fn open(home: &Path) -> Self {
-        let (path, mut bytes) = (home.join("emoji.json"), Vec::new());
-        if let Ok(file) = tokio::fs::File::open(&path).await {
-            let _ = file.take(1 << 20).read_to_end(&mut bytes).await;
-        }
-        let kept = Mutex::new(serde_json::from_slice(&bytes).unwrap_or_default());
-        Self { path, kept }
+        let kept = Mutex::new(super::load(home, "emoji.json", 1 << 20).await);
+        Self { kept }
     }
 }
 
@@ -72,12 +67,8 @@ pub(super) async fn used(State(app): State<App>, Json(used): Json<EmojiUse>) -> 
             kept.tones.remove(&least);
         }
     }
-    let bytes = serde_json::to_vec(&*kept).map_err(std::io::Error::other);
-    let new = app.emoji.path.with_extension("json.new");
-    let write = async {
-        tokio::fs::write(&new, bytes?).await?;
-        tokio::fs::rename(&new, &app.emoji.path).await
-    };
-    write.await.map_err(other("Writing emoji.json"))?;
+    let bytes = serde_json::to_vec(&*kept).map_err(other("Writing emoji.json"))?;
+    let saved = super::save(&app.home, "emoji.json", &bytes).await;
+    saved.map_err(other("Writing emoji.json"))?;
     Ok(Json(json!({})))
 }

@@ -80,7 +80,7 @@ pub(super) fn frame(name: &str, age: u64, speed: u64, motion: bool) -> Option<Fr
     let moving = if motion { movement } else { 0 };
     let next = if !motion {
         3000
-    } else if moving == 1 || moving == 2 || moving == 4 {
+    } else if matches!(moving, 1 | 2 | 4) {
         end.min(start + (k + 1) * tick)
     } else if !particle.is_empty() {
         end.min(start + (k / 2 + 1) * tick * 2)
@@ -89,11 +89,7 @@ pub(super) fn frame(name: &str, age: u64, speed: u64, motion: bool) -> Option<Fr
     };
     Some(Frame {
         pose,
-        dx: if moving == 2 {
-            if even { 1 } else { -1 }
-        } else {
-            0
-        },
+        dx: i32::from(moving == 2) * [-1, 1][usize::from(even)],
         dy: if moving == 1 && even { -2 } else { 0 },
         flip: moving == 3,
         visible: moving != 4 || even,

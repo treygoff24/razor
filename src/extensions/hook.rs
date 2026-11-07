@@ -35,10 +35,9 @@ pub(super) fn load(
         });
         queue
     });
-    let (before, after) = (config.before.clone(), config.after.clone());
     let registered = Registered {
-        before,
-        after,
+        before: config.before.clone(),
+        after: config.after.clone(),
         ..Default::default()
     };
     (registered, queue)

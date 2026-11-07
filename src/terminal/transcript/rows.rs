@@ -51,9 +51,18 @@ impl Transcript {
         let places = tools::places(&entries, &self.jobs, presence, self.motion, zone);
         let (mut children, mut counts, mut closing) = (Vec::new(), BTreeMap::new(), None);
         // Inputs withdrawn before delivery draw nowhere and end nothing. Adjacent replies continue
-        // the same reply, adjacent thinking summaries the same aside.
-        let (mut follows, mut mused) = (false, false);
+        // the same reply, adjacent thinking summaries the same aside. A turn's rows name the model
+        // its end records; one not yet ended, or ended before ends named it, the session's.
+        let (mut follows, mut mused, mut ran) = (false, false, None);
         for entry in entries.iter().filter(|e| !self.withdrawn.contains(&e.id)) {
+            let model = *ran.get_or_insert_with(|| {
+                let mut turn = self.entries.range(entry.id..).map(|(_, e)| &e.body);
+                let end = turn.find_map(|body| match body {
+                    Body::TurnEnd { model: wrote, .. } => Some(wrote.as_deref()),
+                    _ => None,
+                });
+                end.flatten().unwrap_or(model)
+            });
             if matches!(
                 entry.body,
                 Body::Input(_) | Body::Text { .. } | Body::Thinking { .. } | Body::TurnEnd { .. }
@@ -88,6 +97,7 @@ impl Transcript {
             }
             follows = matches!(entry.body, Body::Text { .. });
             mused = matches!(entry.body, Body::Thinking { .. });
+            ran.take_if(|_| matches!(entry.body, Body::TurnEnd { .. }));
             counts.insert(entry.id, (first, rows.total - first));
             if matches!(entry.body, Body::Call { .. }) {
                 rows.mark(first, Action::Toggle(entry.id));
@@ -182,43 +192,7 @@ impl Transcript {
                 let clock = self.motion.then_some((self.tick, e.at));
                 thought(text, columns, (e.id, open), mused, (live, clock), rows);
             }
-            Body::Call { .. } if self.deliveries.contains_key(&e.id) => {
-                if let Some(d) = self.deliveries.get(&e.id) {
-                    reply(&d.line, columns, Some((model, &self.name)), rows, None);
-                    if let Some(voice) = &d.voice {
-                        rows.push(crate::terminal::audio::spoken(voice, e.id, columns));
-                    }
-                }
-            }
-            Body::Call { name, .. }
-                if tools::kind(name) == "skill" && !self.call(e, None).failed() =>
-            {
-                rows.push(Row::plain(""));
-                let (line, next) =
-                    tools::skill::line(&self.call(e, None), columns, self.tick, self.motion);
-                let first = rows.total;
-                rows.push(line);
-                rows.moving(first, next);
-            }
-            Body::Call { .. } => {
-                if let Some(asked) = self.asked(e) {
-                    rows.push(Row::plain(""));
-                    let name = crate::terminal::text::model(model);
-                    let first = rows.total;
-                    rows.extend(super::question::rows(
-                        &asked,
-                        &name,
-                        columns,
-                        self.tick,
-                        self.motion,
-                    ));
-                    return rows
-                        .moving(first, super::question::next(&asked, self.tick, self.motion));
-                }
-                let (call, first) = (self.call(e, place), rows.total);
-                rows.extend(call.rows(columns, self.tick, self.motion));
-                rows.moving(first, call.next(columns, self.tick, self.motion));
-            }
+            Body::Call { .. } => self.call_rows(e, place, columns, model, rows),
             Body::Rebuild { trigger, note, .. } => self.rebuild(e, *trigger, note, columns, rows),
             Body::TurnEnd { end, inputs, .. } => {
                 if let Some(words) = self.unsaved.get(&e.id) {
@@ -253,6 +227,50 @@ impl Transcript {
             }
             _ => {}
         }
+    }
+
+    fn call_rows(
+        &self,
+        e: &Entry,
+        place: Option<&tools::Place>,
+        columns: usize,
+        model: &str,
+        rows: &mut Rows,
+    ) {
+        if let Some(d) = self.deliveries.get(&e.id) {
+            reply(&d.line, columns, Some((model, &self.name)), rows, None);
+            if let Some(voice) = &d.voice {
+                rows.push(crate::terminal::audio::spoken(voice, e.id, columns));
+            }
+            return;
+        }
+        let call = self.call(e, place);
+        let skill = matches!(&e.body, Body::Call { name, .. } if tools::kind(name) == "skill")
+            && !call.failed();
+        let asked = self.asked(e);
+        if skill || asked.is_some() {
+            rows.push(Row::plain(""));
+        }
+        let first = rows.total;
+        let next = if skill {
+            let (line, next) = tools::skill::line(&call, columns, self.tick, self.motion);
+            rows.push(line);
+            next
+        } else if let Some(asked) = asked {
+            let name = crate::terminal::text::model(model);
+            rows.extend(super::question::rows(
+                &asked,
+                &name,
+                columns,
+                self.tick,
+                self.motion,
+            ));
+            super::question::next(&asked, self.tick, self.motion)
+        } else {
+            rows.extend(call.rows(columns, self.tick, self.motion));
+            call.next(columns, self.tick, self.motion)
+        };
+        rows.moving(first, next);
     }
 
     // Every row is there from the start, so the rebuild card asks only for look frames.

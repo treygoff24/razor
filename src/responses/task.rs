@@ -62,7 +62,7 @@ struct Task {
     /// The session directory, which image paths in native data are relative to.
     dir: PathBuf,
     open: u64,
-    settings: crate::protocol::ModelSettings,
+    settings: ModelSettings,
     requested_speed: Speed, // The in-flight request keeps its speed when another input changes it.
     conversation: Conversation,
     code: Arc<CodeMode>,
@@ -122,7 +122,7 @@ impl Responses {
                     session: session.clone(),
                     dir: dir.clone(),
                     open,
-                    settings: crate::protocol::ModelSettings { effort, speed },
+                    settings: ModelSettings { effort, speed },
                     requested_speed: speed,
                     conversation: conversation.map_err(|e| e.to_string())?,
                     code: Arc::new(CodeMode::new(dir, runs)),
@@ -215,9 +215,7 @@ impl Task {
                         turn.nested.insert(run.call.0.clone(), run);
                         self.emit(FromBridge::Entry { body, native: None }).await?;
                     }
-                    None => {
-                        let _ = run.reply.send(Err(code_mode::Error::Refused("The turn ended before this call was admitted.".into())));
-                    }
+                    None => run.late(),
                 },
                 () = std::future::ready(()), if ready => {
                     if let Err(error) = self.request().await {
@@ -399,7 +397,7 @@ impl Task {
                 self.inputs.extend(inputs);
             }
             ToBridge::Effort { effort, speed, .. } => {
-                self.settings = crate::protocol::ModelSettings { effort, speed }
+                self.settings = ModelSettings { effort, speed }
             }
             ToBridge::Interrupt { .. } => return self.interrupt().await,
             ToBridge::Admitted { call, input, .. } => return self.admitted(call, input).await,
@@ -420,15 +418,7 @@ impl Task {
                 };
                 self.images.extend(Image::named(&output));
                 self.result(call, output.clone(), error).await?;
-                let value = serde_json::from_str::<Value>(&output);
-                let ran = value.as_ref().is_ok_and(|v| v["end"].is_object());
-                // A nested tool returns an object or a string, as exec's description says.
-                let value = if error && !ran {
-                    Err(code_mode::Error::Refused(output))
-                } else {
-                    Ok(value.unwrap_or(Value::String(output)))
-                };
-                let _ = run.reply.send(value);
+                run.answer(output, error);
             }
             // A task opens once; the next request compares the current profile's tools itself.
             ToBridge::Open { .. } | ToBridge::Add { .. } | ToBridge::Close { .. } => {}
@@ -495,11 +485,7 @@ impl Task {
         let (code, stop) = (self.code.clone(), turn.stop.subscribe());
         turn.cells.push(Box::pin(async move {
             let result = match profile.input(&tool, input) {
-                Ok((action, Value::String(source))) if action == "exec" => {
-                    code.exec(call.clone(), source, profile.nested.clone().into(), stop)
-                        .await
-                }
-                Ok((_, input)) => code.wait(input).await,
+                Ok(mapped) => code.call(call.clone(), mapped, &profile.nested, stop).await,
                 Err(error) => Err(code_mode::Error::Refused(error.to_string())),
             };
             (call, result)

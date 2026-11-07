@@ -71,7 +71,7 @@ for model in ("opus", "gpt-6.1-sol"):
                 ids = {e["native"]["claude"]["conversation"] for e in entries if e.get("native")}
                 assert len(ids) == 1, ids
             else:
-                last = sorted(f.requests.glob("[0-9]*.body"))[-1].read_text()
+                last = f.sent()[-1]
                 assert "ui_stop" in last and "Run the foreground job." in last, last
 
 # A handover input sent while a cell runs is not taken by the stopped turn; the path runs it, and
@@ -165,7 +165,7 @@ for model in ("opus", "gpt-6.1-sol"):
         assert not any(inputs for call, inputs in named.items() if call.startswith("cell:")), named
         ends = [e for e in entries if e["kind"] == "turn_end"]
         assert ends[0]["end"] == "stopped" and news["NEWS_B"] not in ends[0]["inputs"], ends
-        last = sorted(f.requests.glob("[0-9]*.body"))[-1].read_text()
+        last = f.sent()[-1]
         assert last.count("NEWS_A") == 1 and last.count("NEWS_B") == 1, "news reached the model twice or not at all"
 
 # A second Escape before the path ends the turn drops the conversation: an input sent to it and not
@@ -186,7 +186,7 @@ with flow([reply(gate("unread_a", "a_go"), gate("unread_b", "b_go")), reply(text
     path(pid, signal.SIGCONT)
     entries = server.until(f, session, lambda es: any(e["kind"] == "turn_end" and later in e["inputs"] for e in es))
     assert [e["end"] for e in entries if e["kind"] == "turn_end"] == ["stopped", "done"], entries[-3:]
-    assert "UNREAD_WORDS" in sorted(f.requests.glob("[0-9]*.body"))[-1].read_text()
+    assert "UNREAD_WORDS" in f.sent()[-1]
 
 # An Escape that reaches the model path after the turn's end it has not yet recorded stops
 # nothing: the next turn's cells run. The race is narrow, so each round tries it once: before the
@@ -226,4 +226,4 @@ with flow([reply(("h", "mcp__razor__handover", {"note": "Continue."})), Reply(sl
     server.stop(f, signal.SIGKILL)
     server.start(f)
     time.sleep(1)
-    assert len(list(f.requests.glob("[0-9]*.body"))) == 2, "the restart resumed the stopped work"
+    assert len(f.sent()) == 2, "the restart resumed the stopped work"

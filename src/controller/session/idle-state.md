@@ -1,0 +1,1 @@
+Update the project state note if it changed.

@@ -19,8 +19,7 @@ for model, ((first, heard), config) in routes.items():
         session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
         path = f"/sessions/{session}"
         server.post(f, path + "/input", {"text": "Wait for news."})
-        while not (f.requests / "001.json").exists():
-            time.sleep(0.02)
+        server.wait((f.requests / "001.json").exists)
         began, steer = time.monotonic(), server.post(f, path + "/input", {"text": "STEER67"})["entry"]
         entries = server.until(f, session, lambda es: es[-1]["kind"] == "turn_end")
         call_at, waited = (next(e for e in entries if e.get("call") == "toolu_wait67" and e["kind"] == k) for k in ("call", "result"))

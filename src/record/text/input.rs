@@ -2,9 +2,9 @@
 //! of `input.toml` (RULES.md 16), drawn when a request or a rebuilt context is rendered.
 
 use crate::protocol::{
-    BridgeInput, CallEvent, CallReason, EntryId, ImageCopy, Input, MailKind, Origin,
+    BridgeInput, CallEvent, CallReason, EntryId, ImageCopy, Input, MailKind, Origin, Source,
+    Speaker,
 };
-use crate::protocol::{Source, Speaker};
 use crate::record::{Meeting, MeetingState, Summary};
 use serde_json::json;
 use std::{collections::BTreeMap, path::Path, sync::LazyLock};

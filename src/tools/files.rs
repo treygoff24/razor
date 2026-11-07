@@ -4,7 +4,7 @@ use super::{Error, Tools, io, load, other};
 use crate::protocol::{EntryId, IMAGE_BYTES, SPILL, image_type};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 /// A line `read` shows is cut at this many characters.
@@ -213,11 +213,8 @@ impl Tools {
 }
 
 /// Each `<name>/SKILL.md` that [`find_skill`] finds in `dirs`, by name; at most `cap`.
-async fn skill_files(
-    dirs: Vec<PathBuf>,
-    cap: usize,
-) -> std::collections::BTreeMap<String, PathBuf> {
-    let mut names = std::collections::BTreeMap::new();
+async fn skill_files(dirs: Vec<PathBuf>, cap: usize) -> BTreeMap<String, PathBuf> {
+    let mut names = BTreeMap::new();
     for dir in dirs {
         let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
             continue;

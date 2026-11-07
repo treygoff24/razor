@@ -246,7 +246,7 @@ A window is stale once `resets_at` has passed; there is no separate reading time
 
 ## Second pass: keep the declarations plain
 
-The public types, variants, fields, functions and JSON forms stay unchanged. Keep the hand-written UTC date calculation: replacing it with a formatter saves source lines but adds formatting work and a new date-range failure case. A macro for repeated derives would hide the declarations every module reads; it would shorten the count, not the design.
+The public types, variants, fields, functions and JSON forms stay unchanged. Session ids take their UTC date from jiff, which the crate already depends on; a new id is made once per session, so its formatting cost does not matter, and its bytes and ordering match the earlier hand-written calculation from 1970 through 2100. A macro for repeated derives would hide the declarations every module reads; it would shorten the count, not the design.
 
 Remove only work with no caller-visible effect: serialize `SessionId` directly as its newtype string instead of cloning it through `String`, remove redundant defaults on optional fields, and simplify re-exports and the single-cause error display. Remove `IMAGE_TYPES`, which no code in `src/`, `bridge/`, `flows/` references; the MIME strings on the wire stay unchanged. Keep the consuming `From<SessionId> for String` conversion public. No caller changes, dependencies or new vocabulary are needed. Compare serialized bytes for every record and wire variant, round-trip records produced by the binary, and run the same numbered flows before and after.
 

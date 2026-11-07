@@ -11,7 +11,7 @@ use axum::extract::{Json, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use std::{collections::BTreeSet, path::Path, sync::Arc};
-use tokio::{io::AsyncReadExt, sync::Mutex, sync::watch};
+use tokio::sync::{Mutex, watch};
 
 /// The largest saved set as stored, defaults written out, which is what a start reads back.
 const BYTES: usize = 256 << 10;
@@ -26,11 +26,7 @@ pub(super) struct Kept {
 impl Kept {
     /// Reads `views.json`, at most 256 KiB; a missing or unreadable file is none.
     pub(super) async fn open(home: &Path) -> Self {
-        let (path, mut bytes) = (home.join("views.json"), Vec::new());
-        if let Ok(file) = tokio::fs::File::open(&path).await {
-            let _ = file.take(BYTES as u64).read_to_end(&mut bytes).await;
-        }
-        let views = Arc::new(serde_json::from_slice(&bytes).unwrap_or_default());
+        let views = Arc::new(super::load(home, "views.json", BYTES as u64).await);
         Self {
             writing: Mutex::default(),
             views: watch::channel(views).0,
@@ -228,12 +224,8 @@ pub(super) async fn run(app: App) {
             continue;
         }
         if delivered.is_none() {
-            delivered = Some(
-                app.deliveries
-                    .list(None, 256, &[])
-                    .await
-                    .unwrap_or_default(),
-            );
+            let listed = app.deliveries.list(None, 256, &[]).await;
+            delivered = Some(listed.unwrap_or_default());
         }
         next_expiry = publish(
             &app,

@@ -31,6 +31,7 @@ const entryOf = (uuid: string) => (uuid.startsWith(PREFIX) ? parseInt(uuid.slice
 type Builtin = { builtin: string; to?: string };
 type Declaration = Builtin | Tool;
 const isBuiltin = (d: Declaration): d is Builtin => 'builtin' in d;
+const alwaysLoaded = (tool: Tool): Tool => ({ ...tool, _meta: { ...tool._meta, 'anthropic/alwaysLoad': true } });
 type Image = { media_type: 'image/jpeg' | 'image/png' | 'image/webp'; path: string };
 type Input = { entry: number; text: string; images: Image[] };
 type Content = Exclude<SDKUserMessage['message']['content'], string>;
@@ -120,11 +121,8 @@ class Conversation {
 
   constructor(options: Open) {
     const { session, open, cwd, model, effort, resume, prompt, tools } = options;
-    [this.fast, this.model] = [options.speed === 'fast', model];
-    this.session = session;
-    this.open = open;
-    this.usageFile = options.usage_file;
-    this.account = options.account;
+    [this.session, this.open, this.fast, this.model] = [session, open, options.speed === 'fast', model];
+    [this.usageFile, this.account] = [options.usage_file, options.account];
     this.key = options.env?.ANTHROPIC_API_KEY ?? '';
     this.additions = options.additions.filter((t): t is Tool => !isBuiltin(t));
     const builtins = tools.filter(isBuiltin);
@@ -220,7 +218,7 @@ class Conversation {
     this.runs.clear();
   }
   serve(tools: Tool[]) {
-    for (const tool of tools) this.served.set(tool.name, { ...tool, _meta: { ...tool._meta, 'anthropic/alwaysLoad': true } });
+    for (const tool of tools) this.served.set(tool.name, alwaysLoaded(tool));
   }
   enqueue(step: () => Promise<unknown>) {
     this.queue = this.queue.then(() => this.closed ? undefined : step())
@@ -228,7 +226,7 @@ class Conversation {
   }
   bare(text: string) { return this.key ? text.replaceAll(this.key, '[key removed]') : text; }
   async add(tools: Tool[]) {
-    if (tools.every((tool) => JSON.stringify(this.served.get(tool.name)) === JSON.stringify({ ...tool, _meta: { ...tool._meta, 'anthropic/alwaysLoad': true } }))) return;
+    if (tools.every((tool) => JSON.stringify(this.served.get(tool.name)) === JSON.stringify(alwaysLoaded(tool)))) return;
     this.serve(tools);
     const relist = this.relist ??= Promise.withResolvers<void>();
     await this.razor.sendToolListChanged();
@@ -294,6 +292,7 @@ class Conversation {
       resets_at: measured ? typeof reset === 'number' && Number.isSafeInteger(reset) && reset > 0 ? reset : null : old?.resets_at ?? null,
       rejected: status === 'rejected', reason: status === 'rejected' ? reason : undefined });
   }
+  sendUsage() { return this.send({ type: 'usage', windows: [...this.windows.values()] }); }
   async usage() {
     if (this.closed || this.usagePending || Date.now() - this.usageAt < 60000) return;
     this.usageAt = Date.now(); this.usagePending = true;
@@ -308,7 +307,7 @@ class Conversation {
       for (const limit of row?.status === 'ok' ? row.limits : []) {
         if (limit?.kind === 'weekly_scoped' && typeof limit.model === 'string') { this.measure(limit.model, limit.percent, limit.resets_at * 1000); measured = true; }
       }
-      if (measured) await this.send({ type: 'usage', windows: [...this.windows.values()] });
+      if (measured) await this.sendUsage();
     } catch { /* A missing, unreadable or changed file measures nothing. */ }
     try {
       const u = await this.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true });
@@ -325,7 +324,7 @@ class Conversation {
           if (typeof value?.display_name === 'string') this.measure(value.display_name, value.utilization, typeof value.resets_at === 'string' ? Date.parse(value.resets_at) : null);
         }
       }
-      await this.send({ type: 'usage', windows: [...this.windows.values()] });
+      await this.sendUsage();
     } catch { /* Experimental: a missing or changed answer leaves rate-limit events in charge. */ }
     finally { this.usagePending = false; }
   }
@@ -438,8 +437,7 @@ class Conversation {
         }
         const name = r.rateLimitType && limitNames[r.rateLimitType];
         if (name) this.measure(name, typeof r.utilization === 'number' ? r.utilization * 100 : null, r.resetsAt === undefined ? null : r.resetsAt * 1000, r.status, blocked(r));
-        await this.send({ type: 'usage', windows: [...this.windows.values()] });
-        return;
+        return this.sendUsage();
       }
       case 'system':
         if (m.subtype === 'notification' && this.fast && m.key.startsWith('fast-mode')) await this.notice(m.text);

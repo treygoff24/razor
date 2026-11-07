@@ -99,15 +99,16 @@ impl Transcript {
             true => (a, b),
             false => (b, a),
         };
-        let words = |i| self.text(i);
         let mut out = Vec::new();
         for y in y0.max(top)..=y1.min(r.bottom().saturating_sub(1)) {
             let i = usize::from(y - top);
-            let Some((row, text)) = words(i) else {
+            let Some((row, text)) = self.text(i) else {
                 continue;
             };
             // The wrap broke here when the next row's first word would not have fit after it.
-            let next = words(i + 1).filter(|(n, _)| n.lead == row.lead && n.bg == row.bg);
+            let next = self
+                .text(i + 1)
+                .filter(|(n, _)| n.lead == row.lead && n.bg == row.bg);
             let first = next
                 .as_ref()
                 .and_then(|(_, t)| t.split(' ').next())
@@ -122,7 +123,6 @@ impl Transcript {
             if text.is_empty() {
                 out.push((None, false));
             } else if from < end.min(to) {
-                // Each grapheme with its column in the row.
                 let cells = text.graphemes(true).scan(row.lead, |at, g| {
                     let x = *at;
                     *at += width(g) as u16;

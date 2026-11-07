@@ -6,21 +6,19 @@ takes no name a root of this week holds."""
 import json
 from dataclasses import replace
 from driver import flow
-from model import agent, message, reply
+from model import agent, message, reply, tool
 import server
 from server import until
 
 a, b, c, g1, g2 = "FLOW_A43", "FLOW_B43", "FLOW_C43", "FLOW_G1_43", "FLOW_G2_43"
-replies = [reply(a, "mcp__razor__status", {}), reply(a, text="Named."),
+replies = [tool(a, "status"), reply(a, text="Named."),
            message(b, "list"), reply(b, text="Listed.")]
 with flow(replies) as f:
     alpha, beta = replace(f, cwd=f.cwd / "alpha43"), replace(f, cwd=f.cwd / "beta43")
     alpha.cwd.mkdir(), beta.cwd.mkdir()
 
     def run(where, *words):
-        result = where.run("--print=json", *words)
-        assert result.returncode == 0, result.stderr
-        return json.loads(result.stdout)["session"]
+        return where.ask(*words)["session"]
 
     def output(session, n=-1):
         entries = list(f.record(session))
@@ -51,7 +49,7 @@ with flow(replies) as f:
     other = gpu["from"]["mail"]["from"].removesuffix(" in beta43")
     assert other == "beta43" and other != name and gpu["from"]["mail"]["kind"] == "note", gpu
     assert ack["from"]["mail"]["from"] == f"{name} in alpha43", ack
-    requests = [p.read_text() for p in sorted(f.requests.glob("*.body")) if p.stem.isdigit()]
+    requests = f.sent()
     for words in (f"{other} in beta43: GPU_43", f"{name} in alpha43: ACK_43"):
         assert any(words in r for r in requests), f"no request held {words!r}"
     replies += [reply(c, text="Here.")]
@@ -124,7 +122,7 @@ with flow(replies) as f:
         entries = until(f, sid, answered(text))
         end = next(e for e in entries if e["kind"] == "turn_end")
         assert next(e for e in entries if e.get("text") == text)["id"] not in end["inputs"], "mail joined a sibling's turn"
-    assert any("scout43 in cwd: SIB_43" in p.read_text() for p in f.requests.glob("*.body")), "no request held the note"
+    assert any("scout43 in cwd: SIB_43" in body for body in f.sent()), "no request held the note"
     assert not any(e.get("text") == "BOTH_43" for s in (mine, theirs) for e in f.record(s)), "a refused send was admitted"
     for sid in (first, second):
         until(f, sid, lambda es: es[-1]["kind"] == "turn_end" and any("report" in e.get("from", "") for e in es))

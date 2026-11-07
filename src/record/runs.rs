@@ -2,7 +2,8 @@
 //! or night rebuild, followed to the turn end or withdrawal that answers it
 //! (docs/design/residents-api.md).
 
-use super::summary::{preview, said};
+use super::calls::said;
+use super::summary::{preview, room};
 use crate::protocol::*;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -148,12 +149,7 @@ impl Runs {
     fn add(&mut self, session: &SessionId, entry: EntryId, at: Millis, what: &str, due: Millis) {
         while self.recent.len() >= KEPT || self.recent.front().is_some_and(|r| r.at + DAY < at) {
             if let Some(old) = self.recent.pop_front() {
-                if self.older.len() == NAMES && !self.older.contains_key(&old.what) {
-                    let oldest = self.older.iter().min_by_key(|(_, run)| run.at);
-                    // A map at its nonzero capacity always has an oldest entry.
-                    let name = oldest.expect("full run history").0.clone();
-                    self.older.remove(&name);
-                }
+                room(&mut self.older, NAMES, &old.what, |run| run.at);
                 self.older.insert(old.what.clone(), old);
             }
         }

@@ -153,7 +153,6 @@ pub struct Menu {
     ran: Vec<(u64, &'static str)>,
 }
 
-#[derive(Clone)]
 struct Candidate {
     name: String,
     about: String,
@@ -172,7 +171,7 @@ struct List {
 /// Rows the list wants: five (three on a phone) while the draft is one line starting with `/`,
 /// or ends at the cursor in a `/word` after whitespace that names a skill; none otherwise.
 pub fn rows(app: &App) -> u16 {
-    match subject(app) {
+    match subject(app).filter(|(text, mid)| !mid || list(app, text, *mid).is_some()) {
         Some(_) if app.columns < PHONE => 3,
         Some(_) => 5,
         None => 0,
@@ -186,8 +185,7 @@ pub fn draw(app: &App, b: &mut Buffer, r: Rect, hits: &mut Vec<Hit>) {
         return;
     };
     let cols = r.width.saturating_sub(1).max(1) as usize;
-    fill(b, r, style(DATA, RECESS));
-    let rows: Vec<Line> = match (word(&text), list(app, &text, mid)) {
+    let rows: Vec<Line> = match (word(text), list(app, text, mid)) {
         (_, Some(list)) => {
             let (lines, start) = (
                 lines(&list, cols, r.height as usize),
@@ -199,10 +197,12 @@ pub fn draw(app: &App, b: &mut Buffer, r: Rect, hits: &mut Vec<Hit>) {
             }
             lines
         }
-        (Some(_), None) if hidden(app, &text) => Vec::new(),
-        (Some(_), None) => vec![missing(&text, cols)],
-        (None, _) => vec![usage(app, &text, cols)],
+        _ if mid => return,
+        (Some(_), None) if hidden(app, text) => Vec::new(),
+        (Some(_), None) => vec![missing(text, cols)],
+        (None, _) => vec![usage(app, text, cols)],
     };
+    fill(b, r, style(DATA, RECESS));
     let inner = Rect::new(r.x + 1, r.y, r.width - 1, r.height);
     for (n, row) in rows.iter().take(r.height as usize).enumerate() {
         line(b, inner, r.y + n as u16, row, style(DATA, RECESS));
@@ -213,21 +213,23 @@ pub fn draw(app: &App, b: &mut Buffer, r: Rect, hits: &mut Vec<Hit>) {
 /// partial name and leaves a whole one to run, Space completes the only candidate. False leaves
 /// the key to the editor.
 pub fn captures(app: &App) -> bool {
-    subject(app).is_some_and(|(text, mid)| list(app, &text, mid).is_some())
+    subject(app).is_some_and(|(text, mid)| list(app, text, mid).is_some())
 }
 
 pub fn key(app: &mut App, k: KeyEvent) -> bool {
     let Some((text, mid)) = subject(app) else {
         return false;
     };
-    let Some(list) = list(app, &text, mid) else {
+    let Some(list) = list(app, text, mid) else {
         return false;
     };
+    let text = text.to_owned();
     let typed = text[text.rfind([' ', '/']).map_or(0, |at| at + 1)..].to_lowercase();
-    let (choice, rows) = (list.matches[list.index].0.clone(), rows(app) as usize);
+    let choice = &list.matches[list.index].0;
     let partial = choice.name.to_lowercase() != typed;
     match k.code {
         KeyCode::Up | KeyCode::Down => {
+            let rows = rows(app) as usize;
             let index = match k.code == KeyCode::Up {
                 true => list.index.saturating_sub(1),
                 false => (list.index + 1).min(list.matches.len() - 1),
@@ -235,16 +237,16 @@ pub fn key(app: &mut App, k: KeyEvent) -> bool {
             let top = list.top.max((index + 1).saturating_sub(rows)).min(index);
             (app.menu.text, app.menu.index, app.menu.top) = (text, index, top);
         }
-        KeyCode::Tab => complete(app, mid, &text, &choice),
+        KeyCode::Tab => complete(app, mid, &text, choice),
         // Space completes the one candidate only when the letters typed start its name.
         KeyCode::Char(' ')
             if list.matches.len() == 1
                 && partial
                 && choice.name.to_lowercase().starts_with(&typed) =>
         {
-            complete(app, mid, &text, &choice)
+            complete(app, mid, &text, choice)
         }
-        KeyCode::Enter if partial => complete(app, mid, &text, &choice),
+        KeyCode::Enter if partial => complete(app, mid, &text, choice),
         KeyCode::Esc => (app.menu.text, app.menu.hidden) = (text, true),
         _ => return false,
     }
@@ -256,7 +258,9 @@ pub fn click(app: &mut App, n: usize) {
     let Some((text, mid)) = subject(app) else {
         return;
     };
-    if let Some((choice, _)) = list(app, &text, mid).and_then(|l| l.matches.into_iter().nth(n)) {
+    let list = list(app, text, mid);
+    let text = text.to_owned();
+    if let Some((choice, _)) = list.and_then(|l| l.matches.into_iter().nth(n)) {
         complete(app, mid, &text, &choice);
     }
 }
@@ -340,23 +344,20 @@ pub fn skill(app: &App, text: &str) -> Option<(String, String)> {
         .split_once(' ')
         .unwrap_or((&text[1..], ""));
     let known = app.skills.iter().any(|s| s.name == name);
-    let command = COMMANDS.iter().any(|c| c.0 == name);
-    (known && !command).then(|| (name.to_owned(), words.trim_start().to_owned()))
+    (known && !command(name)).then(|| (name.to_owned(), words.trim_start().to_owned()))
 }
 
 // What is completed and whether it is a skill token mid-draft.
-fn subject(app: &App) -> Option<(String, bool)> {
+fn subject(app: &App) -> Option<(&str, bool)> {
     let draft = &app.composer.text;
     if draft.starts_with('/') && !draft.contains('\n') {
-        return Some((draft.clone(), false));
+        return Some((draft, false));
     }
-    let token = token(app)?;
-    list(app, &token, true)?;
-    Some((token, true))
+    token(app).map(|token| (token, true))
 }
 
 // The `/partial` before the cursor, after whitespace, with the cursor at its end.
-fn token(app: &App) -> Option<String> {
+fn token(app: &App) -> Option<&str> {
     let (draft, cursor) = (&app.composer.text, app.composer.cursor());
     if draft.starts_with('/') || draft[cursor..].starts_with(|c: char| !c.is_whitespace()) {
         return None;
@@ -371,7 +372,7 @@ fn token(app: &App) -> Option<String> {
         .chars()
         .next()
         .is_some_and(|c| c.is_ascii_alphanumeric());
-    (after_space && first).then(|| format!("/{name}"))
+    (after_space && first).then(|| &before[start - 1..])
 }
 
 // The word after `/`, lower case, while no whitespace follows it.
@@ -424,7 +425,7 @@ fn named(app: &App, mid: bool) -> Vec<Candidate> {
             skill: false,
             glyph: None,
         });
-    let command = |name: &str| !mid && COMMANDS.iter().any(|c| c.0 == name.to_lowercase());
+    let command = |name: &str| !mid && command(&name.to_lowercase());
     let mut more: Vec<&Skill> = app.skills.iter().filter(|s| !command(&s.name)).collect();
     more.sort_by_cached_key(|s| (s.name.to_lowercase(), s.name.clone()));
     let skills = more.into_iter().map(|s| Candidate {
@@ -484,10 +485,11 @@ fn ranked(
     typed: &str,
     candidates: impl IntoIterator<Item = Candidate>,
 ) -> Vec<(Candidate, Vec<usize>)> {
+    let typed: Vec<_> = typed.chars().collect();
     let mut ranked: Vec<_> = candidates
         .into_iter()
         .enumerate()
-        .filter_map(|(order, c)| rank(&c.name, typed).map(|r| (r, order, c)))
+        .filter_map(|(order, c)| rank(&c.name, &typed).map(|r| (r, order, c)))
         .collect();
     ranked
         .sort_by_key(|((tier, at, _), order, _)| (*tier, if *tier >= 2 { *at } else { 0 }, *order));
@@ -499,30 +501,28 @@ fn ranked(
 }
 
 // The tier, where the match starts, and the matched characters of `name`.
-fn rank(name: &str, typed: &str) -> Option<(u8, usize, Vec<usize>)> {
-    let (n, w): (Vec<char>, Vec<char>) = (
-        name.to_lowercase().chars().collect(),
-        typed.chars().collect(),
-    );
+fn rank(name: &str, w: &[char]) -> Option<(u8, usize, Vec<usize>)> {
+    if w.is_empty() {
+        return Some((1, 0, Vec::new()));
+    }
+    let n: Vec<_> = name.to_lowercase().chars().collect();
     let span = |at: usize| (at..at + w.len()).collect::<Vec<_>>();
-    let found: Vec<usize> = (0..n.len()).filter(|&i| n[i..].starts_with(&w)).collect();
-    match found.first() {
-        _ if w.is_empty() => return Some((1, 0, Vec::new())),
+    let mut found = (0..n.len()).filter(|&i| n[i..].starts_with(w));
+    let first = found.clone().next();
+    match first {
         _ if n == w => return Some((0, 0, span(0))),
         Some(0) => return Some((1, 0, span(0))),
         _ => {}
     }
-    let boundary = found
-        .iter()
-        .find(|&&i| i > 0 && matches!(n[i - 1], '-' | ':' | '_' | '.' | '!'));
-    if let Some(&at) = boundary.or(found.first()) {
+    let boundary = found.find(|&i| i > 0 && matches!(n[i - 1], '-' | ':' | '_' | '.' | '!'));
+    if let Some(at) = boundary.or(first) {
         return Some((if boundary.is_some() { 2 } else { 3 }, at, span(at)));
     }
     if w.len() < 2 {
         return None;
     }
     let (mut lit, mut from) = (Vec::new(), 0);
-    for ch in &w {
+    for ch in w {
         let at = from + n[from..].iter().position(|c| c == ch)?;
         lit.push(at);
         from = at + 1;
@@ -576,7 +576,7 @@ fn lines(list: &List, cols: usize, max: usize) -> Vec<Line<'static>> {
             _ => "",
         };
         if !arrow.is_empty() {
-            let used: usize = row.iter().map(|s| width(&s.content)).sum();
+            let used = spans_width(&row);
             let gap = " ".repeat(cols.saturating_sub(1 + used).max(1));
             row.push(Span::styled(format!("{gap}{arrow}"), style(GRAY, RECESS)));
         }
@@ -601,10 +601,10 @@ fn usage(app: &App, text: &str, cols: usize) -> Line<'static> {
         .next()
         .unwrap_or("")
         .to_lowercase();
-    let found = ranked(&name, named(app, false))
+    let found = named(app, false)
         .into_iter()
-        .find(|(c, _)| c.name.to_lowercase() == name);
-    let Some((c, _)) = found else {
+        .find(|c| c.name.to_lowercase() == name);
+    let Some(c) = found else {
         return missing(text, cols);
     };
     let head = format!(

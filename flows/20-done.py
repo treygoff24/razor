@@ -61,7 +61,7 @@ with flow(replies, config='[[plugins]]\nfile = "rewrite.py"\nbefore = ["input"]\
     closing = next(e for e in entries if e["id"] == done)
     assert closing["from"] == "razor" and closing["command"] == "done" and "state note" in closing["text"] \
         and closing["text"].endswith("\nREWRITTEN_20"), closing
-    bodies = [p.read_text() for p in sorted(f.requests.glob("0*.body"))]
+    bodies = f.sent()
     assert json.dumps(closing["text"])[1:-1] in bodies[2], "the closing input missed the model"
     assert not any("Late program news." in body for body in bodies), "a stopped input was sent"
     first = json.loads(next(e["output"] for e in entries if e.get("call") == "toolu_note" and e["kind"] == "result"))

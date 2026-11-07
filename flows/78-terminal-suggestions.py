@@ -40,7 +40,7 @@ with flow([response([message(RAW)]) for _ in range(5)] + [response([message('Sen
         t.shown('Ready77.', OFFER, HINT)
         assert '[razor-suggestion]' not in t.text(), t.text()
         # The proposed words use the empty composer's grey hint style.
-        y = next(y for y, line in enumerate(t.screen.display) if OFFER in line)
+        y = t.find(OFFER)[0]
         x = t.screen.display[y].index(OFFER)
         grey = t.screen.buffer[y][x].fg
         path = f.home / '.razor/config.toml'
@@ -91,7 +91,7 @@ with flow([response([message(RAW)]) for _ in range(5)] + [response([message('Sen
         t.shown(OFFER, HINT)
         t.send('\t')
         t.until(lambda t: HINT not in t.text() and OFFER in t.text())
-        y = next(y for y, line in enumerate(t.screen.display) if OFFER in line)
+        y = t.find(OFFER)[0]
         x = t.screen.display[y].index(OFFER)
         assert t.screen.buffer[y][x].fg != grey, (grey, t.screen.buffer[y][x])
         assert len(inputs(f, s)) == 5, inputs(f, s)
@@ -99,7 +99,7 @@ with flow([response([message(RAW)]) for _ in range(5)] + [response([message('Sen
         t.shown('Sent separately77.')
         assert [e['text'] for e in inputs(f, s)] == [
             'Start77', 'Paste77', 'Voice77', 'Escape77', 'Accept77', OFFER]
-    assert len(list(f.requests.glob('[0-9]*.body'))) == 6
+    assert len(f.sent()) == 6
 
 
 # A reply that is only its suggestion line draws no reply and keeps the earlier preview; another

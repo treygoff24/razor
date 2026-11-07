@@ -8,6 +8,7 @@ mod bindings;
 mod brand;
 mod cards;
 mod children;
+mod clicks;
 mod clipboard;
 mod commands;
 mod composer;
@@ -28,7 +29,6 @@ mod pictures;
 mod questions;
 mod recap;
 mod screen;
-mod servers;
 mod split;
 mod stage;
 mod start;
@@ -47,7 +47,7 @@ use crate::protocol::{AgentView, Ask, Brand, ClientInput, EntryId, Event as ApiE
 use crate::protocol::{Live, MailId, Models, SessionId, State, now};
 use api::{Api, Incoming, Line};
 use composer::Composer;
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use ratatui::layout::Rect;
 use std::{collections::BTreeMap, future::Future, io::Write, path::PathBuf, pin::Pin, sync::Arc};
 use tokio::{
     sync::{Semaphore, mpsc, oneshot},
@@ -59,6 +59,8 @@ use transcript::Transcript;
 /// A finished operation's effect on the app, applied on the loop between draws.
 type Done = Box<dyn FnOnce(&mut App) + Send>;
 type Job = Pin<Box<dyn Future<Output = Done> + Send>>;
+// The rest of leaving the addressed session.
+type Leave = Box<dyn FnOnce(&mut App)>;
 
 /// Renders a session and one opened child through the versioned API, never a record file.
 /// Main supplies the socket-bound or remote connection, first input and the Razor home whose
@@ -111,9 +113,7 @@ pub async fn run(
     let mut probe = !app.tmux;
     let (mut kept, mut events) = (None, tty::Events::default());
     let ran = async {
-        let backend = CrosstermBackend::new(writer::Writer::new().map_err(Error::Terminal)?);
-        let terminal = kept.insert(Terminal::new(backend).map_err(Error::Terminal)?);
-        // A terminal under 30 rows starts with the gauge folded.
+        let terminal = kept.insert(screen::open()?);
         app.gauge_folded = terminal.size().is_ok_and(|size| size.height < 30);
         if !app.composer.is_empty() {
             inputs::send(&mut app);
@@ -124,24 +124,7 @@ pub async fn run(
                 return app.quit(finished).await;
             }
             if let Some(editing) = app.editing.take() {
-                finish(terminal, &mut app, &mut events).await;
-                // A new stream reads nothing until the editor has returned.
-                events = tty::Events::default();
-                drop(modes.take());
-                let edited = match editing {
-                    editor::Editing::Views => agents::edit(&mut app).await,
-                    editor::Editing::Reply(text) => editor::read(&text).await.map_err(|e| {
-                        error(format!("The reply did not open in your editor: {e}"))
-                    }),
-                };
-                modes = Some(screen::Modes::enter("")?);
-                let backend = CrosstermBackend::new(writer::Writer::new().map_err(Error::Terminal)?);
-                *terminal = Terminal::new(backend).map_err(Error::Terminal)?;
-                app.painted = Default::default();
-                if let Err(e) = edited {
-                    app.say(&e.to_string());
-                }
-                app.dirty = true;
+                screen::edit(terminal, &mut app, &mut events, &mut modes, editing).await?;
             }
             stage::remember(&mut app);
             // A frame, a clipboard write or a picture's row is queued only once the terminal has
@@ -213,39 +196,13 @@ pub async fn run(
     drop(audio);
     audio::close(&mut app).await;
     if let Some(terminal) = &mut kept {
-        finish(terminal, &mut app, &mut events).await;
+        screen::finish(terminal, &mut app, &mut events).await;
     }
     drop(modes);
     if let (Ok(()), Some(line)) = (&ran, app.farewell()) {
         println!("{line}");
     }
     ran
-}
-
-// Writes what the queue holds and deletes every picture the terminal holds, waiting as long as
-// the terminal takes, then for the answer to a row on its way until it is due to be given up on,
-// which would otherwise reach the shell or the editor as keys: before the modes leave the
-// alternate screen, which write past the queue. Answers already read count after that too.
-async fn finish(
-    terminal: &mut Terminal<CrosstermBackend<writer::Writer>>,
-    app: &mut App,
-    events: &mut tty::Events,
-) {
-    let out = terminal.backend_mut().writer_mut();
-    let mut bytes = app.pictures.forget().into_bytes();
-    while out.write_all(&bytes).and_then(|_| out.finish()).is_ok() {
-        app.pictures.taken();
-        let Some(due) = app.pictures.due() else {
-            return;
-        };
-        match tokio::time::timeout_at(due.max(Instant::now()), events.next()).await {
-            Ok(Some(Ok(tty::Event::Picture(text)))) => app.pictures.answer(&text),
-            Ok(Some(Ok(_))) | Err(_) => {}
-            Ok(_) => return,
-        }
-        // With no picture left to send, the deletes an answer or giving up leaves.
-        bytes = app.pictures.row().unwrap_or_default();
-    }
 }
 
 /// A terminal failure, or another cause retained with a sentence of context.
@@ -282,13 +239,7 @@ impl std::error::Error for Error {
 impl Error {
     /// A 4xx: the request itself was refused, so a background read never retries it.
     fn refused(&self) -> bool {
-        matches!(
-            self,
-            Self::Refused {
-                status: 400..=499,
-                ..
-            }
-        )
+        matches!(self, Self::Refused { status, .. } if (400..500).contains(status))
     }
 }
 /// Wraps a cause under `context`, the sentence a person reads.
@@ -324,6 +275,12 @@ struct App {
     budget: Option<Arc<Semaphore>>,
     // Spawned operations not yet applied; at most eight, plus eight queued writes.
     pending: usize,
+    // Writes queued so far, and the words the server held as a session's draft as of that count:
+    // leaving the session with these same words needs no save.
+    queued: u64,
+    kept: Option<(u64, SessionId, String)>,
+    // The rest of leaving the addressed session, waiting for the server to hold its words.
+    parting: Option<Leave>,
     streams: BTreeMap<SessionId, JoinHandle<()>>,
     dirty: bool,
     immediate: bool,
@@ -339,6 +296,12 @@ struct App {
     models_at: u64,
     picker: Option<picker::Picker>,
     composer: Composer,
+    // The session whose saved draft the composer holds, read or made with it: the one it saves to.
+    drafted: Option<SessionId>,
+    // New agents' unsent words by where each was aimed (server, folder, resident): no session
+    // holds them yet, so they wait here for that same destination. At most `start::NEW_DRAFTS`
+    // of them, each within the editor's 1 MiB; leaving words that would pass either is refused.
+    new_drafts: BTreeMap<start::Destination, Composer>,
     // The draft the stash key set aside, until it brings it back.
     stash: Option<Composer>,
     // What the loop hands the terminal to the person's editor for, between draws.
@@ -416,8 +379,9 @@ struct App {
     // `/detach` was typed, or the session `/done` or `/quit` closed has ended: the loop quits as a
     // second Ctrl-C does.
     leaving: bool,
-    // The session `/done` or `/quit` closed, until its status row reads it closed.
-    closing: Option<SessionId>,
+    // The session `/done` or `/quit` closed, until its status row reads it closed, and its place
+    // among the list's rows then, for a row the list drops first.
+    closing: Option<(SessionId, usize)>,
     panel: Option<panel::Panel>,
     goto: Option<goto::Goto>,
     panel_scroll: usize,
@@ -534,7 +498,7 @@ impl App {
             .as_ref()
             .is_some_and(|w| w.try_send(job).is_ok());
         match queued {
-            true => self.pending += 1,
+            true => (self.pending, self.queued) = (self.pending + 1, self.queued + 1),
             false => {
                 self.say("Eight draft or input writes are pending; keep the unsent words and wait.")
             }
@@ -542,24 +506,80 @@ impl App {
         queued
     }
 
-    /// Saves the addressed session's unsent words.
-    fn save(&mut self) {
-        if let (None, Some(id)) = (&self.sending, self.focus.clone()) {
-            let text = self.composer.text.clone();
-            self.write(|api| async move {
-                let saved = api.draft(&id, Some(text)).await;
-                move |app: &mut App| saved.err().iter().for_each(|e| app.say(&e.to_string()))
+    /// The composer holds the addressed session's saved draft, or no session is addressed.
+    fn drafting(&self) -> bool {
+        self.drafted == self.focus
+    }
+
+    /// Whether leaving the addressed session now would lose or misplace words: an admission or
+    /// note is pending, or words were typed before its saved draft was read, read again now.
+    fn waiting(&mut self) -> bool {
+        if self.sending.is_some() || audio::unsent(self) {
+            return true;
+        }
+        let unread = (self.focus.clone()).filter(|_| !self.drafting() && !self.composer.is_empty());
+        unread.clone().into_iter().for_each(|id| self.open(id));
+        unread.is_some()
+    }
+
+    /// Saves the addressed session's unsent words, once its saved draft is among them. `leave`,
+    /// the rest of leaving the session, runs once the server holds them: at once if it already
+    /// does or there are none, never if the save is refused or fails, which says why.
+    fn save(&mut self, leave: Option<Leave>) {
+        // A leaving save's answer saves anything typed since; a second departure waits for none.
+        if self.parting.is_some() {
+            return;
+        }
+        let id = (self.focus.clone()).filter(|_| self.sending.is_none() && self.drafting());
+        let kept = id.map(|id| (self.queued, id, self.composer.text.clone()));
+        if let Some((at, id, text)) = kept.filter(|kept| self.kept.as_ref() != Some(kept)) {
+            let leaving = leave.is_some() && !self.composer.is_empty();
+            let queued = self.write(|api| async move {
+                let saved = api.draft(&id, Some(text.clone())).await;
+                move |app: &mut App| match saved {
+                    Ok(_) => {
+                        app.kept = Some((at + 1, id, text));
+                        if let Some(leave) = app.parting.take_if(|_| leaving) {
+                            app.save(Some(leave));
+                        }
+                    }
+                    Err(e) => {
+                        app.parting.take_if(|_| leaving);
+                        app.say(&e.to_string());
+                    }
+                }
             });
+            if leaving {
+                self.parting = leave.filter(|_| queued);
+                return;
+            }
+        }
+        leave.into_iter().for_each(|leave| leave(self));
+    }
+
+    /// Runs `then` once the addressed session has been left, or now if none is being left.
+    fn after(&mut self, then: impl FnOnce(&mut App) + 'static) {
+        match self.parting.take() {
+            Some(leave) => {
+                self.parting = Some(Box::new(|app: &mut App| {
+                    leave(app);
+                    then(app);
+                }))
+            }
+            None => then(self),
         }
     }
 
     /// Ctrl-C: waits up to 30 seconds for the last draft save, then quits. Behind a pending
-    /// admission, words typed since go after the draft it left: the sent words, if refused.
-    /// Effects still `finished` are dropped unapplied, freeing what they hold: a read page holds
-    /// the one page permit an open queued ahead of the save waits for.
+    /// admission or a draft not yet read, words typed since go after the server's draft: the sent
+    /// words, if refused. Effects still `finished` are dropped unapplied, freeing what they hold: a
+    /// read page holds the one page permit an open queued ahead of the save waits for.
     async fn quit(&mut self, finished: mpsc::Receiver<Done>) -> Result<(), Error> {
         drop(finished);
-        let (pending, saved) = (self.sending.is_some(), self.focus.clone());
+        let (pending, saved) = (
+            self.sending.is_some() || !self.drafting(),
+            self.focus.clone(),
+        );
         let (api, writes) = (self.api.clone(), self.writes.take());
         let mut text = self.composer.text.clone();
         let (tx, rx) = oneshot::channel::<Result<(), Error>>();
@@ -595,10 +615,11 @@ impl App {
         saved.map_err(fail(late))?
     }
 
-    /// The line left on the normal screen once the app has quit: the root session ended, or it
-    /// stays open on the server and `--resume` reopens it; none before a session started.
+    /// The line left on the normal screen once the app has quit: the session shown, the addressed
+    /// one beside the list, else the root, ended, or it stays open on the server and `--resume`
+    /// reopens it; none before a session started.
     fn farewell(&self) -> Option<String> {
-        let id = self.root.as_ref()?;
+        let id = [&self.root, &self.focus][usize::from(self.list.open)].as_ref()?;
         let row = self.agents.get(id);
         let name = row.map_or("", |a| a.name.as_str());
         let name = if name.is_empty() { id.as_str() } else { name };
@@ -613,7 +634,7 @@ impl App {
         self.dirty = true;
         if self.draft_at.is_some_and(|at| at <= Instant::now()) && self.pending < 8 {
             self.draft_at = None;
-            self.save();
+            self.save(None);
         }
         goto::tick(self);
     }
@@ -734,7 +755,6 @@ impl App {
     fn asks(&self) -> Vec<&Ask> {
         let mine = |a: &&Ask| self.focus.as_ref() == Some(&a.id.0);
         let all = self.agents.values().flat_map(|row| &row.asks);
-        // The focused session's own asks first, then the others' in the order they opened.
         let (mut asks, mut rest): (Vec<_>, Vec<_>) = all.partition(mine);
         rest.sort_by_key(|a| a.at);
         asks.extend(rest);
@@ -742,11 +762,10 @@ impl App {
     }
     /// The shown ask: the one being answered in words, else the one the person moved to, while
     /// it is open; else the first.
-    fn question(&self) -> Option<(SessionId, EntryId, Ask)> {
+    fn question(&self) -> Option<&Ask> {
         let asks = self.asks();
         let mut held = [&self.answering, &self.ask].into_iter().flatten();
         let held = held.find_map(|id| asks.iter().find(|a| &a.id == id));
-        let ask = held.or(asks.first())?;
-        Some((ask.id.0.clone(), ask.id.1, (*ask).clone()))
+        held.or(asks.first()).copied()
     }
 }

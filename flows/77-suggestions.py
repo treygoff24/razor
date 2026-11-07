@@ -3,6 +3,7 @@ The stand-in establishes transport and parsing, not model quality or cache hits.
 """
 import json
 
+import chat
 import claude
 from clock import wall_clock
 from driver import flow
@@ -16,14 +17,6 @@ TRAILER = MARK + ' ' + json.dumps({'text': TEXT})
 RAW = 'The change is ready.\n' + TRAILER
 ON = '[ui]\nsuggestions = true\nmotion = false\n'
 CHAT = '[providers.runinfra]\nbase_url = "{standin}"\n'
-
-
-def chat(text):
-    chunks = [{'choices': [{'index': 0, 'delta': {'content': text}}]},
-              {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]},
-              {'choices': [], 'usage': {'prompt_tokens': 100, 'completion_tokens': 10,
-                                       'prompt_tokens_details': {'cached_tokens': 60}}}]
-    return Reply((''.join(f'data: {json.dumps(c)}\n\n' for c in chunks) + 'data: [DONE]\n\n').encode())
 
 
 def turn(f, words, session=None):
@@ -56,7 +49,7 @@ def blocks(message):
 # tools and all prior history stay the same, only the newest input differs, and no call is added.
 for model, config, make in [('opus', '', lambda t: claude.reply(text=t)),
                             ('sol', PLAIN, lambda t: response([message(t)])),
-                            ('glm-5.3-flash', CHAT, chat)]:
+                            ('glm-5.3-flash', CHAT, lambda t: chat.reply({'content': t}))]:
     with flow([make('Disabled reply.'), make(RAW), make('Replay checked.'), make('Off again.')], model=model,
               config=config, env={'RUNINFRA_API_KEY': 'flow-key'}) as f:
         session, _ = turn(f, 'OFF77 verbatim input')
@@ -82,7 +75,7 @@ for model, config, make in [('opus', '', lambda t: claude.reply(text=t)),
         path.write_text(off)
         server.wait(lambda: 'suggestions' not in json.loads(server.send(f, 'GET', '/status').readline())['server'])
         turn(f, 'OFF77 again', session)
-        sent = [json.loads(p.read_text()) for p in sorted(f.requests.glob('[0-9]*.body'))]
+        sent = [json.loads(body) for body in f.sent()]
         assert len(sent) == 4, sent
         key = 'input' if model == 'sol' else 'messages'
         for field in set().union(*sent) - {key}:

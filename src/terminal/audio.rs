@@ -23,7 +23,7 @@ const STOPPED: &str = "The microphone program stopped; check `capture` and try a
 const SAVING: &str = "Local audio could not be saved; check the temporary folder.";
 const INVALID: &str = "The server's answer is invalid; reconnect to a matching server.";
 const REMOTE: &str = "Over SSH, audio would play on {}, not your machine; pair Razor on yours.";
-const QUIT: &str = " QUITTING WILL DISCARD AUDIO. <composer.back> stays.";
+const QUIT: &str = "QUITTING WILL DISCARD AUDIO. <composer.back> stays.";
 /// This process and its start, which name its private audio folder and its notes' request ids.
 pub(super) static RUN: LazyLock<String> =
     LazyLock::new(|| format!("{}-{}", std::process::id(), now()));
@@ -425,8 +425,9 @@ fn sent(app: &mut App, id: u64, made: Result<Made, Error>, working: bool) {
             Ok((None, None, Some(session))) => {
                 let session = session.on(&app.server);
                 (app.root, app.focus) = (Some(session.clone()), Some(session.clone()));
+                app.drafted = app.focus.clone();
                 app.stream(session, 0);
-                app.save();
+                app.save(None);
                 send(app);
             }
             Ok(_) => note.phase = Phase::Failed(INVALID.into()),
@@ -635,31 +636,20 @@ pub fn spoken(voice: &Voice, entry: EntryId, columns: usize) -> transcript::Row 
     }
 }
 
-/// Draws, from the top of `r`, the quit warning, the note, and the player's state or failure;
-/// returns the rows drawn.
-pub fn draw(app: &App, b: &mut Buffer, r: Rect) -> u16 {
-    let rows = band(app, r.width.into());
-    for (y, row) in (r.y..r.bottom()).zip(&rows) {
-        let ground = style(DATA, GLASS).patch(row.style);
-        fill(b, Rect::new(r.x, y, r.width, 1), ground);
-        line(b, r, y, row, ground);
-    }
-    rows.len().min(r.height.into()) as u16
-}
-
-/// The rows `draw` takes for `columns`.
+/// The band's rows at `columns`: the quit warning, the note, and the player's state or failure.
 pub fn band(app: &App, columns: usize) -> Vec<Line<'static>> {
     let mut band = Vec::new();
     if let Some(note) = &app.audio.note {
         if app.quitting {
-            band = wrap(vec![span(bindings::text(app, QUIT), WHITE)], columns);
+            band = inset(vec![span(bindings::text(app, QUIT), WHITE)], columns);
         }
         band.extend(rows(app, note, columns));
     }
     if let Some(p) = &app.audio.player {
         let doing = match (p.speech, &p.state) {
             (_, Err(why)) => {
-                return [band, failed(app, why, columns, "<voice.cancel> dismisses")].concat();
+                band.extend(failed(app, why, columns, "<voice.cancel> dismisses"));
+                return band;
             }
             (false, _) => "Voice note",
             (true, Ok(false)) => "Getting it ready to read aloud",
@@ -700,7 +690,7 @@ fn rows(app: &App, note: &Note, columns: usize) -> Vec<Line<'static>> {
 
 // A failure's sentence in amber, wrapped, then that Enter tries again.
 fn failed(app: &App, why: &str, columns: usize, esc: &str) -> Vec<Line<'static>> {
-    let mut rows = wrap(vec![span(format!(" ✗ {why}"), AMBER)], columns);
+    let mut rows = inset(vec![span(format!("✗ {why}"), AMBER)], columns);
     rows.push(gray(&bindings::text(
         app,
         &format!("<voice.accept> tries again · {esc}"),

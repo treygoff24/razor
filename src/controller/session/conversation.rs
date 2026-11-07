@@ -291,21 +291,24 @@ impl Session {
         }
         let entry = self.append(Body::Effort { effort }, None).await?;
         self.model_settings.effort = effort;
-        let speed = self.model_settings.speed;
-        // The conversation's own model, by its id at its provider.
-        let model = self
-            .conversation
-            .as_ref()
-            .map(|c| c.profile.borrow().endpoint.id.clone());
+        self.apply(Some(entry)).await?;
+        Ok(Some(entry))
+    }
+
+    /// Sends the session's effort and speed to the open conversation, on its own model by its id
+    /// at its provider; `notice` names a changed effort's fact.
+    async fn apply(&mut self, notice: Option<EntryId>) -> Result<(), Error> {
+        let c = self.conversation.as_ref();
+        let model = c.map_or_else(String::new, |c| c.profile.borrow().endpoint.id.clone());
+        let ModelSettings { effort, speed } = self.model_settings;
         self.say(|session| ToBridge::Effort {
             session,
-            model: model.unwrap_or_default(),
+            model,
             effort,
             speed,
-            notice: Some(entry),
+            notice,
         })
-        .await?;
-        Ok(Some(entry))
+        .await
     }
 
     /// Sends `batch` as one native user message, image paths made absolute, and tells clients
@@ -331,19 +334,7 @@ impl Session {
             }
             self.model_settings.speed = input.speed.unwrap_or(self.model_settings.speed);
         }
-        let settings = self.model_settings;
-        let model = self
-            .conversation
-            .as_ref()
-            .map(|c| c.profile.borrow().endpoint.id.clone());
-        self.say(|session| ToBridge::Effort {
-            session,
-            model: model.unwrap_or_default(),
-            effort: settings.effort,
-            speed: settings.speed,
-            notice: None,
-        })
-        .await?;
+        self.apply(None).await?;
         let asked = batch
             .iter()
             .find(|(_, i)| i.command == Some(Command::Handover));

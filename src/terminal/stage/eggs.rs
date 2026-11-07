@@ -4,8 +4,9 @@ use super::{
     Stage,
     art::Pose,
     picture::{Burst, Scene, Sky},
-    scene::{Wake, at_hour, local, placed},
+    scene::{Wake, at_hour, placed},
 };
+use text::zoned;
 
 pub(super) fn draw(s: &mut Scene, stage: &Stage, app: &App, w: &mut Wake) {
     thanks(s, stage, w);
@@ -102,7 +103,7 @@ fn duck(s: &mut Scene, stage: &Stage, w: &mut Wake) {
 }
 
 fn owl(s: &mut Scene, stage: &Stage, app: &App, w: &mut Wake) {
-    let Some(z) = local(app, w.now) else {
+    let Some(z) = zoned(w.now, app.zone.as_ref()) else {
         return;
     };
     let present = (2..6).contains(&z.hour());
@@ -156,7 +157,7 @@ fn owl(s: &mut Scene, stage: &Stage, app: &App, w: &mut Wake) {
 }
 
 fn july(s: &mut Scene, stage: &Stage, app: &App, w: &mut Wake) {
-    let Some(local) = local(app, w.now) else {
+    let Some(local) = zoned(w.now, app.zone.as_ref()) else {
         return;
     };
     if local.month() != 7 || local.day() != 4 {

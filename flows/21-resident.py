@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+import claude
 from driver import BINARY, REPLIES, Reply, flow
 from server import post, until
 
@@ -16,9 +17,11 @@ def at(seconds):
     return time.strftime("%H:%M:%S", time.localtime(time.time() + seconds))
 
 
-names = ("done", "resident-sleep", "done", "done", "done")
+# The heartbeat's call holds its turn until the flow lets it go.
+done = Reply((REPLIES / "done.sse").read_bytes())
+held = claude.reply((None, "Bash", {"command": "until [ -e release21 ]; do sleep .05; done"}), match="Heartbeat.")
 with tempfile.TemporaryDirectory() as fake, flow(
-        [Reply((REPLIES / f"{name}.sse").read_bytes()) for name in names],
+        [done, held, done, done, done],
         env={"PATH": f"{fake}:{os.environ['PATH']}"},
         config='[server]\nwrapper = ["/usr/bin/env", \'FLOW=<a&b"c%d$e\\f>\', "/x/.razor", '
                '"RAZOR_HOME=/x/.razor", "L=1\\n2"]') as f:
@@ -52,14 +55,18 @@ with tempfile.TemporaryDirectory() as fake, flow(
     with (f.home / ".razor/config.toml").open("a") as config:
         config.write(f"\n[residents.ember]\ncwd = {json.dumps(str(f.cwd))}\n"
                      f"startup = [{json.dumps(str(f.cwd / 'persona.md'))}, \"razor\"]\n"
-                     f'[residents.ember.heartbeat]\nat = ["{at(5)}", "{at(7)}"]\ntext = "Heartbeat."\n'
-                     f'[residents.ember.schedules.mid]\nat = ["{at(8)}"]\ntext = "Mid-turn schedule."\n')
+                     f'[residents.ember.heartbeat]\nat = ["{at(5)}", "{at(7)}"]\ntext = "Heartbeat."\n')
     # Another session's input starts the server; the resident gets none from a client.
-    start = f.run("--print=json", "Start the server.")
-    assert start.returncode == 0, start.stderr
+    f.ask("Start the server.")
     # Only the service's own server asks macOS for permissions; a request from one a client
     # started would put the person's terminal, not Razor, in System Settings.
     assert post(f, "/permissions", None) is None
+    # The schedule comes due during the call, however long the turn took to reach it.
+    until(f, "ember", lambda es: any(e["kind"] == "call" for e in es))
+    with (f.home / ".razor/config.toml").open("a") as config:
+        config.write(f'[residents.ember.schedules.mid]\nat = ["{at(3)}"]\ntext = "Mid-turn schedule."\n')
+    until(f, "ember", lambda es: any(e["kind"] == "input" and "schedule" in e["from"] for e in es))
+    (f.cwd / "release21").touch()
     entries = until(f, "ember", lambda es: sum(e["kind"] == "turn_end" for e in es) >= 2, timeout=40)
     ends = [e for e in entries if e["kind"] == "turn_end"]
     assert entries[0]["kind"] == "start" and entries[0]["cwd"] == str(f.cwd), entries[0]
@@ -70,7 +77,7 @@ with tempfile.TemporaryDirectory() as fake, flow(
     assert call["id"] < schedule["id"] < ends[0]["id"], "the schedule was not admitted mid-turn"
     assert inputs[0]["id"] in ends[0]["inputs"] and schedule["id"] not in ends[0]["inputs"], ends
     assert schedule["id"] in ends[1]["inputs"], ends
-    beat = json.loads((f.requests / "002.body").read_bytes())
+    beat = f.request(2)
     # The resident's own list: its persona first, then Razor's text; its identity in the first input.
     assert beat["system"][-1]["text"].startswith("You are Ember, this flow's resident.\n\nYou are working in Razor"), beat["system"]
     facts = beat["messages"][0]["content"][0]["text"]

@@ -35,6 +35,7 @@ pub struct Responses {
 }
 
 /// A completed response: its done items in output order, with every native field kept.
+#[derive(Default)]
 struct Response {
     items: Vec<Value>,
     usage: Usage,
@@ -144,11 +145,10 @@ impl Responses {
     pub fn new(home: PathBuf) -> Result<Self, Error> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(30))
-            .read_timeout(IDLE);
-        let client = client
+            .read_timeout(IDLE)
             .user_agent(concat!("razor/", env!("CARGO_PKG_VERSION")))
-            .build();
-        let client = client.map_err(other("creating the model HTTP client"))?;
+            .build()
+            .map_err(other("creating the model HTTP client"))?;
         Ok(Self {
             client,
             home,
@@ -218,14 +218,14 @@ impl Responses {
         say: impl Fn(FromBridge),
     ) -> Result<Response, Error> {
         let body = axum::body::Bytes::from(body);
-        let (base, key) = (endpoint.url.as_str(), endpoint.key.as_deref());
+        let key = endpoint.key.as_deref();
         let chat = endpoint.transport == Transport::Chat;
         let path = if chat {
             "chat/completions"
         } else {
             "responses"
         };
-        let url = format!("{}/{path}", base.trim_end_matches('/'));
+        let url = format!("{}/{path}", endpoint.url.trim_end_matches('/'));
         let mut tokens = match key {
             Some(_) => None,
             None => Some(self.credentials(None).await?),
@@ -319,9 +319,10 @@ impl Responses {
                 .or(turn_state);
             let windows = windows(headers);
             let tier = header(headers, "x-gemini-service-tier").map(str::to_owned);
-            let read = match chat {
-                true => chat::read(response, &say).await,
-                false => stream::read(response, &say).await,
+            let read = if chat {
+                chat::read(response, &say).await
+            } else {
+                stream::read(response, &say).await
             };
             match read {
                 Ok(mut done) => {

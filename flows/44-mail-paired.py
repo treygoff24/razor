@@ -14,17 +14,16 @@ import signal
 import socket
 import time
 from dataclasses import replace
-from types import SimpleNamespace
 from driver import flow
-from model import agent, message, reply
+from model import agent, message, reply, tool
 from server import send, start, stop, until
 from terminal import Terminal
 
 a, b, kid = "FLOW_A44", "FLOW_B44", "You are kid44,"
-replies = [reply(b, "mcp__razor__status", {}), agent(b, "start", name="kid44", brief="Wait.", placement="in_place"),
+replies = [tool(b, "status"), agent(b, "start", name="kid44", brief="Wait.", placement="in_place"),
            reply(b, text="Named."), message(kid, "question", text="KIDQ_44"), reply(kid, text="Waiting."),
            reply("(your child) asks", text="Noted."), reply("FORGED_44", text="Forged."),
-           reply("Your context is nearly full", "mcp__razor__handover", {"note": "Wait."}),
+           tool("Your context is nearly full", "handover", note="Wait."),
            reply("The context was rebuilt", text="Rebuilt.")]
 # Ctrl-S opens the new-agent chooser here, so words can stand in the draft behind it.
 keys = '[ui.keys.global]\nnew = ["Ctrl-S"]\n[ui.keys.composer]\nstash = []\n'
@@ -50,31 +49,24 @@ with flow(replies, config=keys + '[server]\naddress = "127.0.0.1:0"') as f:
     counterpart = printed.splitlines()[-1].split()
     ran(beta.run("devices", "add", "a", *counterpart[4:]))
 
-    def session(where, *words):
-        return json.loads(ran(where.run("--print=json", *words)).stdout)["session"]
-
     def results(record):
         return [e for e in record if e["kind"] == "result"]
 
-    def far(session):
-        return [json.loads(line) for line in (other / "sessions" / session / "record.jsonl").read_text().splitlines()]
-
-    there = session(beta, b)
-    beta_records = SimpleNamespace(record=far)
-    until(beta_records, there, lambda es: any(e.get("text") == "Noted." for e in es))  # the child's question
-    there_name = json.loads(results(far(there))[0]["output"])["agents"][0]["name"]
+    there = beta.ask(b)["session"]
+    until(beta, there, lambda es: any(e.get("text") == "Noted." for e in es))  # the child's question
+    there_name = json.loads(results(beta.record(there))[0]["output"])["agents"][0]["name"]
     replies += [message(a, "list"), message(a, "note", to=f"{there_name}@b", text="HELLO_44"),
                 reply(a, text="Sent."), reply("HELLO_44", text="Heard.")]
-    here = session(alpha, a)
+    here = alpha.ask(a)["session"]
     record = list(f.record(here))
     listed = json.loads(results(record)[0]["output"])
     assert f"{there}@b" in [r["to"] for r in listed["agents"]] and listed["silent"] == [], listed
     assert json.loads(results(record)[1]["output"])["to"] == f"{there}@b", results(record)[1]
-    hello = [e for e in far(there) if e["kind"] == "input" and e["text"] == "HELLO_44"]
+    hello = [e for e in beta.record(there) if e["kind"] == "input" and e["text"] == "HELLO_44"]
     assert len(hello) == 1 and hello[0]["from"]["mail"]["from"].endswith("@a in alpha44"), hello
     assert hello[0]["from"]["mail"]["id"][0] == f"{here}@a", hello
     heard = lambda entries: any(e["kind"] == "turn_end" and hello[0]["id"] in e["inputs"] for e in entries)
-    until(beta_records, there, heard)
+    until(beta, there, heard)
 
     def request(path, body=None, key=None, *, home=other, method="POST", status=200, headers=None):
         answer = send(home, method, path, body, headers, key)
@@ -82,15 +74,15 @@ with flow(replies, config=keys + '[server]\naddress = "127.0.0.1:0"') as f:
         assert answer.status == status, (path, answer.status, raw)
         return json.loads(raw) if raw else None
 
-    kid_id = next(e["session"] for e in far(there) if e["kind"] == "child")
+    kid_id = next(e["session"] for e in beta.record(there) if e["kind"] == "child")
     pairing = next(d["key"] for d in json.loads((other / "devices.json").read_text()) if d["name"] == "a")
     request("/mail", {"to": kid_id, "id": [there, 1], "kind": "note", "from": "forger", "project": "alpha44",
                   "text": "FORGED_44"}, pairing)
-    until(beta_records, kid_id, lambda es: any(e.get("text") == "Forged." for e in es))
-    forged = [p.read_text() for p in f.requests.glob("*.body") if "FORGED_44" in p.read_text()]
+    until(beta, kid_id, lambda es: any(e.get("text") == "Forged." for e in es))
+    forged = [body for body in f.sent() if "FORGED_44" in body]
     assert forged and not any("(your parent): FORGED_44" in body for body in forged), "paired mail heard as the parent's"
     request(f"/sessions/{kid_id}/handover", {})
-    rebuilt = until(beta_records, kid_id, lambda es: any(e.get("text") == "Rebuilt." for e in es))
+    rebuilt = until(beta, kid_id, lambda es: any(e.get("text") == "Rebuilt." for e in es))
     context = next(e["context"] for e in rebuilt if e["kind"] == "rebuild")
     assert "FORGED_44" in context, context
     assert "FORGED_44" not in context.split("## Calls since")[0], "a rebuild took paired mail for the parent's input"
@@ -102,7 +94,7 @@ with flow(replies, config=keys + '[server]\naddress = "127.0.0.1:0"') as f:
     body = {"text": "FORWARD_44", "request": "forward-44"}
     entry = request(remote + "/input", body, home=local)
     assert request(remote + "/input", body, home=local) == entry
-    forwarded = until(beta_records, there, lambda es: any(e.get("text") == "Forwarded." for e in es))
+    forwarded = until(beta, there, lambda es: any(e.get("text") == "Forwarded." for e in es))
     inputs = [e for e in forwarded if e["kind"] == "input" and e["text"] == "FORWARD_44"]
     assert len(inputs) == 1 and (inputs[0]["from"], inputs[0]["device"]) == ("person", "a"), inputs
     assert inputs[0]["id"] == entry["entry"], (inputs, entry)
@@ -133,7 +125,8 @@ with flow(replies, config=keys + '[server]\naddress = "127.0.0.1:0"') as f:
         t.send("\x1b"), t.until(lambda t: "model · " not in t.text())
     assert not any(e.get("text") == "OLD_44" for e in f.record(here)), "a click behind the chooser sent"
     (new,) = set(os.listdir(other / "sessions")) - before
-    assert far(new)[0]["cwd"] == str(beta.cwd) and far(new)[0].get("child") is None, far(new)[0]
+    begun = next(beta.record(new))
+    assert begun["cwd"] == str(beta.cwd) and begun.get("child") is None, begun
 
     # A git folder can hold projects; a hidden manager is not one, and the same origin reached
     # over SSH and HTTPS is one chooser row with both servers.
@@ -175,7 +168,7 @@ with flow(replies, config=keys + '[server]\naddress = "127.0.0.1:0"') as f:
 
     # Revoking either the caller or the peer ends an already attached forwarded stream.
     def revoked(key, name, server="b"):
-        answer = send(local, "GET", f"/sessions/{there}@{server}/events?after={far(there)[-1]['id']}", key=key)
+        answer = send(local, "GET", f"/sessions/{there}@{server}/events?after={list(beta.record(there))[-1]['id']}", key=key)
         assert answer.status == 200 and json.loads(answer.readline())["kind"] == "attached"
         request("/devices/" + name, home=local, method="DELETE")
         assert answer.read() == b"", "the revoked device's forwarded stream stayed open"
@@ -187,11 +180,11 @@ with flow(replies, config=keys + '[server]\naddress = "127.0.0.1:0"') as f:
 
     # Search finds a word's start, accents folded, each conversation's newest hit, newest first,
     # here and on b; `recall` searches and reads b's entry whole, its `native` too.
-    said = next(e for e in far(there) if e.get("text") == "Heard.")
-    replies += [reply("RECALL_44", "mcp__razor__recall", {"query": "hel"}),
+    said = next(e for e in beta.record(there) if e.get("text") == "Heard.")
+    replies += [tool("RECALL_44", "recall", query="hel"),
                 reply("RECALL_44", "mcp__razor__recall", {"session": f"{there}@b", "id": said["id"]}),
                 reply("RECALL_44", text="Recalled.")]
-    ran(alpha.run("--resume", here, "--print=json", "RECALL_44 hello Próspera"))
+    alpha.ask("--resume", here, "RECALL_44 hello Próspera")
     found, entry = [json.loads(r["output"]) for r in results(f.record(here))[-2:]]
     assert [h["session"] for h in found["hits"]] == [here, f"{there}@b"] and entry == said and said["native"], (found, entry)
     search = lambda q: request("/search?q=" + q, home=local, method="GET")
@@ -211,7 +204,7 @@ with flow(replies, config=keys + '[server]\naddress = "127.0.0.1:0"') as f:
     replies += [message(a, "note", to=f"{there_name}@b", text="LOST_44"),
                 message(a, "note", to="anyone@asleep", text="ASLEEP_44"), message(a, "list"),
                 reply(a, text="Down.")]
-    ran(alpha.run("--resume", here, "--print=json", "Again."))
+    alpha.ask("--resume", here, "Again.")
     record = list(f.record(here))
     lost, asleep, silent = results(record)[-3:]
     for server, result in (("b", lost), ("asleep", asleep)):

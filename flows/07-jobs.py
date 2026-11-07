@@ -16,9 +16,7 @@ gpt = [response(jobs), response([call("wait", json.dumps({"job": 1, "timeout_ms"
        response([call("kill", json.dumps({"job": 1}), "call_kill")]),
        done()]
 with flow([Reply((REPLIES / f"{name}.sse").read_bytes()) for name in names] + gpt, config=PLAIN) as f:
-    result = f.run("--print=json", "Start the background command; wait, look, stop it; start another.")
-    assert result.returncode == 0, result.stderr
-    session = json.loads(result.stdout)["session"]
+    session = f.ask("Start the background command; wait, look, stop it; start another.")["session"]
     entries = list(f.record(session))
     calls = [e for e in entries if e["kind"] == "call"]
     assert [e["name"] for e in calls] == [
@@ -41,7 +39,7 @@ with flow([Reply((REPLIES / f"{name}.sse").read_bytes()) for name in names] + gp
     notice = next(e["text"] for e in entries if e["kind"] == "input" and e["from"] == "razor")
     assert "<task-notification>" in notice and "job-2" in notice and "Second job" in notice, notice
     assert "<status>failed</status>" in notice and "Terminated by signal" in notice, notice
-    request = json.loads((f.requests / "007.body").read_bytes())
+    request = f.request(7)
     assert "<task-notification>" in json.dumps(request["messages"]), "the notice missed the model"
     jobs = [e for e in entries if e["kind"] == "job"]
     started = {e["job"]: e for e in jobs if e["event"] == "started"}
@@ -59,9 +57,7 @@ with flow([Reply((REPLIES / f"{name}.sse").read_bytes()) for name in names] + gp
     # Job-2 ends while the turn waits on job-1: its notice joins the turn at that call and reaches
     # the next request, not the turn's end (Trey, 2026-10-30). Job-1's end is the wait's own
     # result, so no notice repeats it.
-    result = f.run("--model", "gpt-6.1-sol", "--print=json", "Start two jobs; wait on the first.")
-    assert result.returncode == 0, result.stderr
-    entries = list(f.record(json.loads(result.stdout)["session"]))
+    entries = list(f.record(f.ask("--model", "gpt-6.1-sol", "Start two jobs; wait on the first.")["session"]))
     notices = [e for e in entries if e["kind"] == "input" and e["from"] == "razor"]
     assert len(notices) == 1 and notices[0]["text"].startswith("Job job-2 "), notices
     ends = [e for e in entries if e["kind"] == "turn_end"]
@@ -70,7 +66,7 @@ with flow([Reply((REPLIES / f"{name}.sse").read_bytes()) for name in names] + gp
     assert waited["job"] == 1 and waited["end"], waited
     killed = json.loads(next(e["output"] for e in entries if e["kind"] == "result" and e["call"] == "call_kill"))
     assert killed["job"] == 1 and killed["end"] == waited["end"] and killed["output"] == "retained-output", killed
-    last = json.loads((f.requests / "010.body").read_bytes())["input"][-1]
+    last = f.request(10)["input"][-1]
     assert "Job job-2 " in json.dumps(last), last
 
 # Monitor's trained command shape starts an ordinary job; its exit wakes the session once.
@@ -79,15 +75,13 @@ from server import post, start
 with flow([reply(("monitor", "mcp__razor__monitor", {"description": "Wait for release",
                                         "command": "while [ ! -e release ]; do sleep 0.05; done; printf monitor-ready"})),
            reply(text="armed"), reply(text="flow done")]) as f:
-    result = f.run("--print=json", "Monitor release.")
-    assert result.returncode == 0, result.stderr
-    session = json.loads(result.stdout)["session"]
+    session = f.ask("Monitor release.")["session"]
     entries = list(f.record(session))
     output = next(e for e in entries if e["kind"] == "result" and e["call"] == "monitor")
     assert output["outcome"] == "success" and "job-1" in output["output"], output
     started = next(e for e in entries if e["kind"] == "job" and e["event"] == "started")
     assert started.get("deadline") is None, started
-    tools = {t["name"] for t in json.loads((f.requests / "001.body").read_bytes())["tools"]}
+    tools = {t["name"] for t in f.request(1)["tools"]}
     assert "mcp__razor__monitor" in tools and "Monitor" not in tools, tools
     (f.cwd / "release").touch()
     entries = until(f, session, answered)

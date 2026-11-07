@@ -219,12 +219,11 @@ fn grid_row(
             );
         }
         Some(Line::Cells(s, first, len)) => {
-            let items: Vec<usize> = g
+            let items = g
                 .items(t, l.sections[s].tab)
                 .skip(first - l.sections[s].start)
-                .take(len)
-                .collect();
-            for (c, &i) in items.iter().enumerate() {
+                .take(len);
+            for (c, i) in items.enumerate() {
                 let on = first + c == g.at;
                 hit(
                     p.emoji(g.glyph(t, i), if on { LIT } else { RECESS }, on),
@@ -263,7 +262,7 @@ fn tone_bubble(
         p.cell(2, BEZEL, &[("│ ", CYAN, false)]);
         for n in 0..6u8 {
             let on = Some(n) == g.toning;
-            let glyph = choices.get(usize::from(n)).copied().unwrap_or("");
+            let glyph = choices.clone().nth(usize::from(n)).unwrap_or("");
             hit(
                 p.emoji(glyph, if on { LIT } else { BEZEL }, on),
                 Hit::Tone(n),
@@ -294,10 +293,8 @@ fn tone_bubble(
 }
 
 // An emoji's base glyph, then its five tones when it has them.
-fn choices(e: &Emoji) -> Vec<&'static str> {
-    std::iter::once(e.glyph)
-        .chain(e.tones.into_iter().flatten())
-        .collect()
+fn choices(e: &Emoji) -> impl Iterator<Item = &'static str> + Clone {
+    std::iter::once(e.glyph).chain(e.tones.into_iter().flatten())
 }
 
 // The selected emoji's name and first shortcode beside the tone button; with the tones open,
@@ -362,10 +359,14 @@ fn tone_row(
     hit: &mut impl FnMut(Rect, Hit),
 ) {
     let choices = choices(e);
-    let glyph = format!(" {} ", choices.get(index).copied().unwrap_or(""));
-    let slots = if popped { 0 } else { choices.len() * CELL };
+    let glyph = format!(" {} ", choices.clone().nth(index).unwrap_or(""));
+    let slots = if popped {
+        0
+    } else {
+        choices.clone().count() * CELL
+    };
     if !popped {
-        for (n, choice) in choices.iter().enumerate() {
+        for (n, choice) in choices.enumerate() {
             hit(
                 p.emoji(choice, if n == index { LIT } else { BEZEL }, n == index),
                 Hit::Tone(n as u8),

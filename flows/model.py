@@ -10,9 +10,14 @@ def reply(marker, tool=None, arguments=None, text="flow done"):
     return claude.reply(text=text, match=marker)
 
 
+def tool(marker, name, /, **arguments):
+    """A call of Razor's own tool `name` with `arguments`, for a request holding `marker`."""
+    return reply(marker, f"mcp__razor__{name}", arguments)
+
+
 def agent(marker, action, **arguments):
-    return reply(marker, "mcp__razor__agent", {"action": action, **arguments})
+    return tool(marker, "agent", action=action, **arguments)
 
 
 def message(marker, kind, **arguments):
-    return reply(marker, "mcp__razor__message", {"type": kind, **arguments})
+    return tool(marker, "message", type=kind, **arguments)

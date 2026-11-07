@@ -3,7 +3,7 @@ child's note and question, and a long mention cut to 2,000 characters; the recor
 sender's words alone, and the channel file holds the whole post."""
 import json
 from driver import flow
-from model import agent, message, reply
+from model import agent, message, reply, tool
 from server import until
 
 
@@ -17,11 +17,9 @@ def texts(value):
 
 
 root, child = "FLOW_ROOT_42", "You are wren42,"
-replies = [reply(root, "mcp__razor__status", {}), reply(root, text="Named.")]
+replies = [tool(root, "status"), reply(root, text="Named.")]
 with flow(replies) as f:
-    first = f.run("--print=json", root)
-    assert first.returncode == 0, first.stderr
-    parent = json.loads(first.stdout)["session"]
+    parent = f.ask(root)["session"]
     status = next(e for e in f.record(parent) if e["kind"] == "result")
     name = json.loads(status["output"])["agents"][0]["name"]
     assert name == f.cwd.name, name
@@ -35,8 +33,7 @@ with flow(replies) as f:
                 reply(child, text="Posted."),
                 reply("NOTE_42", text="Noted."), reply("Which marker?", text="Asked."),
                 reply("(the rest: message read)", text="Mentioned.")]
-    second = f.run("--resume", parent, "--print=json", "Start the child.")
-    assert second.returncode == 0, second.stderr
+    f.ask("--resume", parent, "Start the child.")
 
     def mentioned(entries):
         ids = [e["id"] for e in entries if e["kind"] == "input" and e["text"] == long]
@@ -48,8 +45,7 @@ with flow(replies) as f:
     assert (note["kind"], note["from"]) == ("note", "wren42"), note
     assert (question["kind"], question["from"]) == ("question", "wren42"), question
     assert (mention["kind"], mention["from"]) == ("mention", "wren42"), mention
-    seen = ["\n".join(texts(json.loads(p.read_bytes()))) for p in sorted(f.requests.glob("*.body"))
-            if p.stem.isdigit() and root.encode() in p.read_bytes()]
+    seen = ["\n".join(texts(json.loads(body))) for body in f.sent() if root in body]
     shown = ["wren42 (your child): NOTE_42",
              f'wren42 (your child) asks ["{sid}",{question["id"][1]}]: Which marker?',
              "wren42 in the channel: " + long[:2000] + " ... (the rest: message read)"]
@@ -67,14 +63,11 @@ replies = [agent(root, "start", name="fern42", brief="Work, then reply."), reply
            message("SEND_42", "note", to="fern42", text="STEER_42"), reply("SEND_42", text="Sent."),
            reply(root, text="Heard.")]
 with flow(replies) as f:
-    started = f.run("--print=json", root)
-    assert started.returncode == 0, started.stderr
-    parent = json.loads(started.stdout)["session"]
+    parent = f.ask(root)["session"]
     sid = next(p.parent.name for p in (f.home / ".razor/sessions").glob("*/record.jsonl")
                if (es := list(f.record(p.parent.name)))[0].get("child", {}).get("name") == "fern42")
     until(f, sid, lambda es: any(e["kind"] == "job" for e in es))
-    sent = f.run("--resume", parent, "--print=json", "SEND_42")
-    assert sent.returncode == 0, sent.stderr
+    f.ask("--resume", parent, "SEND_42")
 
     def answered(entries):
         note = [e["id"] for e in entries if e["kind"] == "input" and e["text"] == "STEER_42"]

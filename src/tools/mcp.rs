@@ -38,7 +38,6 @@ pub(super) struct Tool {
     pub(super) server: String,
     name: String,
     peer: Peer<RoleClient>,
-    questions: Questions,
 }
 
 /// A configured server's task; dropping it stops the task and its transport.
@@ -209,13 +208,10 @@ impl Link {
             tools.extend(page.tools.into_iter().filter(for_model).map(|tool| {
                 let description = tool.description.map(String::from).unwrap_or_default();
                 let input = Value::Object((*tool.input_schema).clone());
-                let (server, peer, questions) =
-                    (self.name.clone(), peer.clone(), self.questions.clone());
                 let tool = Tool {
-                    server,
+                    server: self.name.clone(),
                     name: tool.name.into(),
-                    peer,
-                    questions,
+                    peer: peer.clone(),
                 };
                 (
                     format!("mcp__{}__{}", self.name, tool.name),
@@ -270,15 +266,9 @@ impl Link {
             Kind::Mcp(tool) if tool.server == server => tools.iter().any(|t| t.0 == action.name),
             _ => true,
         });
-        for (name, schema, tool) in &tools {
-            if !search || state.selected.contains(name) {
-                put(
-                    &mut entries,
-                    name.clone(),
-                    false,
-                    schema.clone(),
-                    Kind::Mcp(tool.clone()),
-                );
+        for entry in &tools {
+            if !search || state.selected.contains(&entry.0) {
+                offer(&mut entries, entry);
             }
         }
         let searchable = entries.iter().any(|a| matches!(a.kind, Kind::McpSearch));
@@ -321,34 +311,31 @@ impl Tools {
             let have = words(text);
             wanted.iter().filter(|word| have.contains(word)).count()
         };
-        let mut state = self.state();
+        let state = &mut *self.state();
         let entries = state
             .catalogs
             .values()
             .filter(|c| c.search)
             .flat_map(|c| &c.entries);
         let mut found: Vec<_> = entries
-            .filter_map(|(name, schema, tool)| {
+            .filter_map(|entry| {
+                let (name, schema, tool) = entry;
                 let exact =
                     name.eq_ignore_ascii_case(&query) || tool.name.eq_ignore_ascii_case(&query);
                 let rank = (exact, matched(name), matched(&schema.description));
-                (rank != (false, 0, 0)).then(|| (rank, name.clone(), schema.clone(), tool.clone()))
+                (rank != (false, 0, 0)).then_some((rank, entry))
             })
             .collect();
-        found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.0.cmp(&b.1.0)));
         let mut list = state.list.borrow().to_vec();
         let mut result = Vec::new();
-        for (_, name, schema, tool) in found.into_iter().take(5) {
-            let line = schema
-                .description
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .to_owned();
-            put(&mut list, name.clone(), false, schema, Kind::Mcp(tool));
-            if list.iter().any(|a| a.name == name) {
+        for (_, entry) in found.into_iter().take(5) {
+            let (name, schema, _) = entry;
+            let line = schema.description.lines().next().unwrap_or_default();
+            offer(&mut list, entry);
+            if list.iter().any(|a| &a.name == name) {
                 result.push(json!({"name": name, "description": line}));
-                state.selected.insert(name);
+                state.selected.insert(name.clone());
             }
         }
         state.list.send_replace(list.into());
@@ -421,14 +408,25 @@ impl Tools {
         let first = |s: &str| s.lines().next().unwrap_or("").chars().take(120).collect();
         let tools = entries.iter().take(count);
         let tools = tools.map(|(_, s, tool)| (tool.name.clone(), first(&s.description)));
-        (shown.into(), tools.collect(), error)
+        (shown.into(), tools.collect(), error.map(str::to_owned))
     }
 }
 
-fn shown(state: &State, name: &str) -> (&'static str, usize, Option<String>) {
+/// Puts a catalog entry in the list; an MCP tool is never read-only.
+fn offer(list: &mut Vec<Action>, (name, schema, tool): &(String, Schema, Tool)) {
+    put(
+        list,
+        name.clone(),
+        false,
+        schema.clone(),
+        Kind::Mcp(tool.clone()),
+    );
+}
+
+fn shown<'a>(state: &'a State, name: &str) -> (&'static str, usize, Option<&'a str>) {
     let count = state.catalogs.get(name).map_or(0, |c| c.entries.len());
     match state.servers.get(name) {
-        Some(server) => (server.state, count, server.error.clone()),
+        Some(server) => (server.state, count, server.error.as_deref()),
         None => (
             idle(state.config.mcp.get(name).is_none_or(|c| c.enabled)),
             0,
@@ -522,7 +520,7 @@ pub(super) async fn call(
                     "The MCP server asked for an unsupported capability; only questions are.",
                 );
             };
-            let answer = elicit(&tool.server, &tool.questions, request.params).await?;
+            let answer = elicit(&tool.server, &tools.questions, request.params).await?;
             let answer = serde_json::to_value(answer)
                 .map_err(|e| other(e, "Could not encode the answer."))?;
             responses.insert(key, answer);

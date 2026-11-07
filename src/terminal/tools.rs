@@ -79,7 +79,7 @@ impl Next {
 impl Call<'_> {
     fn input(&self) -> (&str, &Value) {
         match &self.entry.body {
-            Body::Call { name, input, .. } => (kind(name), input),
+            Body::Call { name, input, .. } => (shown(name, input), input),
             _ => ("", &Value::Null),
         }
     }
@@ -138,7 +138,7 @@ impl Call<'_> {
     pub(super) fn rows(&self, columns: usize, now: u64, motion: bool) -> Vec<Row> {
         let slots = turn::slots(self.place.threads, columns);
         let inner = columns.saturating_sub(2 * slots - 2);
-        let mut rows = turn::fold(self, inner, now, motion)
+        let mut rows = turn::runs::fold(self, inner, now, motion)
             .unwrap_or_else(|| card::rows(self, inner, now, motion));
         // A result's pictures, each a line naming its media type and where it was saved, then the
         // picture under it.
@@ -535,7 +535,6 @@ impl Call<'_> {
         fill(b, body, style(DATA, RECESS));
         self.detail_head(b, r, *scroll, &command, phone);
         self.detail_output(b, r, *scroll, start, output.as_deref());
-        // The thumb the diff view and the transcript draw, in proportion down the body.
         let (x, total) = (r.right().saturating_sub(1), total.unwrap_or(0));
         scrollbar(b, x, r.y + 1, height, total, *scroll);
     }
@@ -642,7 +641,7 @@ pub(super) fn glance(entry: &Entry) -> Option<(&'static str, String)> {
 
 /// The mark a call's row leads with, by its tool's name and input.
 pub(super) fn mark(name: &str, input: &Value) -> &'static str {
-    match kind(name) {
+    match shown(name, input) {
         "read" => "≡",
         "edit" | "write" => "±",
         "shell" => "$",
@@ -656,9 +655,19 @@ pub(super) fn mark(name: &str, input: &Value) -> &'static str {
 
 /// A call's kind and target as one label (a shell's target already says `bash`).
 pub(super) fn label(name: &str, input: &Value) -> String {
-    match kind(name) {
+    match shown(name, input) {
         "shell" => target("shell", input),
         kind => format!("{kind} {}", target(kind, input)),
+    }
+}
+
+/// The kind a call's row, mark and colour show: its `kind`, but an agent call that sets its own
+/// session's title or name is `title` or `rename`, which reads as no spawn.
+pub(super) fn shown<'a>(name: &'a str, input: &Value) -> &'a str {
+    match (kind(name), input["action"].as_str()) {
+        ("agent", Some("headline")) => "title",
+        ("agent", Some("name")) => "rename",
+        (kind, _) => kind,
     }
 }
 

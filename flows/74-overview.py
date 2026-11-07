@@ -1,22 +1,32 @@
-"""The overview fits its agents, opens the selected session, and folds immediately without
-motion or below 80 columns. Parallel code-mode results leave the newest open call visible."""
+"""The overview fits its agents, opens the selected session, and folds at once without motion or below 80 columns; the
+keys move between the list and a composer, past helpers. Parallel code-mode results leave the newest open call visible."""
 from dataclasses import replace
-import re
+import base64, json, os, re, signal, time
 from clock import wall_clock
 from driver import flow
 from responses import done, message, response
 import server
 from terminal import Terminal
 
-LEFT, RIGHT, UP, DOWN = "\x1b[D", "\x1b[C", "\x1b[A", "\x1b[B"
+LEFT, RIGHT, UP, DOWN, BACKTAB = "\x1b[D", "\x1b[C", "\x1b[A", "\x1b[B", "\x1b[Z"
 names = ["older74", "middle74", "newest74"]
-source = '// @exec: {"yield_time_ms":120000}\nawait Promise.all([' + ",".join(f'tools.{n}({{path:"{n}"}})' for n in names) + "]);"
-config = "[ui]\nmotion = false\n" + "".join(
+source = "await Promise.all([" + ",".join(f'tools.{n}({{path:"{n}"}})' for n in names) + "]);"
+# The keyboard loop through bindings like Trey's pack; the defaults leave these actions unbound.
+keys = """[ui.keys.list]\nup = []\ndown = []\nleft = []\nright = []\naccept = ["a"]\nprevious_agent = ["Up", "k"]
+next_agent = ["Down", "j"]\noverview = ["Left", "h"]\nbeside = ["Enter", "Right", "l"]\n[ui.keys.line_start]\noutward = []
+choose = ["Left"]\n[ui.keys.composer]\nswitch = ["Shift-Tab"]\n"""
+config = 'capture = ["sh", "-c", "cat /dev/zero"]\ntranscribe = ["true"]\n[ui]\nmotion = false\n' + keys + "".join(
     f'[tools.{n}]\ncommand = "while [ ! -e {n} ]; do sleep 0.05; done"\n'
     'description = "Wait for the named file."\nread_only = true\ninput = {type = "object"}\n' for n in names)
-replies = [response([message("answer-a74. transcript-a74")]), response([message("answer-b74. transcript-b74")]),
-           response([{"type": "custom_tool_call", "id": "ct_parallel", "call_id": "call_parallel",
-                      "name": "exec", "input": source}]), done()]
+cell = lambda js, id, match=None: replace(response([{"type": "custom_tool_call", "id": f"ct_{id}", "call_id": f"call_{id}",
+                                                    "name": "exec", "input": '// @exec: {"yield_time_ms":120000}\n' + js}]), match=match)
+said = lambda words, match=None: replace(response([message(words)]), match=match)
+# b74's helper waits on middle74 as work74 does, then reports blocked, which keeps it listed.
+replies = [said("answer-a74. transcript-a74"), cell('await tools.agent({action:"start",name:"kid74",brief:"Wait.",placement:"in_place"});', "start"),
+           said("answer-b74. transcript-b74"), cell(source, "parallel"), done(), said("noted74", "Blocked74."), said("answer-loop74", "loop74"), said("answer-image74", "typed74"), cell('await tools.message({to:"parent",type:"question",text:"Pick74?",options:["x74","y74"]});', "ask74", "launch74"),
+           said("answer-launch74", "launch74"),
+           cell('await tools.middle74({path:"kid74"}); await tools.agent({action:"finish",status:"blocked",report:"Blocked74."});', "kid", "You are kid74,"),
+           said("answer-c74.", "c74")]
 with flow(replies, model="sol", config=config) as f:
     def root(name):
         sid = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
@@ -24,7 +34,7 @@ with flow(replies, model="sol", config=config) as f:
         server.post(f, f"/sessions/{sid}/input", {"text": name})
         return sid
 
-    server.start(f)
+    pid = server.start(f)
     a = root("a74")
     server.until(f, a, lambda es: es[-1]["kind"] == "turn_end")
     b = root("b74")
@@ -48,15 +58,38 @@ with flow(replies, model="sol", config=config) as f:
     answer = server.send(f, "PUT", "/views", {"version": 0, "views": [view]})
     assert answer.status == 200, answer.read()
     answer.read()
+    # Closing the list's last row, c, addresses the open top-level row above it, b, and not b's
+    # working helper drawn between them, which is another tree's, though c's row leaves first.
+    c = root("c74")
+    server.until(f, c, lambda es: es[-1]["kind"] == "turn_end")
+
+    def order(*sessions):
+        version = json.loads(server.send(f, "GET", "/views").read())["version"]
+        group = {**view["groups"][0], "matches": [{"session": s} for s in sessions], "order": list(sessions)}
+        server.send(f, "PUT", "/views", {"version": version, "views": [{**view, "groups": [group]}]}).read()
+
+    order(a, work, b, c)
+    with Terminal(f, "--resume", c, rows=20) as t:
+        t.send("\x1bOQ")
+        t.until(lambda _: all(any(n in line[:40] for line in t.screen.display) for n in ("c74", "kid74")))
+        t.send("/quit\r")
+        t.until(lambda _: "b74" in t.screen.display[2][41:])
+        # Quitting beside the list names the session on screen, though another was opened first.
+        t.send(BACKTAB + UP + "\r")
+        t.until(lambda _: "work74" in t.screen.display[2][41:])
+        t.quit()
+        assert b"Left work74; it stays open." in t.output, t.output[-300:]
+    order(b, a, work)
+    time.sleep(1.1)  # the next layout, published at most once a second, leaves c out
     with wall_clock() as (_, env, _), Terminal(replace(f, env={**f.env, **env}), "--resume", a, rows=20) as t:
         t.shown("transcript-a74")
         t.send(LEFT)
-        t.shown("AGENTS ·", "transcript-a74")
-        t.send(LEFT)  # The composer kept the keys; frozen time cannot finish an accidental fold.
+        t.shown("AGENTS · WORK", "transcript-a74")
+        t.send(LEFT)  # The list has the keys and opens the overview; frozen time cannot finish a fold.
         t.shown("PROJECT74", "work74", "a74", "b74")
 
         def selected(name):
-            t.until(lambda _: "AGENTS ·" not in t.text() and any(f"▶ {name} " in line for line in t.screen.display))
+            t.until(lambda _: "AGENTS · WORK" not in t.text() and any(f"▶ {name} " in line for line in t.screen.display))
 
         selected("a74")
 
@@ -68,6 +101,9 @@ with flow(replies, model="sol", config=config) as f:
             assert all(not line.strip() or line.rstrip()[-1] in "│╮╯╴" for line in lines[5:-1]), t.text()
 
         framed()
+        # At rest with motion off nothing turns faster than the minute: ages under one read `<1m`
+        # and, with the wall clock still, the overview falls quiet once the rows have settled.
+        assert any(not t.pump(1.5, lambda _: True) for _ in range(5)) and " <1m " in t.text(), t.text()
         for height in (13, 10, 9):
             t.resize(height, 120)
             t.until(lambda _: all(f" {n} " in t.text() for n in ("work74", "b74", "a74")))
@@ -90,19 +126,153 @@ with flow(replies, model="sol", config=config) as f:
             t.send(DOWN)
             selected("b74")
         t.send(RIGHT)  # Open b, although a was addressed before the overview.
-        t.shown("AGENTS ·", "transcript-b74")
-        t.send("draft74")
-        t.shown("draft74")
+        t.shown("AGENTS · WORK", "transcript-b74")
+        t.send("\x0e\r")  # Beside the list, Ctrl-N selects b's helper's card and Enter opens it.
+        t.until(lambda _: "kid74" in t.screen.display[2][41:])
+        t.send(LEFT + "\x14draft74")  # Left goes back to b, and Ctrl-T closes the pane Ctrl-N opened.
+        t.until(lambda _: "b74" in t.screen.display[2][41:] and "STATUS" not in t.text() and "draft74" in t.text())
         t.send("\x01" + RIGHT + "X")  # Select all, collapse to its end, then append.
-        t.shown("draft74X", "AGENTS ·")
+        t.shown("draft74X", "AGENTS · WORK")
         t.send(RIGHT)
         t.until(lambda _: "AGENTS" not in t.text() and "draft74X" in t.text())
-        t.send("\x15" + LEFT)
-        t.shown("AGENTS ·", "transcript-b74")
+        # Shift-Tab gives the list the keys over the draft, which closing the list kept, though typed
+        # within the half second before its save; Down passes b's helper to a and Enter opens it.
+        # Right closes the list before a's saved draft is read, with the server paused: the draft
+        # stays a's. Typing and Enter send; Shift-Tab, Up past the helper and Enter bring b's back.
+        server.wait(lambda: server.send(f, "GET", f"/sessions/{b}/draft").read() == b"draft74X")
+        server.send(f, "PUT", f"/sessions/{a}/draft", "saved74 ").read()
+        os.kill(pid, signal.SIGSTOP)
+        t.send(BACKTAB + DOWN + "\r" + RIGHT)
+        t.until(lambda _: "AGENTS" not in t.text() and "draft74X" not in t.text())
+        os.kill(pid, signal.SIGCONT)
+        t.shown("transcript-a74", "saved74")
+        assert not t.pump(1, lambda _: "saved74" not in t.text()) and server.send(f, "GET", f"/sessions/{a}/draft").read() == b"saved74 ", t.text()
+        t.send("loop74\r")
+        t.shown("answer-loop74")
+        # With the server paused, leaving b before its saved draft is read keeps the draft.
+        header = lambda name: t.until(lambda _: name in t.screen.display[2][41:])
+        os.kill(pid, signal.SIGSTOP)
+        t.send(BACKTAB + UP + "\r")
+        header("b74")
+        t.send(BACKTAB + DOWN + "\r")
+        header("a74")
+        os.kill(pid, signal.SIGCONT)
+        assert not t.pump(1) and server.send(f, "GET", f"/sessions/{b}/draft").read() == b"draft74X", t.text()
+        # Words and an image typed while b's draft cannot be read keep b addressed until a refused
+        # switch reads the draft again, bringing it in ahead of them, image and all.
+        lock, png = f.home / ".razor/sessions" / b / "draft", f.cwd / "dot74.png"
+        png.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aMk0AAAAASUVORK5CYII="))
+        lock.chmod(0)
+        t.send(BACKTAB + UP + "\r")
+        t.shown("PERMISSION DENIED")
+        t.send(f"typed74 \x1b[200~{png}\x1b[201~")
+        t.until(lambda _: "[Image #1]" in t.text() and "preparing" not in t.text())
+        t.send(BACKTAB + DOWN + "\r")
+        assert not t.pump(1) and "b74" in t.screen.display[2][41:], t.text()
+        lock.chmod(0o600)
+        t.send(BACKTAB + DOWN + "\r")
+        t.shown("draft74X", "typed74 [Image #1]")
+        assert "b74" in t.screen.display[2][41:], t.text()
+        server.wait(lambda: server.send(f, "GET", f"/sessions/{b}/draft").read() == b"draft74X\ntyped74 [Image #1]", why=t.text())
+        t.send("\r")
+        t.shown("answer-image74")
+        assert any(e["kind"] == "input" and e["text"].startswith("draft74X\n") and e["images"] for e in f.record(b))
+        # A saved draft joins the words typed before it is read past 1 MiB too; the server refuses
+        # to save them, keeping its draft, until they are shortened.
+        big = "S" * (1 << 20)
+        server.send(f, "PUT", f"/sessions/{a}/draft", big).read()
+        os.kill(pid, signal.SIGSTOP)
+        t.send(BACKTAB + DOWN + "\rover74")
+        header("a74")
+        os.kill(pid, signal.SIGCONT)
+        t.shown("THE REQUEST WAS REFUSED", "over74")
+        assert server.send(f, "GET", f"/sessions/{a}/draft").read() == big.encode()
+        t.send("\x7f" * 7)
+        t.until(lambda _: "over74" not in t.text())
+        assert not t.pump(1) and server.send(f, "GET", f"/sessions/{a}/draft").read() == big.encode()
+        t.send("\x15")
+        server.wait(lambda: server.send(f, "GET", f"/sessions/{a}/draft").read() == b"")
+        server.send(f, "PUT", f"/sessions/{b}/draft", "pre74").read()
+        t.send(BACKTAB + UP + "\r")
+        t.shown("pre74")
+        # Drafts keep words only. Refused words lose their images to a stashed draft brought
+        # back meanwhile, and leaving a session drops the editor's: each says so.
+        folder = f.home / ".razor/sessions" / b
+
+        def image(words=""):
+            t.send(f"\x1b[200~{png}\x1b[201~")
+            t.until(lambda _: f"❯ {words}[Image #" in t.text() and "preparing" not in t.text())
+
+        image("pre74")
+        t.send("\x13")
+        t.until(lambda _: "❯ pre74" not in t.text())
+        image()
+        os.kill(pid, signal.SIGSTOP)
+        folder.chmod(0o500)
+        t.send("\r")
+        t.pump(0.5)
+        t.send("\x13")
+        t.shown("pre74[Image #1]")
+        os.kill(pid, signal.SIGCONT)
+        t.shown("THE RETURNED WORDS' IMAGES GAVE WAY TO NEWER ONES. API 500")
+        folder.chmod(0o700)
+        t.send("\x01\x7f")
+        t.shown("❯ Message the agent")
+        image()
+        t.send(BACKTAB + DOWN + "\r")
+        header("a74")
+        t.shown("DRAFTS KEEP WORDS ONLY; THE IMAGES IN THE WORDS LEFT WERE DROPPED")
+        t.send(BACKTAB + UP + "\r")
+        header("b74")
+        t.shown("❯ [Image #")  # The saved draft keeps the chip's words alone.
+        t.send("\x01\x7f")
+        server.wait(lambda: server.send(f, "GET", f"/sessions/{b}/draft").read() == b"", why=t.text())
+        # Words typed while an admission's draft save fails go after the returned ones, past 1 MiB
+        # too: deleting them leaves the returned words, which save.
+        old = "OLD74" + "o" * ((1 << 20) - 10)
+        os.kill(pid, signal.SIGSTOP)
+        folder.chmod(0o500)
+        t.send(f"\x01\x1b[200~{old}\x1b[201~\rnew74")
+        t.shown("new74")  # All typed before the save fails: a key after it would pass 1 MiB.
+        os.kill(pid, signal.SIGCONT)
+        t.shown("PERMISSION DENIED", "new74")
+        folder.chmod(0o700)
+        t.send("\x7f" * 6)
+        server.wait(lambda: server.send(f, "GET", f"/sessions/{b}/draft").read() == old.encode(), why=t.text())
+        # Leaving waits for the server to hold the words: a failed save keeps b addressed with
+        # them, and the next switch saves them.
+        folder.chmod(0o500)
+        t.send("\x15fail74" + BACKTAB + DOWN + "\r")
+        t.shown("PERMISSION DENIED", "fail74")
+        # Behind a save already on its way, a switch still waits for its own and then goes; while
+        # it waits, keys other than editing ones, such as recording, are refused.
+        os.kill(pid, signal.SIGSTOP)
+        folder.chmod(0o700)
+        t.send("!")
+        t.pump(1)
+        t.send(BACKTAB + DOWN + "\r\x12")
+        t.shown("SAVING BEFORE LEAVING; WAIT OR CTRL-C")
+        assert not t.pump(1) and "b74" in t.screen.display[2][41:] and "Recording" not in t.text(), t.text()
+        os.kill(pid, signal.SIGCONT)
+        header("a74")
+        assert not t.pump(1) and server.send(f, "GET", f"/sessions/{b}/draft").read() == b"fail74!"
+        # Behind eight writes and a paused server, a switch cannot queue its save and is refused.
+        os.kill(pid, signal.SIGSTOP)
+        t.send("/name a74\r" * 9)
+        t.pump(0.2)
+        t.send("queue74" + BACKTAB + UP + "\r")
+        t.shown("EIGHT DRAFT OR INPUT WRITES ARE PENDING", "queue74")
+        assert "a74" in t.screen.display[2][41:], t.text()
+        os.kill(pid, signal.SIGCONT)
+        server.wait(lambda: server.send(f, "GET", f"/sessions/{a}/draft").read() == b"queue74")
+        t.send(BACKTAB + UP + "\r")
+        header("b74")
+        t.send("\x15" + LEFT)  # Left at an empty line gives the list the keys, then the overview.
+        t.until(lambda _: t.screen.cursor.hidden and "AGENTS · WORK" in t.text())
         t.send(LEFT)
         selected("b74")
         t.send("\x1b")
-        t.shown("AGENTS ·", "transcript-b74")
+        t.shown("AGENTS · WORK", "transcript-b74")
         t.click("‹")
         t.until(lambda _: "AGENTS" not in t.text() and "transcript-b74" in t.text())
         t.send("\x1bOR")
@@ -128,8 +298,43 @@ with flow(replies, model="sol", config=config) as f:
         t.shown("transcript-b74")
         t.resize(20, 120)
         t.pump(2)
+    # A first input given with --resume is sent over the saved draft, which stays.
+    server.send(f, "PUT", f"/sessions/{a}/draft", "kept74").read()
+    with Terminal(f, "--resume", a, "Say launch74.") as t:
+        t.shown("answer-launch74", "Pick74?", "kept74")
+        assert server.send(f, "GET", f"/sessions/{a}/draft").read() == b"kept74"
+        # While leaving waits for its save, an answer waits as an input does, and words typed
+        # after it go with the saved ones.
+        t.send("\x15\rans74")
+        t.shown("ans74")
+        server.send(f, "PUT", f"/sessions/{b}/draft", "bdraft74").read()
+        os.kill(pid, signal.SIGSTOP)
+        t.send(BACKTAB)
+        t.shown("○ b74 ")
+        t.click("○ b74 ")
+        t.send("\rlate74")
+        t.shown("ans74late74")
+        assert not t.pump(1) and "a74" in t.screen.display[2][41:], t.text()
+        os.kill(pid, signal.SIGCONT)
+        header("b74")
+        server.wait(lambda: server.send(f, "GET", f"/sessions/{a}/draft").read() == b"ans74late74")
+        assert not any(e["kind"] == "input" and "ans74" in e["text"] for e in f.record(a))
+        # Accept closes the list once the deferred switch has opened the agent; until then the
+        # list key is refused. b's draft is read first, or the switch would be refused for it.
+        t.shown("bdraft74")
+        os.kill(pid, signal.SIGSTOP)
+        t.send("acc74" + BACKTAB)
+        t.until(lambda _: t.screen.cursor.hidden)
+        t.send(DOWN)
+        t.until(lambda _: any("❯" in line and "work74" in line for line in t.screen.display))
+        t.send("a\x1bOQ")
+        t.shown("SAVING BEFORE LEAVING")
+        assert not t.pump(1) and "b74" in t.screen.display[2][41:], t.text()
+        os.kill(pid, signal.SIGCONT)
+        t.until(lambda _: "work74 · cwd" in t.screen.display[2] and "AGENTS" not in t.text())
     (f.cwd / names[1]).touch()
     server.until(f, work, lambda es: es[-1]["kind"] == "turn_end")
+    server.until(f, b, lambda es: es[-1]["kind"] == "turn_end" and any(e["kind"] == "input" and "Blocked74." in str(e) for e in es))
     assert server.agents(f)[work].get("doing") is None, "finished call is still running"
     server.stop(f)
     server.start(f)

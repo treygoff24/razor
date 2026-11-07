@@ -6,6 +6,7 @@ import json
 import threading
 from pathlib import Path
 
+import chat
 from driver import flow
 from responses import PLAIN, reply as gpt
 import server
@@ -16,13 +17,9 @@ HEAD = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2"
 LATER = "2099-01-01T00:00:00Z"
 
 
-def chat(match, text):
+def said(match, text):
     """A Gemini chat stream, picked by a phrase in its request, ending in `text`."""
-    chunks = [{"choices": [{"index": 0, "delta": {"role": "assistant", "content": text}}]},
-              {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
-              {"choices": [], "usage": {"prompt_tokens": 800, "completion_tokens": 9, "total_tokens": 809}}]
-    body = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
-    return Reply(body.encode(), match=match)
+    return chat.reply({"role": "assistant", "content": text}, match=match)
 
 
 def files(url, name, state, match, **extra):
@@ -69,7 +66,7 @@ with flow(replies, model="sol", config=config, env={"GEMINI_API_KEY": "flow-gemi
     # 1. A Gemini session: the video is uploaded raw with the key Google's Files API takes, read
     # until ACTIVE, and sent as an image_url of its uri before the words, after the path's line.
     replies += [files(url, "one", "PROCESSING", "flow video one"), files(url, "one", "ACTIVE", None),
-                chat("Why does it stutter", "It stutters at 0:04."), chat("And now", "Still fine.")]
+                said("Why does it stutter", "It stutters at 0:04."), said("And now", "Still fine.")]
     gemini = server.post(f, "/sessions", {"cwd": str(f.cwd), "model": GEMINI})["session"]
     path = upload(gemini, b"flow video one")
     video = {"file": path, "duration_ms": 8000}
@@ -100,7 +97,7 @@ with flow(replies, model="sol", config=config, env={"GEMINI_API_KEY": "flow-gemi
     # 2. A failed upload is shown as a line saying why, Google's words without the key, and the
     # turn goes on.
     replies += [files(url, "bad", "FAILED", "flow video bad", error={"message": "bad codec, key flow-gemini-key"}),
-                chat("This one fails", "I could not see it.")]
+                said("This one fails", "I could not see it.")]
     failing = server.post(f, "/sessions", {"cwd": str(f.cwd), "model": GEMINI})["session"]
     bad = upload(failing, b"flow video bad")
     server.post(f, f"/sessions/{failing}/input", {"text": "This one fails.", "video": {"file": bad, "duration_ms": 1000}})
@@ -115,7 +112,7 @@ with flow(replies, model="sol", config=config, env={"GEMINI_API_KEY": "flow-gemi
     # in the video's folder with the person's words and the parent's last reply, and reports.
     replies += [gpt("Hello parent", "Send me the clip."), gpt("it stutters", "Waiting for watcher-1."),
                 files(url, "two", "ACTIVE", "flow video two"),
-                chat("Machine-made description of", "Machine-made description: it freezes at 0:04."),
+                said("Machine-made description of", "Machine-made description: it freezes at 0:04."),
                 gpt("reports finished", "Thanks.")]
     parent = server.post(f, "/sessions", {"cwd": str(f.cwd), "model": "sol"})["session"]
     server.post(f, f"/sessions/{parent}/input", {"text": "Hello parent"})
@@ -146,7 +143,7 @@ with flow(replies, model="sol", config=config, env={"GEMINI_API_KEY": "flow-gemi
 
     # 4. The person's question to the finished watcher continues it; it resumes with the video,
     # uploaded once, and its report went by its clean turn end, not by a finish call.
-    replies += [chat("What happens at 0:05", "At 0:05 it recovers.")]
+    replies += [said("What happens at 0:05", "At 0:05 it recovers.")]
     server.post(f, f"/sessions/{watcher}/input", {"text": "What happens at 0:05?"})
     entries = turns(watcher, 2)
     assert not [e for e in entries if e["kind"] in ("rebuild", "call")], [e["kind"] for e in entries]
@@ -156,10 +153,10 @@ with flow(replies, model="sol", config=config, env={"GEMINI_API_KEY": "flow-gemi
     # Three questions later its first input is past the four asks a rebuild carries verbatim; a
     # model switch's rebuild still shows its video, with its words.
     for n in (2, 3, 4):
-        replies.append(chat(f"Question {n}", "Answered."))
+        replies.append(said(f"Question {n}", "Answered."))
         server.post(f, f"/sessions/{watcher}/input", {"text": f"Question {n}?"})
         turns(watcher, n + 1)
-    replies += [files(url, "two", "ACTIVE", "flow video two"), chat("On the other model", "Still see it.")]
+    replies += [files(url, "two", "ACTIVE", "flow video two"), said("On the other model", "Still see it.")]
     server.post(f, f"/sessions/{watcher}/input", {"text": "On the other model now.", "model": "google/gemini-3.8-flash"})
     entries = turns(watcher, 6)
     assert [e["trigger"] for e in entries if e["kind"] == "rebuild"] == ["change"], entries
@@ -169,7 +166,7 @@ with flow(replies, model="sol", config=config, env={"GEMINI_API_KEY": "flow-gemi
 
     # 5. A video whose input moves a GPT session to Gemini follows the rebuild that switch makes, with its words last.
     replies += [gpt("Before the switch", "Ready."), files(url, "four", "ACTIVE", "flow video four"),
-                chat("Now on Gemini", "I see it.")]
+                said("Now on Gemini", "I see it.")]
     switch = server.post(f, "/sessions", {"cwd": str(f.cwd), "model": "sol"})["session"]
     server.post(f, f"/sessions/{switch}/input", {"text": "Before the switch."})
     turns(switch, 1)
@@ -183,7 +180,7 @@ with flow(replies, model="sol", config=config, env={"GEMINI_API_KEY": "flow-gemi
 
     # 6. Two different videos at once take two names, and neither start fails.
     replies += [files(url, "p1", "ACTIVE", "flow video p1"), files(url, "p2", "ACTIVE", "flow video p2"),
-                chat("pair one", "Seen one."), chat("pair two", "Seen two.")]
+                said("pair one", "Seen one."), said("pair two", "Seen two.")]
     mute = server.post(f, "/sessions", {"cwd": str(f.cwd), "model": "mute/mute"})["session"]
     sends = [{"text": f"pair {w}", "video": {"file": upload(mute, b"flow video " + v), "duration_ms": 1000}}
              for w, v in (("one", b"p1"), ("two", b"p2"))]

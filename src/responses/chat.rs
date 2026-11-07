@@ -40,8 +40,7 @@ pub(super) async fn read(
         if chunk["usage"].is_object() {
             usage = chunk["usage"].take();
         }
-        let choice = chunk.get_mut("choices").and_then(|c| c.get_mut(0));
-        let choice = choice?;
+        let choice = chunk.get_mut("choices").and_then(|c| c.get_mut(0))?;
         if let Some(reason) = choice["finish_reason"].as_str() {
             finish = Some(reason.to_owned());
         }
@@ -161,8 +160,6 @@ fn complete(
         items: vec![Value::Object(message)],
         usage,
         end_turn: true,
-        turn_state: None,
-        windows: Vec::new(),
-        tier: None,
+        ..Response::default()
     })
 }

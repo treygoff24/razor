@@ -91,11 +91,8 @@ impl Stage {
         let seen = Seen {
             state: row.state,
             activity: row.last_activity,
-            working: if row.state != State::Working {
-                None
-            } else {
-                old.and_then(|s| s.working).or(Some(now))
-            },
+            working: (row.state == State::Working)
+                .then(|| old.and_then(|s| s.working).unwrap_or(now)),
             joined: old
                 .and_then(|s| s.joined)
                 .or_else(|| (self.ready && old.is_none()).then_some(now)),
@@ -286,7 +283,7 @@ fn crew(app: &App) -> Vec<SessionId> {
         .values()
         .filter(|a| app.focus.is_some() && a.parent == app.focus)
         .collect();
-    children.sort_by_key(|a| (a.launched, a.session.clone()));
+    children.sort_by_key(|&a| (a.launched, &a.session));
     app.focus
         .iter()
         .chain(children.iter().map(|a| &a.session))

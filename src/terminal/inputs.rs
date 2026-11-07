@@ -1,7 +1,7 @@
 //! What the person admits to the API: inputs and answers, each saved as the draft first and
 //! posted behind every earlier write, and earlier inputs recalled into the editor.
 use super::api::Api;
-use super::{App, Composer, Error, clipboard, composer, error, fail};
+use super::{App, Composer, Error, composer, error, fail, text::plural};
 use crate::protocol::{Answer, Body, ClientInput, EntryId, Event as ApiEvent, MailId};
 use crate::protocol::{SessionId, State, now};
 use composer::completion;
@@ -20,29 +20,22 @@ pub fn send(app: &mut App) {
     if app.loading_images > 0 {
         return app.say("An image is still loading; wait for its attachment before sending.");
     }
-    let initial = app.initial.as_ref();
-    let (model, effort) = (
-        initial.and_then(|i| i.model.clone()),
-        initial.and_then(|i| i.effort),
-    );
     let Some(id) = app.focus.clone() else {
         return create(app);
     };
     let (text, images) = (app.composer.text.clone(), app.composer.images_for_send());
-    let (skill, text) = match completion::skill(app, &text) {
-        Some((name, words)) => (Some(name), words),
-        None => (None, text),
-    };
-    let from = initial.and_then(|i| i.from.clone());
+    let skill = completion::skill(app, &text);
+    let (skill, text) = skill.map_or((None, text), |(name, words)| (Some(name), words));
+    let i = app.initial.as_ref();
     let input = ClientInput {
         text,
         image_origins: app.composer.image_origins(),
         images,
-        model,
-        effort,
-        speed: initial.and_then(|i| i.speed),
-        handover: initial.and_then(|i| i.handover),
-        from,
+        model: i.and_then(|i| i.model.clone()),
+        effort: i.and_then(|i| i.effort),
+        speed: i.and_then(|i| i.speed),
+        handover: i.and_then(|i| i.handover),
+        from: i.and_then(|i| i.from.clone()),
         skill,
         ..Default::default()
     };
@@ -58,13 +51,10 @@ pub fn send(app: &mut App) {
         format!("v1/sessions/{id}/input"),
         (body, false),
         move |app, admitted| {
-            let missing = "The server's admission answer had no entry id; check the transcript before sending again.";
             let Some(entry) = admitted["entry"].as_u64().map(EntryId) else {
-                let signed_in = admitted["signed_in"] == true;
-                return app.say(if signed_in {
-                    "MCP sign-in completed."
-                } else {
-                    missing
+                return app.say(match admitted["signed_in"] == true {
+                    true => "MCP sign-in completed.",
+                    false => "The server's admission answer had no entry id; check the transcript before sending again.",
                 });
             };
             if working {
@@ -145,12 +135,11 @@ pub fn continue_all(app: &mut App) {
             }
         }
         move |app: &mut App| {
-            let unit = if count == 1 { "session" } else { "sessions" };
-            let mut text = format!("Continued {count} interrupted {unit}.");
-            if !errors.is_empty() {
-                text.push_str(&format!(" {}", errors.join(" ")));
-            }
-            app.say(&text);
+            errors.insert(
+                0,
+                format!("Continued {count} interrupted session{}.", plural(count)),
+            );
+            app.say(&errors.join(" "));
         }
     });
 }
@@ -223,22 +212,24 @@ fn created(app: &mut App, made: Result<SessionId, Error>) {
     match made {
         Ok(id) => {
             (app.root, app.focus, app.request) = (Some(id.clone()), Some(id.clone()), None);
+            app.drafted = app.focus.clone();
             app.list.selected = Some(super::view::Action::Agent(id.clone()));
             app.open(id);
             send(app);
+            merge(app, typed, None);
         }
-        Err(e) => app.say(&e.to_string()),
+        Err(e) => merge(app, typed, Some(e)),
     }
-    merge(app, typed);
 }
 
-// Words typed while an admission was pending go after the editor's, one undo step apart.
-fn merge(app: &mut App, typed: Composer) {
-    if app.composer.text.is_empty() && app.composer.active_images().next().is_none() {
-        app.composer = typed;
-    } else if !typed.text.is_empty() && !app.composer.append(&format!("\n{}", typed.text)) {
-        clipboard::copy(app, Some(typed.text));
-        app.say("The returned and new words exceed 1 MiB together; the new ones were copied.");
+// Words typed during an admission go after the returned ones; `why` they were returned is said,
+// after whether their images gave way to newer ones in the editor.
+fn merge(app: &mut App, typed: Composer, why: Option<Error>) {
+    let returned = std::mem::replace(&mut app.composer, typed);
+    let dropped = app.composer.join(returned);
+    let dropped = ["", "The returned words' images gave way to newer ones. "][usize::from(dropped)];
+    if let Some(why) = why {
+        app.say(&format!("{dropped}{why}"));
     }
     app.edited();
 }
@@ -283,36 +274,45 @@ pub fn admit_answer(app: &mut App, (id, ask): MailId, answer: Answer) {
     );
 }
 
-// Saves the draft and then posts behind every earlier write: the server clears a draft only
-// when it admits the input, so refused or uncertain words survive. The words leave the editor
-// meanwhile; refused, they come back ahead of anything typed since.
+// Saves the draft, or reads it when the composer has not, and then posts behind every earlier
+// write: the server clears a draft only when it admits the input, so refused or uncertain words
+// survive, and a draft read here is saved again after and comes into the composer. The words
+// leave the editor meanwhile; refused, they come back ahead of anything typed since.
 fn admit<F>(app: &mut App, path: String, (body, keep): (Value, bool), then: F)
 where
     F: FnOnce(&mut App, Value) + Send + 'static,
 {
-    let draft = app.focus.clone().map(|id| (id, app.composer.text.clone()));
+    let text = app.drafting().then(|| app.composer.text.clone());
+    let draft = app.focus.clone().map(|id| (id, text));
     let queued = app.write(|api| async move {
-        let saved = match draft {
-            Some((id, text)) => api.draft(&id, Some(text)).await.map(drop),
-            None => Ok(()),
+        let admitted = async {
+            let unread = match draft {
+                Some((id, Some(text))) => api.draft(&id, Some(text)).await.map(|_| None)?,
+                Some((id, None)) => Some((api.draft(&id, None).await?, id)),
+                None => None,
+            };
+            let admitted = api.json(Method::POST, &path, Some(body)).await?;
+            if let Some((draft, id)) = unread.as_ref().filter(|(draft, _)| !draft.is_empty()) {
+                let _ = api.draft(id, Some(draft.clone())).await;
+            }
+            Ok::<_, Error>((admitted, unread))
         };
-        let admitted = match saved {
-            Ok(()) => api.json(Method::POST, &path, Some(body)).await,
-            Err(e) => Err(e),
-        };
+        let admitted = admitted.await;
         move |app: &mut App| {
             let sent = app.sending.take().unwrap_or_default();
             match admitted {
-                Ok(v) => {
+                Ok((v, unread)) => {
                     if !sent.text.is_empty() {
                         super::audio::dismiss_failure(app);
+                    }
+                    if let Some((draft, id)) = unread {
+                        app.take_draft(id, draft);
                     }
                     then(app, v);
                 }
                 Err(e) => {
                     let typed = std::mem::replace(&mut app.composer, sent);
-                    merge(app, typed);
-                    app.say(&e.to_string());
+                    merge(app, typed, Some(e));
                 }
             }
         }

@@ -182,7 +182,7 @@ with tempfile.TemporaryDirectory(prefix="meetrec-bin-") as bin_dir:
         assert not any(e["kind"] == "turn_end" for e in entries)
         server.post(f, f"/sessions/{session}/input", {"text": "What happened?"})
         server.until(f, session, lambda es: any(e["kind"] == "turn_end" for e in es))
-        body = json.loads((f.requests / "001.body").read_text())
+        body = f.request(1)
         view = json.dumps(body)
         assert re.findall(r"line(\d{3})\.", view) == [f"{n:03d}" for n in range(44, 300)]
         assert "44 earlier" in view and "(+0:44), Alice said: line044." in view
@@ -190,7 +190,7 @@ with tempfile.TemporaryDirectory(prefix="meetrec-bin-") as bin_dir:
         server.until(f, session, lambda es: len(lines(es)) == 302)
         server.post(f, f"/sessions/{session}/input", {"text": "And now?"})
         server.until(f, session, lambda es: sum(e["kind"] == "turn_end" for e in es) == 2)
-        view = json.dumps(json.loads((f.requests / "002.body").read_text()))
+        view = json.dumps(f.request(2))
         assert "line301." in view and "line300." not in view and "1 earlier" in view
 
         piece = b"a full wav piece"

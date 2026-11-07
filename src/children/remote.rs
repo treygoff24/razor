@@ -2,13 +2,12 @@
 use super::{Children, Error, TEXT, branch, git, other, parse, refuse};
 use crate::controller::Controller;
 use crate::protocol::{
-    AgentView, Body, Child, ChildRequest, ChildUpdate, Decision, Effort, EntryId, Input, Mail,
-    Origin, SessionId, State,
+    AgentView, Body, Child, ChildEvent, ChildRequest, ChildUpdate, Decision, Effort, EntryId,
+    Input, Mail, Origin, SessionId, Speed, State,
 };
 use crate::record::{ChildSummary, Summary};
 use serde_json::{Value, json};
 use std::path::PathBuf;
-
 use tokio::fs;
 
 impl Children {
@@ -132,21 +131,7 @@ impl Children {
             return refuse("A peer start has no worktree; the target selects its checkout.");
         }
         task_input(&mut input, &child.parent)?;
-        let cwd = fs::canonicalize(cwd)
-            .await
-            .map_err(other("opening the remote child's folder"))?;
-        let found = if in_place {
-            None
-        } else {
-            git::plan(&cwd).await?
-        };
-        let (worktree, cwd) = match found {
-            Some((worktree, inside)) => (
-                Some(worktree),
-                self.dir(&session).join("worktree").join(inside),
-            ),
-            None => (None, cwd),
-        };
+        let (worktree, cwd) = self.place(&session, cwd, !in_place).await?;
         child.worktree = worktree.clone();
         controller
             .create(
@@ -159,12 +144,7 @@ impl Children {
             )
             .await?;
         if let Some(worktree) = &worktree {
-            git::add(
-                worktree,
-                &self.dir(&session).join("worktree"),
-                &branch(&session),
-            )
-            .await?;
+            self.checkout(&session, worktree).await?;
         }
         controller.admit(&session, input).await?;
         Ok(json!({"session":session,"cwd":cwd,"branch":worktree.map(|_|branch(&session))}))
@@ -432,7 +412,7 @@ pub(crate) fn update(
             }
             Body::Child {
                 session: child.clone(),
-                event: crate::protocol::ChildEvent::Continued,
+                event: ChildEvent::Continued,
             }
         }
         ChildUpdate::Report(input) => {
@@ -580,14 +560,9 @@ pub(crate) async fn descendants(
                 .child(server, &ChildRequest::Close { session, retire })
                 .await?;
             if fact.working() {
+                let (session, event) = (fact.session.clone(), ChildEvent::Stopped);
                 controller
-                    .append(
-                        &parent,
-                        Body::Child {
-                            session: fact.session.clone(),
-                            event: crate::protocol::ChildEvent::Stopped,
-                        },
-                    )
+                    .append(&parent, Body::Child { session, event })
                     .await?;
             }
             Ok::<(), Error>(())
@@ -611,8 +586,8 @@ pub(crate) fn child(parent: &SessionId, fact: &ChildSummary) -> AgentView {
         launched: None,
         name: String::new(),
         model: String::new(),
-        effort: crate::protocol::Effort::Medium,
-        speed: crate::protocol::Speed::Standard,
+        effort: Effort::Medium,
+        speed: Speed::Standard,
         state: State::NeedsYou,
         closing: false,
         close_reason: None,

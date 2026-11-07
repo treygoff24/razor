@@ -28,10 +28,8 @@ with tempfile.TemporaryDirectory() as scratch:
         with (f.home / ".razor/config.toml").open("a") as config:
             config.write(f"\n[residents.ember]\ncwd = {json.dumps(str(f.cwd))}\n"
                          f"startup = [{json.dumps(str(f.cwd / 'persona.md'))}, \"razor\"]\n")
-        start = f.run("--print=json", "Start the server.")
-        assert start.returncode == 0, start.stderr
-        result = f.run("--resume", "ember", "--print=json", "Ask me about the review.")
-        assert result.returncode == 0, result.stderr
+        f.ask("Start the server.")
+        f.ask("--resume", "ember", "Ask me about the review.")
         entries = until(f, "ember", lambda es: sum(e["kind"] == "turn_end" for e in es) >= 2)
         first = [e for e in entries if e["kind"] == "call"][0]
         answers = [e for e in entries if e["kind"] == "input" and answered(e)]

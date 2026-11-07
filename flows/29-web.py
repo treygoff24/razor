@@ -14,8 +14,9 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import chat
 from driver import REPLIES, Reply, flow
-from model import reply
+from model import reply, tool
 from standin import serve
 from responses import PLAIN, done
 
@@ -96,8 +97,8 @@ for provider, verb in cases:
     with TemporaryDirectory(prefix="razor-web-") as scratch:
         requests = Path(scratch)
         with serve([Reply(json.dumps(b).encode()) for b in bodies], requests) as url:
-            replies = [reply(None, f"mcp__razor__{verb}", arguments), reply(None),
-                       reply(None, f"mcp__razor__{verb}", arguments), reply(None)]
+            replies = [tool(None, verb, **arguments), reply(None),
+                       tool(None, verb, **arguments), reply(None)]
             with flow(replies, config=config(url, verb, [provider, fallback]), env=KEYS) as f:
                 session, first, _ = invoke(f, verb)
                 _, second, _ = invoke(f, verb, session)
@@ -111,7 +112,7 @@ for provider, verb in cases:
                     if verb == "search":
                         assert all(URL + str(i) in output["output"] for i in range(10)), output
                         assert output["path"] is None and len(output["output"]) < 30_000, output
-                offered = json.loads((f.requests / "001.body").read_bytes())["tools"]
+                offered = f.request(1)["tools"]
                 names = {t["name"] for t in offered}
                 # Claude Code's own web tools are always there, beside a configured verb.
                 assert f"mcp__razor__{verb}" in names and {"WebSearch", "WebFetch"} <= names, names
@@ -145,7 +146,7 @@ for verb, providers, bodies, fields, expected, error in extras:
         encoded = [Reply(b if isinstance(b, bytes) else json.dumps(b).encode()) for b in bodies]
         with serve(encoded, Path(scratch)) as url:
             arguments = {**({"url": URL} if verb == "fetch" else {"query": "web evidence"}), **fields}
-            with flow([reply(None, f"mcp__razor__{verb}", arguments), reply(None)],
+            with flow([tool(None, verb, **arguments), reply(None)],
                       config=config(url, verb, providers), env=KEYS) as f:
                 session, result, entries = invoke(f, verb)
                 assert result["error"] == error, result
@@ -163,35 +164,30 @@ for verb, providers, bodies, fields, expected, error in extras:
 
 # A configured provider without a key still leaves the vendor's own names.
 with flow([reply(None)], config='[web]\nsearch = ["exa"]\nfetch = ["firecrawl"]\n') as f:
-    result = f.run("--print=json", "Check web declarations.")
-    assert result.returncode == 0, result.stderr
-    names = {t["name"] for t in json.loads((f.requests / "001.body").read_bytes())["tools"]}
+    f.ask("Check web declarations.")
+    names = {t["name"] for t in f.request(1)["tools"]}
     assert {"WebSearch", "WebFetch"} <= names, names
     assert not {"mcp__razor__search", "mcp__razor__fetch", "mcp__razor__answer"} & names, names
 
 # GPT's hosted search is always there; the search verb keys on the action.
 for web, custom in [('[web]\nsearch = []\n', False), ('[web]\nsearch = ["exa"]\n', True)]:
     with flow([done()], model="gpt-6.1-sol", config=PLAIN + web, env=KEYS) as f:
-        result = f.run("--print=json", "Check search declarations.")
-        assert result.returncode == 0, result.stderr
-        tools = json.loads((f.requests / "001.body").read_bytes())["tools"]
+        f.ask("Check search declarations.")
+        tools = f.request(1)["tools"]
         assert any(t.get("name") == "search" for t in tools) == custom, tools
         assert any(t["type"] == "web_search" for t in tools), tools
 
 # A verb becoming available changes the recorded version and rebuilds at admission.
 with flow([reply(None), reply(None)], config='[profiles.claude]\ncode_mode = true\n[web]\nsearch = ["exa"]\nfetch = []\nanswer = []\n', env=KEYS) as f:
-    first = f.run("--print=json", "First declaration set.")
-    assert first.returncode == 0, first.stderr
-    session = json.loads(first.stdout)["session"]
+    session = f.ask("First declaration set.")["session"]
     path = f.home / ".razor/config.toml"
     path.write_text(path.read_text().replace('fetch = []', 'fetch = ["firecrawl"]'))
-    second = f.run("--print=json", "--resume", session, "Second declaration set.")
-    assert second.returncode == 0, second.stderr
+    f.ask("--resume", session, "Second declaration set.")
     entries = list(f.record(session))
     versions = [e["profile_version"] for e in entries if e["kind"] in ("start", "rebuild")]
     assert len(versions) == 2 and versions[0].endswith("-web-100") and versions[1].endswith("-web-110"), versions
-    names = {t["name"] for t in json.loads((f.requests / "002.body").read_bytes())["tools"]}
-    assert "WebFetch" in names and "### `fetch`" in json.dumps(json.loads((f.requests / "002.body").read_bytes())["tools"]), names
+    names = {t["name"] for t in f.request(2)["tools"]}
+    assert "WebFetch" in names and "### `fetch`" in json.dumps(f.request(2)["tools"]), names
 
 # Detached startup must also fail the printing client and leave the reason in the server log.
 with flow([], config='[web]\nsearch = ["exa", "exa"]') as f:
@@ -216,13 +212,9 @@ from responses import call, response
 for model, mode in (("opus", ""), ("sol", PLAIN), ("sol", ""), ("gemini-3.8-flash", "chat")):
     if mode == "chat":
         mode = '[providers.google]\nbase_url="{standin}"\n'
-        def chat(delta, finish):
-            frames = [{"choices": [{"index": 0, "delta": delta}]},
-                      {"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]}]
-            return Reply(("".join(f"data: {json.dumps(e)}\n\n" for e in frames) + "data: [DONE]\n\n").encode())
-        end = chat({"role": "assistant", "content": "Done."}, "stop")
-        removed = chat({"tool_calls": [{"index": 0, "id": "removed", "type": "function",
-                        "function": {"name": "fetch", "arguments": '{"url":"https://example.com"}'}}]}, "tool_calls")
+        end = chat.reply({"role": "assistant", "content": "Done."})
+        removed = chat.reply({"tool_calls": [{"index": 0, "id": "removed", "type": "function", "function": {
+            "name": "fetch", "arguments": '{"url":"https://example.com"}'}}]}, finish="tool_calls")
     elif model == "opus":
         end, removed = claude_reply(text="Done."), claude_reply(("removed", "mcp__razor__fetch", {"url": URL}))
     else:
@@ -231,16 +223,14 @@ for model, mode in (("opus", ""), ("sol", PLAIN), ("sol", ""), ("gemini-3.8-flas
                    response([{"type": "custom_tool_call", "id": "ct_removed", "call_id": "removed", "name": "exec",
                               "input": f"text(await tools.fetch({{url: {json.dumps(URL)}}}));"}]))
     with flow([end, end, removed, end], model=model, config=mode + '\n[web]\nfetch=[]\n', env={**KEYS, "GEMINI_API_KEY": "flow-gemini-key"}) as f:
-        first = f.run("--print=json", "Remember this conversation.")
-        assert first.returncode == 0, first.stderr
-        session = json.loads(first.stdout)["session"]
+        session = f.ask("Remember this conversation.")["session"]
         path = f.home / ".razor/config.toml"
         path.write_text(path.read_text().replace('fetch=[]', 'fetch=["exa"]'))
-        assert (added := f.run("--print=json", "--resume", session, "Fetch is available.")).returncode == 0, added.stderr
-        tools = json.dumps(json.loads((f.requests / "002.body").read_bytes()))
+        f.ask("--resume", session, "Fetch is available.")
+        tools = json.dumps(f.request(2))
         assert '"name": "fetch"' in tools or "mcp__razor__fetch" in tools or "### `fetch`" in tools, tools
         path.write_text(path.read_text().replace('fetch=["exa"]', 'fetch=[]'))
-        assert (last := f.run("--print=json", "--resume", session, "Fetch is removed.")).returncode == 0, last.stderr
+        f.ask("--resume", session, "Fetch is removed.")
         entries = list(f.record(session))
         assert not any(e["kind"] == "rebuild" for e in entries), entries
         result = next(e for e in entries if e["kind"] == "result" and e["call"] == "removed")

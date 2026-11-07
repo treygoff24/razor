@@ -5,6 +5,12 @@ use super::*;
 
 /// `/done`'s input, which the model reads (RULES.md 16).
 const DONE: &str = include_str!("done.md");
+/// The sentence on the state note in `/done` and the idle handover: the session writes it, or,
+/// in a resident's folder, tells the home session `{owner}` that keeps it.
+const DONE_STATE: &str = include_str!("done-state.md");
+const DONE_HOME: &str = include_str!("done-home.md");
+const IDLE_STATE: &str = include_str!("idle-state.md");
+const IDLE_HOME: &str = include_str!("idle-home.md");
 
 impl Session {
     /// Records an input and starts a turn on it when the session waits for one; news goes to a
@@ -27,8 +33,8 @@ impl Session {
         {
             return invalid("The child finished or moved past this task; its report reaches you.");
         }
-        // A closed session that is no child reopens for the person and their commands, and for
-        // its resident's schedules and heartbeats; mail and programs are told so (Trey, 2026-11-01).
+        // A closed session that is no child reopens for the person and their commands, and for its
+        // resident's schedules and heartbeats; mail and programs are told so (Trey, 2026-11-01).
         let others = matches!(input.from, Origin::Program { .. } | Origin::Mail { .. });
         let closed = self.blocked && self.record.summary().child.is_none();
         if closed && (others || matches!(input.from, Origin::Report { .. })) {
@@ -37,7 +43,7 @@ impl Session {
         if self.full() {
             return Err(Error::Full(self.id.clone()));
         }
-        // A call's hand-off answers the agent's own newest open ask; a server's question stays open.
+        // A call's hand-off answers the agent's newest open ask; a server's question stays open.
         for ask in self.record.summary().questions.iter().rev() {
             if input.voice_call.is_some()
                 && let Body::Call { .. } = self.record.entry(ask.id.1).await?.body
@@ -149,12 +155,9 @@ impl Session {
             .state_owner(&self.c, &self.record.summary().cwd, &self.id)
             .await
             .map_err(|e| Error::Invalid(e.to_string()))?;
-        let state = if let Some(owner) = owner {
-            format!(
-                "Send the home session `{owner}` one `message` note of what it should keep from this session, and write your facts and notes; the home session holds the folder's one state note."
-            )
-        } else {
-            "Then write the project's state note with `memory` (`write`, kind `state`): a few lines on the work in hand and the decisions behind it, not a summary of the past; it replaces the project's last state note and opens the next session's startup page.".into()
+        let state = match owner {
+            Some(owner) => DONE_HOME.replace("{owner}", owner.as_str()),
+            None => DONE_STATE.into(),
         };
         let entry = self
             .admit(Command::Done.input(DONE.replace("{state}", &state)))
@@ -199,10 +202,8 @@ impl Session {
                     None
                 });
             let state = match owner {
-                Some(owner) => format!(
-                    "Send the home session `{owner}` one note of changes it should keep for the state note."
-                ),
-                None => "Update the project state note if it changed.".into(),
+                Some(owner) => IDLE_HOME.replace("{owner}", owner.as_str()),
+                None => IDLE_STATE.into(),
             };
             text = text.replace("{state}", &state);
         }

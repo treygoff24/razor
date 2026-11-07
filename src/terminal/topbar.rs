@@ -41,12 +41,8 @@ pub fn draw(app: &App, b: &mut Buffer, r: Rect, agent: Option<&AgentView>, gauge
         words => (words, MAGENTA),
     };
     let headline = clip(headline, room as usize);
-    value(
-        b,
-        Rect::new(x, r.y + 1, room, 1),
-        &[(&headline, ink, true)],
-        lit(app, 1, now),
-    );
+    let row = Rect::new(x, r.y + 1, room, 1);
+    value(b, row, &[(&headline, ink, true)], lit(app, 1, now));
     identity(app, b, Rect::new(x, r.y + 2, room, 1), agent, now);
 }
 

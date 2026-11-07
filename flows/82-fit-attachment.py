@@ -4,24 +4,19 @@ import hashlib
 import json
 import struct
 import time
-import zlib
 
 from driver import flow
 from mcp import PNG
+from png import png
 from responses import PLAIN, call, message, response
 import server
 from terminal import Terminal
 
 
-def chunk(kind, data):
-    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
-
-
 side = 2048
 noise = hashlib.shake_256(b"fit-attachment").digest(side * side * 3)
 rows = b"".join(b"\0" + noise[y * side * 3:(y + 1) * side * 3] for y in range(side))
-original = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", side, side, 8, 2, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(rows, 1)) + chunk(b"IEND", b""))
+original = png(side, side, rows)
 assert len(original) > 10_000_000
 with flow([response([message("FIT_READY_82")]), response([message("PHOTO_READY_82")]), response([message("POINTER_READY_82")]), response([message("JPEG_READY_82")]), response([message("FALLBACK_READY_82")])], model="sol", config=PLAIN) as f:
     image = f.cwd / "large.png"
@@ -45,8 +40,7 @@ with flow([response([message("FIT_READY_82")]), response([message("PHOTO_READY_8
         photo_noise = hashlib.shake_256(b"twelve-megapixels").digest(width * height * 3).translate(
             bytes(n & 31 for n in range(256)))
         photo_rows = b"".join(b"\0" + photo_noise[y * width * 3:(y + 1) * width * 3] for y in range(height))
-        photo = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-                 + chunk(b"IDAT", zlib.compress(photo_rows, 1)) + chunk(b"IEND", b""))
+        photo = png(width, height, photo_rows)
         assert 7_500_000 < len(photo) < 32 << 20
         photo_path = f.cwd / "photo.png"
         photo_path.write_bytes(photo)
@@ -87,8 +81,7 @@ with flow([response([message("FIT_READY_82")]), response([message("PHOTO_READY_8
         t.send("\r")
         t.shown("FALLBACK_READY_82", timeout=90)
     assert image.read_bytes() == original, "original changed"
-    requests = sorted(f.requests.glob("[0-9]*.body"))
-    request = json.loads(requests[0].read_bytes())
+    request = f.request(1)
     images = [part["image_url"] for item in request["input"] for part in item.get("content", [])
               if part.get("type") == "input_image"]
     assert len(images) == 1, "model did not receive the fitted image"
@@ -96,16 +89,16 @@ with flow([response([message("FIT_READY_82")]), response([message("PHOTO_READY_8
     fitted = base64.b64decode(encoded, validate=True)
     assert len(encoded) <= 10_000_000 and fitted != original, "image was not fitted"
 
-    photo_request = json.loads(requests[1].read_bytes())
+    photo_request = f.request(2)
     photo_images = [part["image_url"] for item in photo_request["input"] for part in item.get("content", [])
                     if part.get("type") == "input_image"]
     assert len(photo_images) == 2 and len(photo_images[-1].split(",", 1)[1]) <= 10_000_000, "12 MP photo was not fitted"
-    pointer_request = json.loads(requests[2].read_bytes())
+    pointer_request = f.request(3)
     parts = [part for item in pointer_request["input"] for part in item.get("content", [])]
     assert any("pointer only" in part.get("text", "") and str(too_large) in part["text"] for part in parts), parts
     assert sum(part.get("type") == "input_image" for part in parts) == 2, "pointer became an image"
 
-    jpeg_request = json.loads(requests[3].read_bytes())
+    jpeg_request = f.request(4)
     parts = [part for item in jpeg_request["input"] for part in item.get("content", [])]
     jpeg_images = [part["image_url"] for part in parts if part.get("type") == "input_image"]
     assert len(jpeg_images) == 3, "12 MP baseline JPEG did not reach the model as an image"
@@ -113,7 +106,7 @@ with flow([response([message("FIT_READY_82")]), response([message("PHOTO_READY_8
     assert base64.b64decode(jpeg_images[-1].split(",", 1)[1]) != jpeg, "baseline JPEG was not fitted"
     assert any(str(jpeg_path) in part.get("text", "") for part in parts), "JPEG origin path changed"
 
-    fallback_request = json.loads(requests[4].read_bytes())
+    fallback_request = f.request(5)
     parts = [part for item in fallback_request["input"] for part in item.get("content", [])]
     image_urls = [part["image_url"] for part in parts if part.get("type") == "input_image"]
     assert base64.b64decode(image_urls[-1].split(",", 1)[1]) == fallback, "original fallback was not sent"
@@ -125,11 +118,11 @@ with flow([response([call("handover", json.dumps({"note": "Continue inspecting t
     server.start(f)
     session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
     origin = {"number": 1, "path": "/sending-device/original82.png", "device": "phone82", "copy": "scaled"}
-    server.post(f, f"/sessions/{session}/input", {"text": "Inspect this picture.", "images": [PNG], "image_origins": [origin]})
-    entries = server.until(f, session, lambda es: es[-1]["kind"] == "turn_end")
+    asked = server.post(f, f"/sessions/{session}/input", {"text": "Inspect this picture.", "images": [PNG], "image_origins": [origin]})["entry"]
+    entries = server.until(f, session, lambda es: any(e["kind"] == "turn_end" and asked in e["inputs"] for e in es))
     person = next(e for e in entries if e["kind"] == "input" and e["from"] == "person")
     assert person["text"] == "Inspect this picture." and person["image_origins"] == [origin], person
     assert any(e["kind"] == "rebuild" for e in entries), entries
     for index in (1, 2):
-        sent = json.loads((f.requests / f"{index:03}.body").read_bytes())
+        sent = f.request(index)
         assert origin["path"] in json.dumps(sent["input"]), f"image origin missing in request {index}"

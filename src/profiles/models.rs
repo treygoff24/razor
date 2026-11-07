@@ -150,19 +150,24 @@ pub(crate) fn validate(
     Ok(())
 }
 
-/// Resolves Razor's limits from live settings, then the catalog, then the SDK's report;
-/// a configured Claude window never changes what its SDK sends.
+/// Resolves Razor's limits from live settings, else the catalog's or the SDK's window at most
+/// `LARGE`'s, handed over at 0.8 or, at that size, `LARGE`'s share; a configured Claude window
+/// never changes what its SDK sends.
 pub(crate) fn limits(name: &str, config: &Config, reported: Option<u64>) -> (Option<u64>, f64) {
     let row = config.models.get(name);
-    let window = row
-        .and_then(|r| r.window)
-        .or_else(|| route(name, config).ok()?.window)
-        .or(reported.filter(|w| *w > 0));
-    let threshold = row
-        .and_then(|r| r.threshold)
-        .unwrap_or(config.rebuild.threshold);
-    (window, threshold)
+    let window = row.and_then(|r| r.window).or_else(|| {
+        let shipped = route(name, config).ok().and_then(|m| m.window);
+        Some(shipped.or(reported.filter(|w| *w > 0))?.min(LARGE.0))
+    });
+    let share = [0.8, LARGE.1][usize::from(window >= Some(LARGE.0))];
+    let threshold = row.and_then(|r| r.threshold).or(config.rebuild.threshold);
+    (window, threshold.unwrap_or(share))
 }
+
+/// The most context Razor fills on a model without a configured window, and the share of it
+/// handed over at unless a threshold is set. Trey, 6 Nov 2026: "500k context window for all
+/// models that support it that high, auto handover/compaction around 425 or 450".
+pub(crate) const LARGE: (u64, f64) = (500_000, 0.9);
 
 /// GPT's shipped context windows, by id.
 fn window(id: &str) -> Option<u64> {

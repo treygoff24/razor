@@ -8,15 +8,11 @@ from driver import REPLIES, Reply, flow
 replies = [Reply((REPLIES / f"{name}.sse").read_bytes())
            for name in ("hello", "resumed", "continued", "stream")]
 with flow(replies) as f:
-    first = f.run("--print=json", "First ask.")
-    assert first.returncode == 0, first.stderr
-    session = json.loads(first.stdout)["session"]
+    session = f.ask("First ask.")["session"]
     os.kill(server.start(f), signal.SIGTERM)
     server.gone(json.loads((f.home / ".razor/server.json").read_text())["pid"])
     before = list(f.record(session))
-    resumed = f.run("--resume", session, "--print=json", "Second ask.")
-    assert resumed.returncode == 0, resumed.stderr
-    assert json.loads(resumed.stdout) == {"session": session, "message": "resumed reply"}
+    assert f.ask("--resume", session, "Second ask.") == {"session": session, "message": "resumed reply"}
     assert list(f.record(session))[:len(before)] == before, "resume rewrote the record"
     continued = f.run("--continue", "--print=text", input="Third ask.")
     assert continued.returncode == 0, continued.stderr
@@ -33,5 +29,5 @@ with flow(replies) as f:
     assert [e["text"] for e in entries if e["kind"] == "input"] == [
         "First ask.", "Second ask.", "Third ask.", "Fourth ask."]
     assert len([e for e in entries if e["kind"] == "start"]) == 1, entries
-    requests = [json.loads((f.requests / f"{i:03}.body").read_bytes()) for i in range(1, 5)]
+    requests = [f.request(i) for i in range(1, 5)]
     assert all("First ask." in json.dumps(request["messages"]) for request in requests), requests

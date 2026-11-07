@@ -75,8 +75,8 @@ sys.stdout.buffer.write(Path(os.environ["VOICE_MP3"]).read_bytes())
 spoken = "[excited] The check passed. You can open the result."
 replies = []
 for marker,text,requested in (("VOICE51",spoken,False),("OFF51","off",True),("DESK51","desk",False),
-                              ("ASKED51","asked",True),("QUIET51","quiet",True),("MEMO51","x"*301,False),
-                              ("LONG51","m"*301,False),("FAIL51","FAIL51",False))+(
+                              ("ASKED51","asked",True),("QUIET51","quiet",True),
+                              ("LONG51","m"*70000,False),("FAIL51","FAIL51",False))+(
                               ("HEAR54","The terminal can hear this note.",False),
                               ("SILENT54","Quiet note.",False),("PHONE54","Phone note.",False),
                               ("OTHER54","Another session's note.",False),("SSH54","SSH note.",False),("SWITCH54","One terminal speaks.",False))+(("MAC54","Mac login input.",False),)*(sys.platform == "darwin"):
@@ -202,10 +202,8 @@ clear = []
         api(home,"PUT","/voice/activity",{"terminal":"sample51","active":False})
         settings.update(when="always",quiet=None)
         api(home,"PUT","/voice",settings)
-        assert turn("MEMO51")[1]["outcome"] == "error"
-        settings["memos"] = True
-        api(home,"PUT","/voice",settings)
-        assert turn("LONG51")[1]["outcome"] == "success"
+        call,result = turn("LONG51")  # No length limit; its words' sidecar is past 64 KiB yet still read.
+        assert result["outcome"] == "success" and api(home,"GET","/deliveries?local=true")[0]["voice"]["duration_ms"] == 300
         used = api(home,"GET","/voice")["used_today"]
         assert turn("FAIL51")[1]["outcome"] == "error"
         assert api(home,"GET","/voice")["used_today"] == used+6
@@ -329,7 +327,6 @@ clear = []
         config_path = other/"config.toml"
         config_path.write_text(config_path.read_text().replace('[server]\n',f'[server]\nshared = "{owner_id}"\n'))
         try:
-            api(other,"GET","/voice",expected=400)
             settings.update(daily_characters=used+7+20)
             api(home,"PUT","/voice",settings)
             answers = []
@@ -339,6 +336,10 @@ clear = []
             # Status names the keeper of shared settings: the owner, never the home naming it.
             assert wait(lambda: owner_id in (seen := servers()) and seen) == {
                 owner_id:True,(other/"server.id").read_text().strip():False}
+            # The other server reads the owner's settings and refuses a change, naming the owner.
+            read = beta.run("config","get","voice.daily_characters")
+            assert read.stdout.strip() == f"voice.daily_characters: {used+27}",(read.stdout,read.stderr)
+            assert "kept on a," in api(other,"PUT","/voice",{"when":"never"},expected=400)["error"]
             remote = api(other,"POST","/sessions",{"cwd":str(f.cwd)})["session"]
             api(home,"PUT","/voice/activity",{"terminal":"owner-terminal","active":True})
             api(other,"PUT","/voice/activity",{"terminal":"paired-terminal","active":True})

@@ -24,8 +24,8 @@ for p in sorted(packages, key=lambda p: (p['name'], p['version'])):
         text = file.read_text(encoding='utf-8', errors='replace').strip()
         notices.setdefault(text, set()).add(name)
 for url, name in [('vercel-labs/agent-browser/v0.41.2/LICENSE', 'agent-browser 0.41.2 (Apache-2.0)'),
-                  ('trycua/cua/cua-driver-rs-v0.40.6/LICENSE.md', 'Cua Driver 0.40.6 (MIT)'),
-                  ('trycua/cua/cua-driver-rs-v0.40.6/libs/cua-driver/rust/THIRD_PARTY_NOTICES.md', 'Cua Driver 0.40.6, its third-party notices'),
+                  ('trycua/cua/cua-driver-rs-v0.41.3/LICENSE.md', 'Cua Driver 0.41.3 (MIT)'),
+                  ('trycua/cua/cua-driver-rs-v0.41.3/libs/cua-driver/rust/THIRD_PARTY_NOTICES.md', 'Cua Driver 0.41.3, its third-party notices'),
                   ('BurntSushi/ripgrep/15.2.0/LICENSE-MIT', 'ripgrep 15.2.0 (MIT or Unlicense)'),
                   ('PCRE2Project/pcre2/pcre2-10.45/LICENCE.md', 'PCRE2 10.45, built into ripgrep 15.2.0 (BSD-3-Clause)'),
                   ('jemalloc/jemalloc/81034ce1f1373e37dc865038e1bc8eeecf559ce8/COPYING', 'jemalloc 5.3.1, built into ripgrep 15.2.0 on Linux (BSD-2-Clause)'),

@@ -67,12 +67,15 @@ def listed(where, session):
 
 
 def until(f, session, done, timeout=30.0):
-    """The record, once `done(entries)` holds; fails with the record's tail at the deadline."""
-    deadline = time.monotonic() + timeout
-    while not done(entries := list(f.record(session))):
+    """The record, once `done(entries)` holds, waiting for one the server has not yet made;
+    fails with the record's tail at the deadline."""
+    deadline, entries = time.monotonic() + timeout, []
+    while True:
+        with suppress(FileNotFoundError):
+            if done(entries := list(f.record(session))):
+                return entries
         assert time.monotonic() < deadline, f"timed out; record ends {entries[-3:]}"
         time.sleep(0.05)
-    return entries
 
 
 def wait(condition, timeout=30.0, why="timed out"):

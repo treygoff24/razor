@@ -14,10 +14,14 @@ pub fn run(app: &mut App) {
     let (word, args) = text.split_once(' ').unwrap_or((&text, ""));
     completion::ran(app, word);
     let args = args.trim();
+    // The list's and the panel's commands are no session's draft: they leave it before they run,
+    // and words a new agent's composer brings back stay.
+    let typed = std::mem::take(&mut app.composer);
     if agents::command(app, word, args) || panel::command(app, word) {
-        clear(app);
+        app.edited();
         return;
     }
+    app.composer = typed;
     match word {
         "/name" if args.is_empty() => app.say("Use /name <new name> to rename this session."),
         "/name" => rename(app, args.to_owned()),
@@ -27,39 +31,8 @@ pub fn run(app: &mut App) {
         }
         "/record" => audio::record(clear(app)),
         "/listen" => audio::listen(clear(app)),
-        "/model" | "/effort" if args.is_empty() => {
-            clear(app);
-            picker::open(app, false);
-        }
-        // A last word that is an effort level is the effort: `/model opus high`.
-        "/model" => {
-            let effort = args
-                .rsplit_once(' ')
-                .map(|(m, e)| (m, serde_json::from_value(json!(e))));
-            let (model, level) = match effort {
-                Some((model, Ok(level))) => (model.trim(), Some(level)),
-                _ => (args, None),
-            };
-            picker::stage(app, Some(model.into()), level, None, None);
-            clear(app);
-        }
-        "/effort" => match serde_json::from_value(json!(args)) {
-            Ok(level) => {
-                picker::stage(app, None, Some(level), None, None);
-                clear(app);
-            }
-            Err(_) => app.say("That effort is not known; choose low, medium, high, xhigh or max."),
-        },
-        "/resume" => {
-            let shown = |id| app.root.as_ref() == Some(id) || app.focus.as_ref() == Some(id);
-            let others = (app.agents.values()).any(|a| a.parent.is_none() && !shown(&a.session));
-            clear(app);
-            match others {
-                true if app.list.open => {}
-                true => super::agents::toggle(app),
-                false => app.say("There is no other session to open."),
-            }
-        }
+        "/model" | "/effort" => model(app, word, args),
+        "/resume" => resume(app),
         "/goto" => super::goto::open(clear(app)),
         "/skill" => app.say("That skill is not in this session's list; /help lists commands."),
         "/detach" | "/background" | "/exit" => {
@@ -74,19 +47,7 @@ pub fn run(app: &mut App) {
             app.composer = Composer::default();
             focus(app, None);
         }
-        "/attach" | "/to" => {
-            let found = app
-                .agents
-                .iter()
-                .find(|(id, a)| id.as_str() == args || a.name == args);
-            match found.map(|(id, _)| id.clone()) {
-                Some(id) => {
-                    app.composer = Composer::default();
-                    focus(app, Some(id));
-                }
-                None => app.say("No such agent is in the status view; use its session id or name."),
-            }
-        }
+        "/attach" | "/to" => attach(app, args),
         "/answer" if args.is_empty() => app.say("/answer <words>"),
         "/answer" => inputs::answer(app, Answer::Text(args.into())),
         "/copy" => clipboard::command(app, args),
@@ -131,6 +92,62 @@ fn clear(app: &mut App) -> &mut App {
     app
 }
 
+fn model(app: &mut App, word: &str, args: &str) {
+    if args.is_empty() {
+        clear(app);
+        return picker::open(app, false);
+    }
+    let (model, level) = match word {
+        "/model" => {
+            // A last word that is an effort level is the effort: `/model opus high`.
+            let effort = args
+                .rsplit_once(' ')
+                .map(|(m, e)| (m, serde_json::from_value(json!(e))));
+            match effort {
+                Some((model, Ok(level))) => (Some(model.trim().into()), Some(level)),
+                _ => (Some(args.into()), None),
+            }
+        }
+        _ => match serde_json::from_value(json!(args)) {
+            Ok(level) => (None, Some(level)),
+            Err(_) => {
+                return app
+                    .say("That effort is not known; choose low, medium, high, xhigh or max.");
+            }
+        },
+    };
+    picker::stage(app, model, level, None, None);
+    clear(app);
+}
+
+fn resume(app: &mut App) {
+    let shown = |id| app.root.as_ref() == Some(id) || app.focus.as_ref() == Some(id);
+    let others = app
+        .agents
+        .values()
+        .any(|a| a.parent.is_none() && !shown(&a.session));
+    clear(app);
+    match others {
+        true if app.list.open => {}
+        true => agents::toggle(app),
+        false => app.say("There is no other session to open."),
+    }
+}
+
+fn attach(app: &mut App, name: &str) {
+    let found = app
+        .agents
+        .iter()
+        .find(|(id, a)| id.as_str() == name || a.name == name);
+    match found.map(|(id, _)| id.clone()) {
+        Some(id) => {
+            app.composer = Composer::default();
+            focus(app, Some(id));
+        }
+        None => app.say("No such agent is in the status view; use its session id or name."),
+    }
+}
+
 // `/name`: the addressed session takes `name` now.
 fn rename(app: &mut App, name: String) {
     let Some(id) = app.focus.clone() else {
@@ -146,7 +163,7 @@ fn rename(app: &mut App, name: String) {
 
 // `/done` and `/quit` (`route`), and a quit key set to end: the addressed session ends, after a last turn that runs on in
 // the server or at once. Once the server takes it, unless the person has moved on, the draft
-// clears; once its row reads it closed, `ended` leaves the app or goes back to the root.
+// clears; once its row reads it closed, `ended` moves a person still on it.
 pub(super) fn done(app: &mut App, route: &'static str) {
     let Some(id) = app.focus.clone() else {
         return app.say("No session has started yet, so there is nothing to close out.");
@@ -168,7 +185,9 @@ pub(super) fn done(app: &mut App, route: &'static str) {
                 if app.focus.as_ref() == Some(&id) {
                     app.composer = Composer::default();
                 }
-                app.closing = Some(id);
+                let row = Action::Agent(id.clone());
+                let at = app.list.rows.iter().position(|a| *a == row);
+                app.closing = Some((id, at.unwrap_or(0)));
                 ended(app);
             }
             Err(e) => app.say(&e.to_string()),
@@ -176,28 +195,39 @@ pub(super) fn done(app: &mut App, route: &'static str) {
     });
 }
 
-/// Once the session `/done` or `/quit` closed reads closed, the agents list addresses its next
-/// open row (Trey, 2026-11-02); otherwise the app leaves, or a split goes back to the root.
+/// Once the session `/done` or `/quit` closed reads closed, a helper's parent is addressed, and
+/// the agents list addresses its next open top-level row (Trey, 2026-11-02), never another tree's
+/// helper, or keeps the closed session with none; otherwise the app leaves, or a split goes back
+/// to the root. A person who moved on while its last turn ran stays where they are (Trey,
+/// 2026-11-06: "It just switched me to a different agent, and I didn't want to").
 pub fn ended(app: &mut App) {
     let closed = |id: &SessionId| app.agents.get(id).is_some_and(|a| a.state == State::Done);
-    let Some(id) = app.closing.take_if(|id| closed(id)) else {
+    let shown = |id: &SessionId| app.focus.as_ref() == Some(id);
+    let closing = app.closing.take_if(|(id, _)| closed(id));
+    let Some((id, at)) = closing.filter(|(id, _)| shown(id)) else {
         return;
     };
+    let top = |n: &SessionId| app.agents.get(n).is_some_and(|a| a.parent.is_none()) && !closed(n);
     let rows = &app.list.rows;
-    let at = (rows.iter().position(|a| a == &Action::Agent(id.clone()))).unwrap_or(0);
+    let at = (rows.iter().position(|a| a == &Action::Agent(id.clone()))).unwrap_or(at);
+    let at = at.min(rows.len());
     let next = (rows[at..].iter().chain(rows[..at].iter().rev())).find_map(|a| match a {
-        Action::Agent(n) if app.list.open && !closed(n) => Some(n.clone()),
+        Action::Agent(n) if app.list.open && top(n) => Some(n.clone()),
         _ => None,
     });
-    match next {
+    let parent = app.agents.get(&id).and_then(|a| a.parent.clone());
+    match parent.or(next) {
         Some(next) => {
             app.list.selected = Some(Action::Agent(next.clone()));
             focus(app, Some(next.clone()));
-            if app.focus.as_ref() == Some(&next) && app.root.as_ref() == Some(&id) {
-                app.streams.remove(&id).iter().for_each(|task| task.abort());
-                app.root = Some(next);
-            }
+            app.after(move |app| {
+                if app.focus.as_ref() == Some(&next) && app.root.as_ref() == Some(&id) {
+                    app.streams.remove(&id).iter().for_each(|task| task.abort());
+                    app.root = Some(next);
+                }
+            });
         }
+        None if app.list.open => {}
         None if app.root.as_ref() == Some(&id) => app.leaving = true,
         None => focus(app, app.root.clone()),
     }

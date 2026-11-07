@@ -78,6 +78,7 @@ impl Session {
                 end: End::Done,
                 usage: Usage::default(),
                 context: self.context,
+                model: None,
                 window,
                 threshold: Some(threshold),
                 closed: true,

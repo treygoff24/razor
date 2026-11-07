@@ -97,11 +97,11 @@ with flow([reply(root, 'Bash', {'command': f'while ! test -f {release}; do sleep
         t.click('EARLIER')
         t.shown('other')
         t.click('other')
-        t.shown('WAIT BEFORE CHANGING THE ADDRESSED SESSION')
+        t.shown('WAIT TO CHANGE THE ADDRESSED SESSION')
         t.send('\r')
         t.shown('queued', 'voice note', 'ordinary-voice-input')
         t.send('\x1bOQ')
-        t.until(lambda t: '\n  ↳ queued' in t.text())  # at rest: the sliding list clips its words
+        t.until(lambda t: '│ ↳ queued' in t.text())  # at rest, beside the context tape: the sliding list moves it
         t.click('▶ voice note')
         t.until(lambda _: played.exists())
         pid = int(played.read_text().splitlines()[-1])

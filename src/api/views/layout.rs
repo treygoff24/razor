@@ -49,6 +49,7 @@ fn fill(
     order: (Sort, &[SessionId]),
     children: &BTreeMap<&SessionId, Vec<&AgentView>>,
     live: &BTreeSet<SessionId>,
+    alone: &BTreeSet<&SessionId>,
 ) {
     sort(&mut rows, order.0, order.1);
     // A resident's helpers show while live, its open threads once the person speaks in them.
@@ -72,7 +73,8 @@ fn fill(
         if !visible && a.resident.is_some() {
             continue;
         }
-        if section.kind != SectionKind::NeedsYou
+        // NEEDS YOU's copies stay flat; the roots it alone holds keep their helpers under them.
+        if (section.kind != SectionKind::NeedsYou || depth > 0 || alone.contains(&a.session))
             && let Some(rows) = children.get(&a.session)
         {
             // Finished children past the newest three fold, after their siblings.
@@ -183,7 +185,7 @@ fn layout(
         pending.extend(g.groups.iter().rev().map(|g| (g, depth + 1)));
     }
     // Built-ins precede groups; unmatched sections follow them, with Earlier last.
-    let mut placed = BTreeMap::<_, Vec<_>>::new();
+    let (mut placed, mut alone) = (BTreeMap::<_, Vec<_>>::new(), BTreeSet::new());
     for a in rows.values() {
         if homes.contains(&a.session) {
             placed.entry((0, 0, String::new())).or_default().push(*a);
@@ -212,6 +214,11 @@ fn layout(
         } else {
             matched(&groups, a).map_or(groups.len() + 3, |i| i + 3)
         };
+        // By state, an asking or stuck agent's own group would only repeat NEEDS YOU.
+        if index == groups.len() + 3 && view.everything_else.by == By::State && rank(a) < 2 {
+            alone.insert(&a.session);
+            continue;
+        }
         let key = (index == groups.len() + 3).then(|| other(a, view.everything_else.by, host));
         let (order, key) = key.unwrap_or_default();
         placed.entry((index, order, key)).or_default().push(*a);
@@ -229,7 +236,7 @@ fn layout(
     }
     Layout {
         name: view.name.clone(),
-        sections: sections(placed, &groups, saved, view, children, live),
+        sections: sections(placed, &groups, saved, view, children, live, &alone),
     }
 }
 fn sections(
@@ -239,6 +246,7 @@ fn sections(
     view: &View,
     children: &BTreeMap<&SessionId, Vec<&AgentView>>,
     live: &BTreeSet<SessionId>,
+    alone: &BTreeSet<&SessionId>,
 ) -> Vec<Section> {
     placed
         .into_iter()
@@ -272,7 +280,7 @@ fn sections(
                 }
                 SectionKind::Earlier => (Sort::Created, &[][..]),
             };
-            fill(&mut s, rows, (by, order), children, live);
+            fill(&mut s, rows, (by, order), children, live, alone);
             s
         })
         .collect()
@@ -286,7 +294,7 @@ fn other(a: &AgentView, by: By, host: Option<&Server>) -> (u8, String) {
             .map_or("Unknown machine", |s| s.machine.as_str())
             .into(),
         By::Realm => host.map_or("Unknown realm", |s| s.realm.as_str()).into(),
-        By::State => ["ASKING", "STUCK", "WORKING", "IDLE", "DONE"][rank(a) as usize].into(),
+        By::State => ["WORKING", "IDLE", "DONE"][rank(a) as usize - 2].into(),
     };
     (u8::from(by == By::State) * rank(a), key)
 }

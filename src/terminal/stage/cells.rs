@@ -42,9 +42,11 @@ const OLDER: [(usize, u32); 26] = [
     (255, 0x2588),
 ];
 
-pub(super) fn octant_table() -> &'static [char; 256] {
+// The octant glyph whose set cells are `mask`'s bits, as Unicode orders them; the masks that
+// older blocks already draw take those blocks.
+fn octant(mask: usize) -> char {
     static TABLE: OnceLock<[char; 256]> = OnceLock::new();
-    TABLE.get_or_init(|| {
+    let table = TABLE.get_or_init(|| {
         let mut out = [' '; 256];
         let mut next = 0x1cd00_u32;
         for (m, slot) in out.iter_mut().enumerate() {
@@ -55,11 +57,8 @@ pub(super) fn octant_table() -> &'static [char; 256] {
             }
         }
         out
-    })
-}
-
-pub(super) fn octant(mask: usize) -> char {
-    octant_table().get(mask).copied().unwrap_or(' ')
+    });
+    table.get(mask).copied().unwrap_or(' ')
 }
 
 // At most eight colours enter one octant. Keeping their first-seen order preserves tie breaks.

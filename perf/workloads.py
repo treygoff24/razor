@@ -46,18 +46,14 @@ def turn(f, session, after, text):
     """Sends `text` to `session` as a person's input, with a client attached after entry `after`:
     the time just before it was sent, the time its turn_end reached the client, and that entry's
     id."""
-    connection = server.Local(f.home / ".razor/server.sock")
-    key = (f.home / ".razor/device.key").read_text().strip()
-    connection.request("GET", f"/v1/sessions/{session}/events?after={after}",
-                       headers={"Authorization": f"Bearer {key}"})
-    stream = connection.getresponse()
+    stream = server.send(f, "GET", f"/sessions/{session}/events?after={after}")
     assert json.loads(stream.readline())["kind"] == "attached"
     sent = time.monotonic()
     entry = server.post(f, f"/sessions/{session}/input", {"text": text})["entry"]
     while line := stream.readline():
         end = json.loads(line)
         if end["kind"] == "turn_end" and entry in end["inputs"]:
-            connection.close()
+            stream.close()
             return sent, time.monotonic(), end["id"]
     raise AssertionError("the session's stream ended before its turn did")
 

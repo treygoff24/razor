@@ -4,7 +4,7 @@ use super::{
     App, children, composer, gauge, motion, panel, picker, questions, split, status, strip,
     text::*, transcript,
 };
-use crate::protocol::{AgentView, Ask, Body, EntryId, Input, MailId, Quit, SessionId, State};
+use crate::protocol::{AgentView, Body, EntryId, Input, MailId, Quit, SessionId, State};
 use composer::{completion, emoji, shortcodes};
 use ratatui::{
     buffer::Buffer,
@@ -95,8 +95,6 @@ pub(super) enum Action {
     /// person's own act.
     HandBack(SessionId, String),
 }
-/// The shown ask: the session that asked, its call, and the question.
-pub(super) type Question = Option<(SessionId, EntryId, Ask)>;
 
 /// Draws the frame into `b`, records its hits and links, and returns the editor's cursor.
 pub(super) fn draw(app: &mut App, b: &mut Buffer, area: Rect, now: u64) -> Option<(u16, u16)> {
@@ -105,20 +103,20 @@ pub(super) fn draw(app: &mut App, b: &mut Buffer, area: Rect, now: u64) -> Optio
     app.links.clear();
     app.visible_options.clear();
     app.targets.clear();
-    let question = app.question();
-    if question.as_ref().map(|q| &q.2.id) != app.shown_ask.as_ref().map(|a| &a.id) {
+    let question = app.question().cloned();
+    if question.as_ref().map(|q| &q.id) != app.shown_ask.as_ref().map(|a| &a.id) {
         app.ask_at = now;
     }
-    app.shown_ask = question.as_ref().map(|q| q.2.clone());
+    app.shown_ask = question;
     let mut hits = Vec::new();
     // Under the overview at rest nothing else is drawn.
     let mut cursor = match () {
         _ if super::agents::covers(app, now) => None,
         _ if app.list.open || app.list.area.is_some() => {
-            super::agents::frame(app, b, area, question, now, &mut hits)
+            super::agents::frame(app, b, area, now, &mut hits)
         }
-        _ if app.split() => split::draw(app, b, area, question, now, &mut hits),
-        _ => normal(app, b, area, question, now, &mut hits),
+        _ if app.split() => split::draw(app, b, area, now, &mut hits),
+        _ => normal(app, b, area, now, &mut hits),
     };
     if split::closing(app, b, now, &mut hits).is_some() {
         cursor = None;
@@ -143,6 +141,16 @@ pub(super) fn draw(app: &mut App, b: &mut Buffer, area: Rect, now: u64) -> Optio
         false => bare(b, &mut app.links),
     }
     super::brand::paint(&app.brand, b);
+    ring(app, b, &hits);
+    app.hits = hits;
+    transcript::select::paint(app, b, now);
+    cursor
+}
+
+// Tab's ring from this frame's targets, less those their own keys reach (the emoji grid, the
+// shortcode and completion lists, /mcp's list and the session map), and the browse cursor's mark
+// on the one selected; a selection the ring no longer holds is dropped.
+fn ring(app: &mut App, b: &mut Buffer, hits: &[Hit]) {
     // The normal frame gave Tab's ring its order; the split's is its draw order.
     let ring = match app.targets.is_empty() {
         true => hits.iter().map(|(_, a)| a.clone()).collect(),
@@ -161,13 +169,7 @@ pub(super) fn draw(app: &mut App, b: &mut Buffer, area: Rect, now: u64) -> Optio
             app.targets.push(action);
         }
     }
-    if app
-        .selected
-        .as_ref()
-        .is_some_and(|a| !app.targets.contains(a))
-    {
-        app.selected = None;
-    }
+    app.selected = app.selected.take().filter(|a| app.targets.contains(a));
     // The browse cursor's target shows the cards' mark: a row's in its second column, a chip's
     // in its first; a child card draws its own.
     if let Some(selected) = &app.selected
@@ -182,9 +184,6 @@ pub(super) fn draw(app: &mut App, b: &mut Buffer, area: Rect, now: u64) -> Optio
                 .insert(Modifier::BOLD);
         }
     }
-    app.hits = hits;
-    transcript::select::paint(app, b, now);
-    cursor
 }
 
 // Columns: the gauge's tape, the body, and the status pane docked from 140 columns (else it
@@ -194,14 +193,10 @@ pub(super) fn normal(
     app: &mut App,
     b: &mut Buffer,
     area: Rect,
-    question: Question,
     now: u64,
     hits: &mut Vec<Hit>,
 ) -> Option<(u16, u16)> {
-    let (pane, phone) = (
-        app.pane_open.unwrap_or(area.width >= 140),
-        area.width < PHONE,
-    );
+    let phone = area.width < PHONE;
     let docked = match docked(app) {
         true => (area.width / 4).clamp(38, 46),
         false => 0,
@@ -212,13 +207,9 @@ pub(super) fn normal(
         false => gauge::columns(app).min(area.width),
     };
     let (x, width) = (area.x + tape, area.width.saturating_sub(tape + docked));
-    let top = Rect {
-        height: area.height.min(4),
-        ..area
-    };
-    let bar = top.height;
-    let (y, mid) = (area.y + bar, area.height - bar);
-    let band = band(app, &question, width, area.height, now).min(mid);
+    let top = Rect::new(area.x, area.y, area.width, area.height.min(4));
+    let (y, mid) = (area.y + top.height, area.height - top.height);
+    let band = band(app, width, area.height, now).min(mid);
     let card = match phone {
         true => app.composer.phone_rows(app, width, area.height),
         false => app.composer.rows(app, width, area.height),
@@ -233,20 +224,15 @@ pub(super) fn normal(
     let agent = app.focus.as_ref().and_then(|id| app.agents.get(id));
     super::topbar::draw(app, b, top, agent, tape == 0, now);
     if tape > 0 {
-        gauge::draw(
-            app,
-            b,
-            Rect::new(area.x, y, tape, mid),
-            app.focus.as_ref(),
-            now,
-        );
+        let column = Rect::new(area.x, y, tape, mid);
+        gauge::draw(app, b, column, app.focus.as_ref(), now);
     }
     let start = hits.len();
     if let Some(id) = app.focus.clone() {
         self::transcript(app, b, transcript, &id, now, hits);
     }
     let band = hits.len();
-    self::stack(app, b, stack, question, now, hits);
+    self::stack(app, b, stack, now, hits);
     let card = hits.len();
     let cursor = match phone {
         true => app.composer.phone(app, b, editor, hits),
@@ -258,12 +244,8 @@ pub(super) fn normal(
     let side = hits.len();
     let pane = match docked {
         // A floating pane is at most 46 wide, the full width on a phone.
-        0 if pane => {
-            let w = if area.width < PHONE {
-                area.width
-            } else {
-                area.width.min(46)
-            };
+        0 if app.pane_open.unwrap_or(area.width >= 140) => {
+            let w = [area.width.min(46), area.width][usize::from(phone)];
             Some(Rect::new(area.right() - w, y, w, transcript.height))
         }
         0 => None,
@@ -275,8 +257,7 @@ pub(super) fn normal(
             float(b, pane, hits);
         }
     }
-    // Tab's ring: the band, the transcript newest first, the pane, then
-    // the composer's chips.
+    // Tab's ring: the band, the transcript newest first, the pane, then the composer's chips.
     let at = |r: std::ops::Range<usize>| hits[r].iter().map(|(_, a)| a.clone());
     let newest = at(start..band).rev();
     let ring = at(band..card).chain(newest).chain(at(side..hits.len()));
@@ -329,18 +310,10 @@ fn float(b: &mut Buffer, pane: Rect, hits: &mut Vec<Hit>) {
             }
         }
     }
-    let close = if pane.width >= 18 {
-        " ✕ close "
-    } else {
-        " ✕ "
-    };
-    let at = Rect::new(
-        pane.right() - width(close) as u16,
-        pane.y,
-        width(close) as u16,
-        1,
-    );
-    put(b, at.x, at.y, close, at.width, style(DATA, BEZEL));
+    let close = [" ✕ ", " ✕ close "][usize::from(pane.width >= 18)];
+    let w = width(close) as u16;
+    let at = Rect::new(pane.right() - w, pane.y, w, 1);
+    put(b, at.x, at.y, close, w, style(DATA, BEZEL));
     hits.push((at, Action::Status));
 }
 
@@ -348,17 +321,15 @@ fn float(b: &mut Buffer, pane: Rect, hits: &mut Vec<Hit>) {
 /// the question, the open list or grid, the queued inputs (three rows at most, and the one
 /// leaving), the image tray and the children strip. The normal frame and the split both ask
 /// it, so neither misses an item.
-pub(super) fn band(app: &App, question: &Question, width: u16, height: u16, now: u64) -> u16 {
-    let asked = question
-        .as_ref()
-        .map_or(0, |q| questions::rows(app, &q.2, width, height));
+pub(super) fn band(app: &App, width: u16, height: u16, now: u64) -> u16 {
+    let asked = (app.shown_ask.as_ref()).map_or(0, |q| questions::rows(app, q, width, height));
     let queued = queued(app, now).len() as u16;
     let lamps = super::tools::lamps::rows(app.transcript());
     let images = composer::image_rows(&app.composer);
     let pin = pin(app, width).map_or(0, |(_, _, reply)| reply.lines.len() as u16);
     let (recap, more) = (super::recap::lines(app, width).len() as u16, overlay(app));
     let unanswered = u16::from(unanswered(app).is_some());
-    let audio = super::audio::band(app, width.into()).len() as u16;
+    let audio = warned(app, width.into()).len() as u16;
     [lamps, pin, asked, more, queued, unanswered, images, recap]
         .into_iter()
         .fold(1 + strip::rows(app, now) + audio, u16::saturating_add)
@@ -419,15 +390,11 @@ pub(super) fn transcript(
     children::prepare(app, id, r.width.saturating_sub(2), now);
     transcript::map::show(app, id);
     let (split, motion) = (app.split_view(), super::motion::on(app));
-    let stop = if split {
-        String::new()
-    } else {
-        super::bindings::hint(app, "composer.back")
-    };
+    let stop = (!split).then(|| super::bindings::hint(app, "composer.back"));
     let Some(t) = app.transcripts.get_mut(id) else {
         return;
     };
-    t.stops(&stop);
+    t.stops(stop.as_deref().unwrap_or_default());
     t.takes(takes);
     let band = app.shown_ask.as_ref().filter(|q| &q.id.0 == id);
     t.asks(asks, band.map(|q| q.id.1));
@@ -449,65 +416,81 @@ pub(super) fn transcript(
     if app.columns >= 120 {
         t.map(b, r, &mut acts);
     }
-    for (action, area) in acts {
-        let action = match action {
-            transcript::Action::Play(entry) => Action::Play(id.clone(), entry),
-            transcript::Action::Copy(entry) => Action::CopyText(id.clone(), entry),
-            transcript::Action::Jump(entry) => Action::Jump(id.clone(), entry),
-            transcript::Action::Pin(entry) => Action::Pin(id.clone(), entry),
-            transcript::Action::Latest => Action::Latest(id.clone()),
-            transcript::Action::HandBack(entry) => {
-                // The skill an input handed over, or one a worn-off skill call loaded.
-                let name = t.entries.get(&entry).and_then(|e| match &e.body {
-                    Body::Input(input) => Some(
-                        input
-                            .text
-                            .strip_prefix("<skill name=\"")?
-                            .split_once('"')?
-                            .0,
-                    ),
-                    Body::Call { input, .. } => input["name"].as_str(),
-                    _ => None,
-                });
-                Action::HandBack(id.clone(), name.unwrap_or_default().into())
-            }
-            transcript::Action::Unfold(entry) => Action::Unfold(id.clone(), entry),
-            transcript::Action::Toggle(entry) => {
-                let launched =
-                    |a: &&AgentView| a.parent.as_ref() == Some(id) && a.launched == Some(entry);
-                let child = app.agents.values().find(launched);
-                child.map_or(Action::Call(id.clone(), entry), |a| {
-                    Action::Child(a.session.clone())
-                })
-            }
-        };
-        hits.push((area, action));
-    }
     app.next.at(t.next());
+    hits.extend(
+        acts.into_iter()
+            .map(|(action, area)| (area, press(app, id, action))),
+    );
+}
+
+// What a press on a row of `id`'s transcript does; a launch row opens its child.
+fn press(app: &App, id: &SessionId, action: transcript::Action) -> Action {
+    let id = id.clone();
+    match action {
+        transcript::Action::Play(entry) => Action::Play(id, entry),
+        transcript::Action::Copy(entry) => Action::CopyText(id, entry),
+        transcript::Action::Jump(entry) => Action::Jump(id, entry),
+        transcript::Action::Pin(entry) => Action::Pin(id, entry),
+        transcript::Action::Latest => Action::Latest(id),
+        transcript::Action::HandBack(entry) => {
+            // The skill an input handed over, or one a worn-off skill call loaded.
+            let body = app
+                .transcripts
+                .get(&id)
+                .and_then(|t| Some(&t.entries.get(&entry)?.body));
+            let name = body.and_then(|body| match body {
+                Body::Input(input) => Some(
+                    input
+                        .text
+                        .strip_prefix("<skill name=\"")?
+                        .split_once('"')?
+                        .0,
+                ),
+                Body::Call { input, .. } => input["name"].as_str(),
+                _ => None,
+            });
+            let name = name.unwrap_or_default().into();
+            Action::HandBack(id, name)
+        }
+        transcript::Action::Unfold(entry) => Action::Unfold(id, entry),
+        transcript::Action::Toggle(entry) => {
+            let launched =
+                |a: &&AgentView| a.parent.as_ref() == Some(&id) && a.launched == Some(entry);
+            let child = app
+                .agents
+                .values()
+                .find(launched)
+                .map(|a| a.session.clone());
+            child.map_or(Action::Call(id, entry), Action::Child)
+        }
+    }
 }
 
 const NEWER: &str =
     "Newer server: close this and run `razor --continue`. Part of the transcript may be missing.";
 
+// The band's rows under the notice: the new agents' words a quit would lose, then the voice
+// note and player, each wrapped whole.
+fn warned(app: &App, columns: usize) -> Vec<ratatui::text::Line<'static>> {
+    let (unsent, audio) = (
+        super::start::unsent(app, columns),
+        super::audio::band(app, columns),
+    );
+    [unsent, audio].concat()
+}
+
 /// The band above the composer: a rule or the notice, the question, the inputs queued for the
 /// next tool boundary (three rows at most), the image tray and the children strip. The rule
 /// shows under a band, and always on a phone.
-pub(super) fn stack(
-    app: &mut App,
-    b: &mut Buffer,
-    r: Rect,
-    question: Question,
-    now: u64,
-    hits: &mut Vec<Hit>,
-) {
+pub(super) fn stack(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit>) {
     if r.height == 0 {
         return;
     }
     let (menu, queued) = (overlay(app), queued(app, now));
     let images = app.composer.active_images().next().is_some();
     let recap = super::recap::lines(app, r.width).len() as u16;
-    let pinned = app.transcript().is_some_and(|t| t.pin.is_some());
-    let ruled = question.is_some() || menu > 0 || !queued.is_empty() || images || pinned;
+    let reply = app.transcript().is_some_and(|t| t.pin.is_some());
+    let ruled = app.shown_ask.is_some() || menu > 0 || !queued.is_empty() || images || reply;
     let lamps = super::tools::lamps::rows(app.transcript()) > 0;
     let ruled = ruled || lamps || recap > 0 || app.columns < PHONE || unanswered(app).is_some();
     let rule = if ruled { "▁" } else { " " }.repeat(r.width as usize);
@@ -516,37 +499,30 @@ pub(super) fn stack(
     let strip = strip::rows(app, now);
     let below = r.bottom().saturating_sub(strip);
     let mut y = r.y + 1;
-    y += super::audio::draw(app, b, Rect::new(r.x, y, r.width, below.saturating_sub(y)));
+    let warned = warned(app, r.width.into());
+    for row in warned.iter().take(below.saturating_sub(y).into()) {
+        let ground = style(DATA, GLASS).patch(row.style);
+        fill(b, Rect::new(r.x, y, r.width, 1), ground);
+        line(b, r, y, row, ground);
+        y += 1;
+    }
     if let Some(t) = app.transcript() {
         let h = super::tools::lamps::rows(Some(t)).min(r.bottom().saturating_sub(y));
         super::tools::lamps::draw(app, t, b, Rect::new(r.x, y, r.width, h), now, hits);
         y += h;
     }
-    if let Some((session, id, reply)) = pin(app, r.width) {
-        let (ink, more) = (style(DATA, AGENT_BG), reply.total - reply.lines.len());
-        let shown = reply.lines.len().min(below.saturating_sub(y) as usize);
-        for (n, words) in reply.lines.iter().take(shown).enumerate() {
-            let row = Rect::new(r.x, y, r.width, 1);
-            fill(b, row, ink);
-            put(b, r.x + 1, y, "▌", 1, style(VIOLET, AGENT_BG));
-            line(b, Rect { x: r.x + 3, ..row }, y, &words.words, ink);
-            hits.push((row, Action::Jump(session.clone(), id)));
-            let label = match n + 1 == shown && more > 0 {
-                _ if n == 0 => "✕ unpin ".to_owned(),
-                true => format!("+{more} more "),
-                false => String::new(),
-            };
-            let (w, tone) = (width(&label) as u16, [GRAY, VIOLET][usize::from(n == 0)]);
-            let at = Rect::new(r.right().saturating_sub(w), y, w, 1);
-            put(b, at.x, y, &label, w, style(tone, AGENT_BG));
-            hits.push((at, Action::Pin(session.clone(), id)));
-            y += 1;
-        }
-    }
-    if let Some(q) = &question {
-        let h = questions::rows(app, &q.2, r.width, b.area.height);
+    y += pinned(
+        app,
+        b,
+        Rect::new(r.x, y, r.width, below.saturating_sub(y)),
+        hits,
+    );
+    let asked = app.shown_ask.as_ref().map(|q| {
+        let h = questions::rows(app, q, r.width, b.area.height);
         let h = h.min(below.saturating_sub(y + queued.len() as u16));
-        let drawn = questions::draw(app, b, Rect::new(r.x, y, r.width, h), q);
+        (h, questions::draw(app, b, Rect::new(r.x, y, r.width, h), q))
+    });
+    if let Some((h, drawn)) = asked {
         // The options drawn whole, which the digits answer and the editor's title counts.
         app.visible_options
             .extend(drawn.iter().filter_map(|(_, action)| match action {
@@ -568,28 +544,8 @@ pub(super) fn stack(
         _ => shortcodes::draw(app, b, menu, hits),
     }
     y += menu.height;
-    // The newest row offers the take-back; a phone keyboard has no Up key to name.
-    let newest = queued.iter().rposition(|row| row.1.is_some());
-    let arrow = ["↑", "↶"][usize::from(app.columns < PHONE)];
-    let shown = queued.iter().take(below.saturating_sub(y) as usize);
-    for (i, (words, input, lit)) in shown.enumerate() {
-        let row = Rect::new(r.x, y, r.width, 1);
-        let (cw, ink) = (if newest == Some(i) { 12 } else { 0 }, style(GRAY, RECESS));
-        let room = r.width.saturating_sub(2 + cw);
-        fill(b, row, ink);
-        put(b, r.x + 1, y, &clip(words, room as usize), room, ink);
-        if cw > 0 && r.width > cw {
-            let x = put(b, r.right() - cw, y, arrow, 1, style(CYAN, RECESS));
-            put(b, x, y, " take back ", cw - 1, ink);
-        }
-        hits.extend(input.map(|input| (row, Action::TakeBack(input))));
-        if *lit > 0. {
-            let (fg, bg) = (mix(RECESS, CYAN, *lit), mix(RECESS, YOU_BG, *lit));
-            tint(b, row, fg, bg, 1.);
-            app.next.at(now);
-        }
-        y += 1;
-    }
+    let rows = Rect::new(r.x, y, r.width, below.saturating_sub(y));
+    y += waiting(app, b, rows, &queued, now, hits);
     if let Some(words) = unanswered(app).filter(|_| y < below) {
         let (head, ink) = ("No reply to your message '", style(CYAN, RECESS));
         let room = (r.width as usize).saturating_sub(width(head) + 3);
@@ -622,16 +578,70 @@ pub(super) fn notice(app: &App, b: &mut Buffer, r: Rect, now: u64) {
     let said = said.map(str::to_uppercase);
     if let Some(sentence) = said.or_else(|| newer.then(|| NEWER.into())) {
         fill(b, Rect::new(r.x, r.y, r.width, 1), style(DATA, BEZEL));
-        let (bold, room) = (bold(WHITE, BEZEL), r.width.saturating_sub(2));
-        put(
-            b,
-            r.x + 1,
-            r.y,
-            &clip(&sentence, room.max(8) as usize),
-            room,
-            bold,
-        );
+        let room = r.width.saturating_sub(2);
+        let words = clip(&sentence, room.max(8) as usize);
+        put(b, r.x + 1, r.y, &words, room, bold(WHITE, BEZEL));
     }
+}
+
+// The pinned reply's rows from `r`'s top, as many as fit, on the agent's ground: the first with
+// its unpin label, the last with the rows left out; returns the rows drawn.
+fn pinned(app: &App, b: &mut Buffer, r: Rect, hits: &mut Vec<Hit>) -> u16 {
+    let Some((session, id, reply)) = pin(app, r.width) else {
+        return 0;
+    };
+    let (ink, more) = (style(DATA, AGENT_BG), reply.total - reply.lines.len());
+    let shown = reply.lines.len().min(r.height as usize);
+    for (n, (words, y)) in reply.lines.iter().zip(r.y..).take(shown).enumerate() {
+        let row = Rect::new(r.x, y, r.width, 1);
+        fill(b, row, ink);
+        put(b, r.x + 1, y, "▌", 1, style(VIOLET, AGENT_BG));
+        line(b, Rect { x: r.x + 3, ..row }, y, &words.words, ink);
+        hits.push((row, Action::Jump(session.clone(), id)));
+        let label = match n + 1 == shown && more > 0 {
+            _ if n == 0 => "✕ unpin ".to_owned(),
+            true => format!("+{more} more "),
+            false => String::new(),
+        };
+        let (w, tone) = (width(&label) as u16, [GRAY, VIOLET][usize::from(n == 0)]);
+        let at = Rect::new(r.right().saturating_sub(w), y, w, 1);
+        put(b, at.x, y, &label, w, style(tone, AGENT_BG));
+        hits.push((at, Action::Pin(session.clone(), id)));
+    }
+    shown as u16
+}
+
+// The queued inputs' rows from `r`'s top, as many as fit; the newest offers the take-back, which
+// a phone keyboard, having no Up key, names by its arrow. Returns the rows drawn.
+fn waiting(
+    app: &App,
+    b: &mut Buffer,
+    r: Rect,
+    queued: &[Queued],
+    now: u64,
+    hits: &mut Vec<Hit>,
+) -> u16 {
+    let newest = queued.iter().rposition(|row| row.1.is_some());
+    let arrow = ["↑", "↶"][usize::from(app.columns < PHONE)];
+    let shown = queued.iter().zip(r.y..).take(r.height as usize);
+    for (i, ((words, input, lit), y)) in shown.enumerate() {
+        let row = Rect::new(r.x, y, r.width, 1);
+        let (cw, ink) = (if newest == Some(i) { 12 } else { 0 }, style(GRAY, RECESS));
+        let room = r.width.saturating_sub(2 + cw);
+        fill(b, row, ink);
+        put(b, r.x + 1, y, &clip(words, room as usize), room, ink);
+        if cw > 0 && r.width > cw {
+            let x = put(b, r.right() - cw, y, arrow, 1, style(CYAN, RECESS));
+            put(b, x, y, " take back ", cw - 1, ink);
+        }
+        hits.extend(input.map(|input| (row, Action::TakeBack(input))));
+        if *lit > 0. {
+            let (fg, bg) = (mix(RECESS, CYAN, *lit), mix(RECESS, YOU_BG, *lit));
+            tint(b, row, fg, bg, 1.);
+            app.next.at(now);
+        }
+    }
+    queued.len().min(r.height as usize) as u16
 }
 
 // The person's newest message, when a turn ended after it with no reply and the session is
@@ -661,10 +671,13 @@ fn overlay(app: &App) -> u16 {
     }
 }
 
-// The band's queued inputs, each row's words, its input and how lit: one row per input, its
-// first line, three at most with the rest counted on the last; and while motion plays, the
-// input that just left, lit where it was (last when taken back, first when the model took it).
-fn queued(app: &App, now: u64) -> Vec<(String, Option<EntryId>, f64)> {
+/// A queued row: its words, the input a press takes back, and how lit it is.
+type Queued = (String, Option<EntryId>, f64);
+
+// The band's queued inputs: one row per input, its first line, three at most with the rest
+// counted on the last; and while motion plays, the input that just left, lit where it was (last
+// when taken back, first when the model took it).
+fn queued(app: &App, now: u64) -> Vec<Queued> {
     let Some(t) = app.transcript() else {
         return Vec::new();
     };

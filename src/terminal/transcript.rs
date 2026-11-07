@@ -71,7 +71,7 @@ impl Row {
     }
     /// A row whose words end at a card's right edge, in its last column.
     pub(super) fn boxed(mut self) -> Self {
-        let drawn: usize = self.words.spans.iter().map(|s| width(&s.content)).sum();
+        let drawn = spans_width(&self.words.spans);
         self.kind = markdown::Kind::Cells(vec![drawn.saturating_sub(1) as u16]);
         self
     }
@@ -246,8 +246,9 @@ impl Transcript {
         words.as_deref().filter(|_| ended)
     }
     pub(super) fn stops(&mut self, stops: &str) {
-        self.dirty |= self.stops != stops;
-        self.stops = stops.into();
+        if self.stops != stops {
+            (self.stops, self.dirty) = (stops.into(), true);
+        }
     }
     /// Whether this frame drew its rows over the cell `at`.
     pub(super) fn holds(&self, at: ratatui::layout::Position) -> bool {
@@ -277,7 +278,9 @@ impl Transcript {
         self.takes = takes;
     }
     pub(super) fn names(&mut self, names: BTreeMap<SessionId, tools::Child>, server: &str) {
-        self.server = server.into();
+        if self.server != server {
+            self.server = server.into();
+        }
         self.dirty |= self.names != names;
         self.names = names;
     }
@@ -486,7 +489,7 @@ impl Transcript {
             .flatten();
         let mut place = place.cloned().unwrap_or_default();
         // A run the reader unfolded draws each of its calls.
-        place.run = place.run.filter(|run| !self.expanded.contains(&run.0));
+        place.run = place.run.filter(|run| !self.expanded.contains(&run.first));
         tools::Call {
             place,
             child: match &entry.body {

@@ -4,6 +4,7 @@ redacted thought sends nothing, and a dropped line never moves words to another 
 from dataclasses import replace
 import json
 
+import chat
 import claude
 from driver import flow
 from responses import PLAIN, call, done, message, response, retried, thought
@@ -94,16 +95,10 @@ with flow([burst], model="gpt-6.1-sol", config=PLAIN) as f:
     assert all(len(i) == 1 for i in items.values()) and set(items) - starts, items
 
 
-def chat(*deltas, finish="stop"):
-    """A chat stream of `deltas`, then `finish`, which None leaves out so the stream is cut."""
-    chunks = [{"choices": [{"index": 0, "delta": d}]} for d in deltas]
-    chunks += [{"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]}] * bool(finish)
-    return Reply(("".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n").encode())
-
-
 # A chat host's reasoning deltas are one thought per response, and a cut one is voided too.
-replies = [chat({"reasoning_content": "Look "}, {"reasoning_content": "first."}, {"content": "glm-73"}),
-           chat({"reasoning_content": "ABANDONED"}, finish=None), chat({"reasoning_content": "DONE"}, {"content": "glm"})]
+replies = [chat.reply({"reasoning_content": "Look "}, {"reasoning_content": "first."}, {"content": "glm-73"}),
+           chat.reply({"reasoning_content": "ABANDONED"}, finish=None),
+           chat.reply({"reasoning_content": "DONE"}, {"content": "glm"})]
 GLM = '[providers.runinfra]\nbase_url = "{standin}"\n'
 with flow(replies, model="glm-5.3-flash", config=GLM, env={"RUNINFRA_API_KEY": "flow-key"}) as f:
     lines, session = turn(f, "Think and reply.")

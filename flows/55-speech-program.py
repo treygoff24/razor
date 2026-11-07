@@ -66,6 +66,19 @@ try:
                                ("Run `cargo build`","Run cargo build")]:
             subprocess.run([sys.executable,str(program)],input=prose.encode(),env={**env,"PATH":""},capture_output=True,check=True)
             assert requests[-1]["text"] == expected,(prose,requests[-1])
+        # A long text is spoken whole: pieces cut at paragraphs, else words, each one's words after the audio before it.
+        paragraphs = "\n\n".join(f"Part {i}. "+("Lorem ipsum dolor sit amet. "*40).strip() for i in range(5))
+        for model,prose,path in [("eleven_v4_turbo",paragraphs,os.environ["PATH"]),("eleven_v3","a "*3000,"")]:
+            sent = len(requests)
+            done = subprocess.run([sys.executable,str(program)],input=prose.encode(),capture_output=True,check=True,
+                                  env={**env,"ELEVENLABS_MODEL":model,"PATH":path})
+            spoken = sorted(requests[sent:],key=lambda body:prose.index(body["text"]))
+            texts = [body["text"] for body in spoken]
+            assert " ".join(texts).split() == prose.split() and [t.count("Part") for t in texts] in ([2,2,1],[0,0,0]),texts
+            hints = list(zip([None,*texts],[*texts[1:],None])) if path else [(None,None)]*3  # eleven_v3 refuses them
+            assert [(b.get("previous_text"),b.get("next_text")) for b in spoken] == hints and (path or done.stdout == mp3*3)
+            step,meta = 300 if shutil.which("ffmpeg") and path else 220,json.loads(words.read_text())
+            assert ([w["start_ms"] for w in meta["words"]],meta["duration_ms"]) == ([i*step+s for i in range(3) for s in (0,120)],2*step+220),meta
         words.unlink()
         unaligned = subprocess.run([sys.executable,str(program)],input=b"no alignment",env={**env,"PATH":""},capture_output=True,check=True)
         assert unaligned.stdout == mp3 and not words.exists()

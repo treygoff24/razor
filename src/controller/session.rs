@@ -164,35 +164,7 @@ pub(super) async fn run(
             return;
         }
     };
-    let parent = match s.record.summary().child.clone() {
-        Some(child) if child.parent.address().is_none() => c.summary(&child.parent).await.ok(),
-        _ => None,
-    };
-    s.blocked = s.record.summary().done();
-    if let Some(parent) = &parent {
-        s.blocked |= parent
-            .children
-            .iter()
-            .any(|f| f.session == id && !f.working());
-    }
-    s.publish_row();
-    children::recover_loaded(c.clone(), s.record.summary());
-    if let Some(parent) = &parent {
-        lock(&c.inner.status).child_rows(parent);
-    }
-    // Only `create` hands over a record, whose first entry is the `Start` it just wrote.
-    if created && let Ok(start) = s.record.get(EntryId(1)).await {
-        let cwd = &s.record.summary().cwd;
-        s.plugins.after(&s.id, cwd, &start.into(), &s.lines);
-    }
-    // Jobs lost in a restart are recorded, but their notices wait for the next input; a child
-    // with nothing unanswered hears of them at once, since no person's input will come.
-    let wake = s.record.summary().child.is_some() && s.record.summary().unanswered.is_empty();
-    for event in lost {
-        if let Err(e) = s.job_event(event, wake).await {
-            s.fail(&e).await;
-        }
-    }
+    s.loaded(created, lost).await;
     let mut registry = s.tools.subscribe();
     let mut tail = tokio::time::Instant::now();
     loop {
@@ -233,6 +205,43 @@ pub(super) async fn run(
 }
 
 impl Session {
+    /// Settles a session just loaded: a done session, or a child its parent holds done, stays
+    /// blocked; its row and its parent's child rows are published and its children recovered;
+    /// a record `created` hands over reaches the plugins with its `Start`; and jobs `lost` in a
+    /// restart are recorded, their notices waiting for the next input, though a child with
+    /// nothing unanswered hears of them at once, since no person's input will come.
+    async fn loaded(&mut self, created: bool, lost: Vec<JobEvent>) {
+        let parent = match self.record.summary().child.clone() {
+            Some(child) if child.parent.address().is_none() => {
+                self.c.summary(&child.parent).await.ok()
+            }
+            _ => None,
+        };
+        self.blocked = self.record.summary().done();
+        if let Some(parent) = &parent {
+            let held = |f: &record::ChildSummary| f.session == self.id && !f.working();
+            self.blocked |= parent.children.iter().any(held);
+        }
+        self.publish_row();
+        children::recover_loaded(self.c.clone(), self.record.summary());
+        if let Some(parent) = &parent {
+            lock(&self.c.inner.status).child_rows(parent);
+        }
+        // Only `create` hands over a record, whose first entry is the `Start` it just wrote.
+        if created && let Ok(start) = self.record.get(EntryId(1)).await {
+            let cwd = &self.record.summary().cwd;
+            self.plugins
+                .after(&self.id, cwd, &start.into(), &self.lines);
+        }
+        let s = self.record.summary();
+        let wake = s.child.is_some() && s.unanswered.is_empty();
+        for event in lost {
+            if let Err(e) = self.job_event(event, wake).await {
+                self.fail(&e).await;
+            }
+        }
+    }
+
     /// Captures withdrawable inputs, record cursor and subscription without interleaving work.
     pub(super) async fn attachment(&mut self, after: EntryId) -> Result<super::Attachment, Error> {
         let attached = Live::Attached {
@@ -640,7 +649,7 @@ impl Session {
         if summary.idle_handover {
             return self.rebuild(Trigger::Idle, None, Vec::new()).await;
         }
-        let gap = crate::protocol::now().saturating_sub(self.record.last_activity);
+        let gap = now().saturating_sub(self.record.last_activity);
         if gap > 3_600_000 {
             self.unknown_results().await?;
             self.append(record::interrupted(gap), None).await?;
@@ -655,7 +664,16 @@ impl Session {
             self.pending.remove(at);
             self.opening = self.pending.iter().take(at).map(|(id, _)| *id).collect();
             let model = (self.pending.iter().take(at).rev()).find_map(|(_, i)| i.model.clone());
-            self.model = model.unwrap_or_else(|| self.model.clone());
+            let model = model.unwrap_or_else(|| self.model.clone());
+            // The note turn ends as a finished one does, under the model the last turn ran on.
+            let ran = self.record.summary().ran.clone();
+            self.model = ran.unwrap_or_else(|| model.clone());
+            // Back on the switch's model before any failure leaves.
+            let ended = self
+                .end_turn(Vec::new(), End::Done, Usage::default(), None)
+                .await;
+            self.model = model;
+            ended?;
             self.refresh().await?;
             return self.rebuild(Trigger::Change, None, Vec::new()).await;
         }

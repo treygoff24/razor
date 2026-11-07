@@ -5,13 +5,13 @@ a GPT session's and a provider's model its own session's, from the agent's words
 steps."""
 from dataclasses import replace
 import json
+import chat
 import claude
 from clock import wall_clock
 from driver import flow
 from model import reply
 from responses import reply as turn
 import server
-from standin import Reply
 from terminal import Terminal
 
 EARLIER, FINAL = "EARLIER69 " + "earlier " * 1500 + "END69", "FINAL69 " + "summary " * 400 + "END69"
@@ -24,9 +24,7 @@ replies = [reply("ALPHA69", text="a-first69"), reply("BRAVO69", text="b-first69"
            # The GPT session's recap request also holds the prompt, so its reply comes first.
            turn('"model":"gpt-6.1-terra"', "GPT_WORDS69"),
            # The provider's session's recap is a chat request to its own model.
-           Reply(b'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"CHAT_WORDS69"}}]}\n\n'
-                 b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-                 match='"model":"open69"'),
+           chat.reply({"role": "assistant", "content": "CHAT_WORDS69"}, match='"model":"open69"'),
            *[reply("Tell the person", text="RECAP_WORDS69")] * 5]
 config = '[ui]\nmotion = false\n[providers.open69]\nbase_url = "{standin}"\n'
 with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as f:
@@ -36,7 +34,7 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
         made = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
         server.send(f, "PUT", f"/sessions/{made}/name", name).read()
         server.post(f, f"/sessions/{made}/input", {"text": words})
-        server.until(f, made, lambda es: es[-1]["kind"] == "turn_end")
+        server.until(f, made, lambda es: es[-1]["kind"] == "turn_end", timeout=120)  # STEPS69 reads 300 times
         return made
 
     def moves(words, said, s=None):  # work in a (or s): not the person's words, nor anyone looking
@@ -44,8 +42,10 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
         server.until(f, s or a, lambda es: es[-1]["kind"] == "turn_end" and any(e.get("text") == said for e in es))
 
     a = root("a69", "ALPHA69")
-    advance(1000)  # b is the most recent, which --agents opens
+    advance(1000)  # b is the one the person wrote to last, which --agents opens
     b = root("b69", "BRAVO69")
+    advance(2000)  # though a's record changed later, by no words of the person's
+    server.post(f, f"/sessions/{a}/effort", {"effort": "low"})
     with Terminal(f, "--agents") as t:
         def shown(words):  # in the addressed session's transcript, right of the list
             t.until(lambda t: "╮" in (top := t.screen.display[0]) and any(words in l[top.index("╮") + 1:] for l in t.screen.display))
@@ -77,7 +77,7 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
         t.shown("↺ a-final69")
         t.click("○ a69")
         t.shown("↺ away 10 min · RECAP_WORDS69")
-        asked = [r.read_text() for r in f.requests.glob("*.body") if "Tell the person" in r.read_text()]
+        asked = [body for body in f.sent() if "Tell the person" in body]
         assert len(asked) == 1 and "a-final69" in asked[0] and "a-later69" not in asked[0], asked
         # After a restart loses `seen`, b, the root whose stream runs on while a is addressed,
         # recaps from the last entry this terminal showed as it left b.
@@ -104,7 +104,7 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
 
     def written(session):  # the model request that wrote a recap of all of it
         assert server.post(f, f"/sessions/{session}/recap", {})["text"]
-        return json.loads(max(f.requests.glob("[0-9]*.body")).read_text())
+        return json.loads(f.sent()[-1])
 
     steps = root("steps69", "STEPS69")
     body = written(steps)

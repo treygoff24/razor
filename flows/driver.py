@@ -43,6 +43,12 @@ class Flow:
         return subprocess.run([BINARY, *argv], input=input, timeout=timeout, capture_output=True,
                               text=True, cwd=self.cwd, env=self.env)
 
+    def ask(self, *argv: str, timeout: float = 60) -> dict:
+        """Runs `razor --print=json` with `argv`, failing on a nonzero exit; its JSON answer."""
+        done = self.run("--print=json", *argv, timeout=timeout)
+        assert done.returncode == 0, done.stderr
+        return json.loads(done.stdout)
+
     def git(self, *args: str) -> str:
         """Runs git in `cwd`, failing on a nonzero exit; returns its standard output."""
         return subprocess.run(["git", *args], cwd=self.cwd, check=True,
@@ -55,9 +61,18 @@ class Flow:
         self.git("add", "--", "base", *files)
         self.git("-c", "user.name=Flow", "-c", "user.email=flow@example.invalid", "commit", "-m", "Base")
 
+    def sent(self) -> list[str]:
+        """The body of each model request (each POST) the stand-in has had, oldest first."""
+        return [path.read_text() for path in sorted(self.requests.glob("[0-9]*.body"))]
+
+    def request(self, n: int) -> dict:
+        """Model request `n`, counted from 1, as JSON."""
+        return json.loads((self.requests / f"{n:03}.body").read_bytes())
+
     def record(self, session: str) -> Iterator[dict]:
-        """The session's record entries as written so far; a line still being written is left out."""
-        path = self.home / ".razor/sessions" / session / "record.jsonl"
+        """The session's record entries in the flow's RAZOR_HOME as written so far; a line still
+        being written is left out."""
+        path = Path(self.env["RAZOR_HOME"]) / "sessions" / session / "record.jsonl"
         return map(json.loads, path.read_bytes().split(b"\n")[:-1])
 
 

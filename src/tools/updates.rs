@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::{
     collections::BTreeSet,
     io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
@@ -292,12 +292,9 @@ async fn starter(name: &str, source: &Path, overrides: &Path) -> io::Result<bool
     };
     if repo.starts_with('-')
         || reference.starts_with('-')
-        || !Path::new(folder).components().all(|c| {
-            matches!(
-                c,
-                std::path::Component::Normal(_) | std::path::Component::CurDir
-            )
-        })
+        || !Path::new(folder)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
     {
         return Err(refused("invalid UPSTREAM"));
     }

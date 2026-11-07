@@ -85,10 +85,7 @@ fn scan(known: BTreeMap<PathBuf, SystemTime>, under: Option<PathBuf>) -> Result<
             continue;
         }
         let remaining = limit - depth;
-        if seen
-            .get(&path)
-            .is_some_and(|previous| *previous >= remaining)
-        {
+        if seen.get(&path).is_some_and(|seen| *seen >= remaining) {
             continue;
         }
         seen.insert(path.clone(), remaining);

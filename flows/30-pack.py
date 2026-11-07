@@ -44,12 +44,10 @@ with tempfile.TemporaryDirectory() as scratch:
         skill(f.cwd / ".agents/skills/plan", "description: Plans the flow.")
         skill(f.home / ".claude/skills/notes", "description: Keeps notes.")
         skill(f.home / ".agents/skills/plan", "description: Plans at home.")
-        result = f.run("--print=json", ask)
-        assert result.returncode == 0, result.stderr
-        session = json.loads(result.stdout)["session"]
+        session = f.ask(ask)["session"]
         output = next(e for e in f.record(session) if e["kind"] == "result")
         assert output["outcome"] == "success" and body in output["output"], output
-        first = next(r.read_text() for r in sorted(f.requests.glob("*.body")) if ask in r.read_text())
+        first = next(body for body in f.sent() if ask in body)
         assert "- greet: Greets the flow in one line." in first, "the pack's skill was not listed"
         assert "- razor:" not in first, "the named pack kept the starter skills"
         assert "- plan: Plans the flow." in first, "the project's skill was not listed"
@@ -60,7 +58,7 @@ with tempfile.TemporaryDirectory() as scratch:
         until(f, "scout", lambda es: any(e["kind"] == "turn_end" for e in es), timeout=40)
         start = next(f.record("scout"))
         assert start["cwd"] == str(pack / "work"), start
-        beat = next(r.read_text() for r in f.requests.glob("*.body") if "Scout heartbeat." in r.read_text())
+        beat = next(body for body in f.sent() if "Scout heartbeat." in body)
         assert "You are Scout" in beat, "the pack's persona missed the model"
         # 3. The status stream opens with the brand: the person's name over the pack's colours.
         server = json.loads((f.home / ".razor/server.json").read_text())
@@ -109,9 +107,8 @@ with flow([reply((None, "mcp__razor__message", {"to": "parent", "type": "questio
         program.chmod(0o755)
     f.env["PATH"] = f"{programs}:{f.env['PATH']}"
     (f.home / ".razor/about.md").write_text("ABOUT_STARTER_30 knows the project.")
-    result = f.run("--print=json", "Ask the person.")
-    assert result.returncode == 0, result.stderr
-    first = json.loads((f.requests / "001.body").read_text())
+    session = f.ask("Ask the person.")["session"]
+    first = f.request(1)
     opening = json.dumps(first)
     starter = Path(__file__).resolve().parents[1] / "packs/starter"
     # These are prompt data, compared to the files, so editing prose does not break the flow.
@@ -123,7 +120,6 @@ with flow([reply((None, "mcp__razor__message", {"to": "parent", "type": "questio
         assert f"- {skill}:" in opening, f"starter skill {skill} was not listed"
     wait(notice.exists, 10, "starter question never reached the desktop program")
     assert "QUESTION_STARTER_30" in " ".join(json.loads(notice.read_text())), "question text missed notifier"
-    session = json.loads(result.stdout)["session"]
     said = next(e for e in f.record(session) if e["kind"] == "text")
     answer = send(f, "GET", f"/sessions/{session}/speech/{said['id']}")
     why = answer.read().decode()

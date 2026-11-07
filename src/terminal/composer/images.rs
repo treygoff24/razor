@@ -19,6 +19,32 @@ pub struct Loaded {
     pixels: Option<(u32, u32)>,
 }
 
+impl Loaded {
+    fn label(&self) -> String {
+        let status = if self.data.is_empty() {
+            " pointer"
+        } else if self.origin.as_ref().is_some_and(|(_, fitted)| *fitted) {
+            " scaled"
+        } else {
+            ""
+        };
+        format!("{}{status}", marker(self.number))
+    }
+
+    fn size(&self) -> String {
+        if self.data.is_empty() {
+            return String::new();
+        }
+        let pixels = self
+            .pixels
+            .map_or(String::new(), |(w, h)| format!(" {w}×{h} ·"));
+        match self.data.len() * 3 / 4 {
+            n @ ..1_048_576 => format!("{pixels} {} KiB", n.div_ceil(1024)),
+            n => format!("{pixels} {:.2} MiB", n as f64 / 1_048_576.),
+        }
+    }
+}
+
 // Header parsing is shared with the request's image preview.
 fn pixels(data: &str) -> Option<(u32, u32)> {
     use base64::Engine;
@@ -234,25 +260,13 @@ pub fn paste(app: &mut App, text: String) {
     if image && app.sending.is_some() {
         return app.say("Input admission is pending; paste the image once it answers.");
     }
-    if !image && !app.composer.insert(&text) {
-        app.say("The paste exceeds 1 MiB; send a file path instead.");
-    } else if let Some(name) = heic.filter(|_| !image) {
-        app.say(&format!(
-            "{name} is HEIC, which cannot be sent; only its name reaches the model."
-        ));
-    } else if !image {
-        let chars = unicode_segmentation::UnicodeSegmentation::graphemes(&*text, true).count();
-        let lines = text.lines().count();
-        let s = plural(lines);
-        app.say(&format!(
-            "Pasted {} chars · {lines} line{s}",
-            thousands(chars)
-        ));
-    } else if image && (app.pending >= 8 || !app.composer.insert(&text)) {
-        app.say(
-            "The paste could not be attached; wait for pending operations and try its path again.",
-        );
-    } else {
+    if image && app.pending >= 8 || !app.composer.insert(&text) {
+        app.say(if image {
+            "The paste could not be attached; wait for pending operations and try its path again."
+        } else {
+            "The paste exceeds 1 MiB; send a file path instead."
+        });
+    } else if image {
         // A refused read leaves its path as words and the rest unread; only reads begun count.
         for (path, piece) in files {
             let target = app.focus.clone();
@@ -267,6 +281,18 @@ pub fn paste(app: &mut App, text: String) {
             }
             app.loading_images += 1;
         }
+    } else if let Some(name) = heic {
+        app.say(&format!(
+            "{name} is HEIC, which cannot be sent; only its name reaches the model."
+        ));
+    } else {
+        let chars = unicode_segmentation::UnicodeSegmentation::graphemes(&*text, true).count();
+        let lines = text.lines().count();
+        let s = plural(lines);
+        app.say(&format!(
+            "Pasted {} chars · {lines} line{s}",
+            thousands(chars)
+        ));
     }
     app.edited();
 }
@@ -363,30 +389,8 @@ pub fn draw_images(composer: &Composer, b: &mut Buffer, r: Rect, hits: &mut Vec<
     }
     fill(b, Rect::new(r.x, r.y, r.width, 1), style(DATA, RECESS));
     let chosen = composer.chosen.filter(|&at| at < images.len());
-    let size = |im: &Loaded| {
-        if im.data.is_empty() {
-            return String::new();
-        }
-        let pixels = im
-            .pixels
-            .map_or(String::new(), |(w, h)| format!(" {w}×{h} ·"));
-        match im.data.len() * 3 / 4 {
-            n @ ..1_048_576 => format!("{pixels} {} KiB", n.div_ceil(1024)),
-            n => format!("{pixels} {:.2} MiB", n as f64 / 1_048_576.),
-        }
-    };
-    let label = |im: &Loaded| {
-        let status = if im.data.is_empty() {
-            " pointer"
-        } else if im.origin.as_ref().is_some_and(|(_, fitted)| *fitted) {
-            " scaled"
-        } else {
-            ""
-        };
-        format!("{}{status}", marker(im.number))
-    };
     let cell =
-        |im: &Loaded, full: bool| width(&label(im)) + 5 + if full { width(&size(im)) } else { 0 };
+        |im: &Loaded, full: bool| width(&im.label()) + 5 + if full { width(&im.size()) } else { 0 };
     let room = usize::from(r.width.saturating_sub(1));
     let gaps = images.len() - 1;
     let full = images.iter().map(|im| cell(im, true)).sum::<usize>() + gaps <= room;
@@ -418,10 +422,10 @@ pub fn draw_images(composer: &Composer, b: &mut Buffer, r: Rect, hits: &mut Vec<
             false => style(WHITE, CHIP),
         };
         let at = x;
-        x = put(b, x, r.y, &format!(" {} ", label(im)), r.right() - x, look);
+        x = put(b, x, r.y, &format!(" {} ", im.label()), r.right() - x, look);
         hits.push((Rect::new(at, r.y, x - at, 1), Action::Chip(i)));
         if full {
-            x = put(b, x, r.y, &size(im), r.right() - x, style(GRAY, RECESS));
+            x = put(b, x, r.y, &im.size(), r.right() - x, style(GRAY, RECESS));
         }
         let cross = style([GRAY, WHITE][usize::from(lit)], RECESS)
             .add_modifier(ratatui::style::Modifier::BOLD);

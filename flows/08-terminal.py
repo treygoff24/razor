@@ -55,9 +55,7 @@ for model in ("opus", "gpt-6.1-sol"):
             replies.extend(response([call(name, json.dumps(args), id)]) for id, name, args in calls)
             replies.append(done())
             prompts = {"prompt": "Name:", "hidden": "Secret:", "secret": "TERMINAL_DONE"}
-        result = f.run("--print=json", "Drive the interactive program to its done marker.")
-        assert result.returncode == 0, result.stderr
-        answer = json.loads(result.stdout)
+        answer = f.ask("Drive the interactive program to its done marker.")
         assert answer["message"] == "flow done", answer
         entries = list(f.record(answer["session"]))
         outputs = [e for e in entries if e["kind"] == "result"]
@@ -73,7 +71,7 @@ for model in ("opus", "gpt-6.1-sol"):
                 assert "cursor" in output["output"], output
             else:
                 assert len(json.loads(output["output"])["cursor"]) == 2, output
-            request = json.loads((f.requests / f"{index:03}.body").read_bytes())
+            request = f.request(index)
             if model == "opus":
                 block = next(b for m in request["messages"] for b in m["content"]
                              if isinstance(b, dict) and b.get("type") == "tool_result"

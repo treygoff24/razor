@@ -8,10 +8,9 @@ import shutil
 import threading
 import time
 from dataclasses import replace
-from types import SimpleNamespace
 from driver import flow
-from model import agent, message, reply
-from server import listed, send, start, stop, until
+from model import agent, message, reply, tool
+from server import listed, send, start, stop, until, wait
 from terminal import Terminal
 
 root, child = "FLOW_REMOTE_49", "You are oak49,"
@@ -65,7 +64,7 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
         asyncio.run(serve())
 
     threading.Thread(target=proxy, daemon=True).start()
-    until(SimpleNamespace(record=lambda _: listening), "proxy", bool)
+    wait(lambda: listening)
     paired = f.run("devices", "add", "b", "--address", f"127.0.0.1:{listening[0]}")
     assert paired.returncode == 0, paired.stderr
     key = next(d["key"] for d in json.loads((local / "devices.json").read_text()) if d["name"] == "b")
@@ -78,38 +77,32 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
         assert answer.status == status, (path, answer.status, raw)
         return json.loads(raw) if raw else None
 
-    def far(session):
-        return [json.loads(line) for line in (other / "sessions" / session.removesuffix("@b") / "record.jsonl").read_text().splitlines()]
-
     def ended(entries):
         return any(e["kind"] == "turn_end" for e in entries)
 
     def reports(session):
         return [e for e in f.record(session) if e["kind"] == "input" and "report" in e["from"]]
 
-    remote = SimpleNamespace(record=far)
     # A top-level agent starts independent sessions, with the note's actual sender on both homes.
     top = "START_TOP_49"
     replies += [agent(top, "start_top", cwd=".", brief="LOCAL_TOP_49"),
                 agent(top, "start_top", cwd=str(beta.cwd), server="b", brief="REMOTE_TOP_49"),
                 reply(top, text="Started both."), reply("LOCAL_TOP_49", text="Local top ran."),
                 reply("REMOTE_TOP_49", text="Remote top ran.")]
-    ran = f.run("--print=json", top)
-    assert ran.returncode == 0, ran.stderr
-    initiator = json.loads(ran.stdout)["session"]
+    initiator = f.ask(top)["session"]
     entries = list(f.record(initiator))
     calls = [e for e in entries if e["kind"] == "call" and e["input"].get("action") == "start_top"]
     results = [json.loads(next(e["output"] for e in entries if e["kind"] == "result" and e["call"] == c["call"])) for c in calls]
-    for result, record, text, origin, suffix in ((results[0], f.record, "LOCAL_TOP_49", initiator, ""),
-                                                  (results[1], far, "REMOTE_TOP_49", initiator + "@a", "@b")):
+    for result, home, text, origin, suffix in ((results[0], f, "LOCAL_TOP_49", initiator, ""),
+                                                (results[1], beta, "REMOTE_TOP_49", initiator + "@a", "@b")):
         session = result["session"]
-        entries = until(SimpleNamespace(record=record), session, lambda es: any(e.get("text") == ("Remote top ran." if suffix else "Local top ran.") for e in es))
+        entries = until(home, session.removesuffix(suffix), lambda es: any(e.get("text") == ("Remote top ran." if suffix else "Local top ran.") for e in es))
         assert not entries[0].get("child") and result["address"] == result["name"] + suffix and (session.endswith(suffix) if suffix else "@" not in session)
         first = next(e for e in entries if e["kind"] == "input")
         assert first["text"] == text and first["from"]["mail"]["id"][0] == origin, first
     assert not any(e["kind"] == "child" for e in f.record(initiator))
     # A paired helper may comment but cannot claim: its parent's settle owns another list.
-    replies += [reply("TASK_OWNER_49", "mcp__razor__task", {"action": "write", "title": "Remote work"}),
+    replies += [tool("TASK_OWNER_49", "task", action="write", title="Remote work"),
                 reply("TASK_OWNER_49")]
     assert beta.run("--print=json", "TASK_OWNER_49").returncode == 0
     # Shared files expand at the source; paths, worktrees and commits resolve at the target.
@@ -121,19 +114,17 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
                 reply(child, "Bash", {"command": "sleep 1; printf marker > marker49; git add -- marker49 && git -c user.name=Flow -c user.email=flow@example.invalid commit -m Marker"}),
                 message(child, "note", text="CHILD_NOTE_49"),
                 reply(child, "Bash", {"command": "sleep 60", "run_in_background": True}),
-                reply(child, "mcp__razor__task", {"action": "write", "id": 1, "claim": True, "comment": "Must not land."}),
-                reply(child, "mcp__razor__task", {"action": "write", "id": 1, "claim": False}),
-                reply(child, "mcp__razor__task", {"action": "write", "id": 1, "comment": "Remote evidence."}),
+                tool(child, "task", action="write", id=1, claim=True, comment="Must not land."),
+                tool(child, "task", action="write", id=1, claim=False),
+                tool(child, "task", action="write", id=1, comment="Remote evidence."),
                 agent(child, "finish", status="finished", report="REMOTE_REPORT_49")]
-    ran = f.run("--print=json", root)
-    assert ran.returncode == 0, ran.stderr
-    parent = json.loads(ran.stdout)["session"]
+    parent = f.ask(root)["session"]
     records = until(f, parent, lambda es: any(e.get("text") == "First report." for e in es))
     started = next(e for e in records if e["kind"] == "child" and isinstance(e["event"], dict))
     qualified = started["session"]
     sid = qualified.split("@")[0]
     assert qualified.endswith("@b") and started["event"]["started"]["worktree"] is None
-    there = far(sid)
+    there = list(beta.record(sid))
     assert any(e["kind"] == "result" and e["outcome"] == "error" and "Only a top-level agent" in e["output"] for e in there)
     calls = {e["call"] for e in there if e["kind"] == "call" and e["name"] == "mcp__razor__task"}
     writes = [e for e in there if e["kind"] == "result" and e["call"] in calls]
@@ -146,17 +137,15 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     assert first_input["child_task"] == started["id"] and "SHARED_49" in first_input["text"]
     assert any(e["kind"] == "result" and e["outcome"] == "error" and "children.max" in e["output"] for e in records)
     until(f, parent, lambda es: len(reports(parent)) == 1)
-    old = next(e for e in far(sid) if "report" in e)
+    old = next(e for e in beta.record(sid) if "report" in e)
     saved = old["report"]
     # The report is written with its turn's end, after the calls' results.
     assert old["kind"] == "turn_end" and old["id"] > max(e["id"] for e in there if e["kind"] == "result")
-    assert any(e["kind"] == "job" and e["event"] == "ended" and e["id"] > old["id"] for e in far(sid)), \
+    assert any(e["kind"] == "job" and e["event"] == "ended" and e["id"] > old["id"] for e in beta.record(sid)), \
         "the report was not saved before closing the child's background job"
     assert any(e["kind"] == "input" and e["text"] == "PARENT_NOTE_49" and e["from"]["mail"]["id"][0] == parent + "@a" for e in there)
     assert any(e["kind"] == "input" and e["text"] == "CHILD_NOTE_49" and e["from"]["mail"]["id"][0] == qualified for e in records)
-    cards = SimpleNamespace(record=lambda _: request(local, "/status", method="GET")["agents"])
-    rows = until(cards, parent, lambda rows: any(r["session"] == qualified for r in rows))
-    row = next(r for r in rows if r["session"] == qualified)
+    row = wait(lambda: next((r for r in request(local, "/status", method="GET")["agents"] if r["session"] == qualified), None))
     assert row["parent"] == parent and row["launched"] == started["event"]["started"]["launched"]
     assert row["report"]["entry"] == reports(parent)[0]["id"] and row["state"] == "done" and not row["changed_files"], row
 
@@ -181,7 +170,7 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
                 reply(child, "Bash", {"command": f"while [ ! -e {release} ]; do sleep 0.05; done"}),
                 agent(child, "finish", status="partial", report="SECOND_REPORT_49")]
     assert f.run("--resume", parent, "--print=json", "Continue.").returncode == 0
-    until(remote, sid, lambda es: any(e.get("text") == "SECOND_TASK_49" for e in es))
+    until(beta, sid, lambda es: any(e.get("text") == "SECOND_TASK_49" for e in es))
     request(local, "/children", {"action": "update", "parent": parent, "child": sid, "update": {"report": saved}}, peer=True)
     assert [e["text"] for e in reports(parent)] == ["REMOTE_REPORT_49"], "a stale report ended the new task"
     release.touch()
@@ -199,7 +188,7 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     assert f.run("--resume", parent, "--print=json", "Hold a slot.").returncode == 0
     hold = next(e["session"].split("@")[0] for e in f.record(parent) if e["kind"] == "child" and isinstance(e["event"], dict)
                 and e["event"].get("started", {}).get("name") == "hold49")
-    until(remote, hold, lambda es: any(e["kind"] == "call" and e["input"].get("command") == "sleep 60" for e in es))
+    until(beta, hold, lambda es: any(e["kind"] == "call" and e["input"].get("command") == "sleep 60" for e in es))
     # The person reopens the remote child through its owning server, using the parent's fact id.
     replies += [agent(child, "start", server="a", name="third49", brief="Refuse the extra hop."),
                 message(child, "note", to="channel", text="TARGET_CHANNEL_49"),
@@ -211,11 +200,11 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     until(f, parent, lambda es: len(reports(parent)) == 3)
     assert reports(parent)[-1]["text"] == "PERSON_REPORT_49"
     until(f, parent, lambda es: any(e.get("text") == "Heard." for e in es))
-    assert any(e["kind"] == "result" and e["outcome"] == "error" and "subtree" in e["output"] for e in far(sid))
+    assert any(e["kind"] == "result" and e["outcome"] == "error" and "subtree" in e["output"] for e in beta.record(sid))
     assert not list((local / "channels").glob("*.jsonl")), "the channel crossed the machine boundary"
     assert "TARGET_CHANNEL_49" in (other / "channels" / f"{sid}.jsonl").read_text()
     continued = [e for e in f.record(parent) if e["kind"] == "child" and e["event"] == "continued"]
-    person = next(e for e in far(sid) if e["kind"] == "input" and e["text"] == "PERSON_TASK_49")
+    person = next(e for e in beta.record(sid) if e["kind"] == "input" and e["text"] == "PERSON_TASK_49")
     assert person["from"] == "person" and person["child_task"] == continued[-1]["id"]
     replies += [agent(root, "stop", child="hold49"), agent(root, "settle", child="hold49", decision="discard"), reply(root, text="Slot free.")]
     assert f.run("--resume", parent, "--print=json", "Free the slot.").returncode == 0
@@ -224,7 +213,7 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     replies += [agent(root, "continue", child="oak49", brief="STOP_TASK_49"), reply(root, text="Running."),
                 reply(child, "Bash", {"command": "sleep 60 # STOP_TASK_49"})]
     assert f.run("--resume", parent, "--print=json", "Run.").returncode == 0
-    until(remote, sid, lambda es: any(e["kind"] == "call" and e["input"].get("command") == "sleep 60 # STOP_TASK_49" for e in es))
+    until(beta, sid, lambda es: any(e["kind"] == "call" and e["input"].get("command") == "sleep 60 # STOP_TASK_49" for e in es))
     replies += [agent(root, "stop", child="oak49"), reply(root, text="Stopped.")]
     assert f.run("--resume", parent, "--print=json", "Stop.").returncode == 0
     assert any(e["kind"] == "child" and e["event"] == "stopped" for e in f.record(parent))
@@ -234,11 +223,11 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
                 reply("RECOVER_TASK_49", "Bash", {"command": f"while [ ! -e {go} ]; do sleep 0.05; done"}),
                 agent("RECOVER_TASK_49", "finish", status="finished", report="RECOVER_REPORT_49")]
     assert f.run("--resume", parent, "--print=json", "Recover.").returncode == 0
-    until(remote, sid, lambda es: any(e["kind"] == "input" and e["text"] == "RECOVER_TASK_49" for e in es))
+    until(beta, sid, lambda es: any(e["kind"] == "input" and e["text"] == "RECOVER_TASK_49" for e in es))
     stop(local)
     assert (local / "live" / parent).exists(), "a parent with an outstanding remote task lost its live marker"
     go.touch()
-    until(remote, sid, lambda es: sum("report" in e for e in es) == 4)
+    until(beta, sid, lambda es: sum("report" in e for e in es) == 4)
     assert len(reports(parent)) == 3
     # Bind the same address, so the existing reciprocal enrollment remains valid on restart.
     config = local / "config.toml"
@@ -249,7 +238,7 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     assert reports(parent)[-1]["text"] == "RECOVER_REPORT_49"
     until(f, parent, lambda es: any(e.get("text") == "Recovered." for e in es))
     request(local, "/children", {"action": "update", "parent": parent, "child": sid,
-            "update": {"report": next(e["report"] for e in reversed(far(sid)) if "report" in e)}}, peer=True)
+            "update": {"report": next(e["report"] for e in reversed(list(beta.record(sid))) if "report" in e)}}, peer=True)
     assert len(reports(parent)) == 4, "push and recovery each admitted the report"
     replies += [agent(root, "settle", child="oak49", decision="merge"), reply(root, text="Merged.")]
     with Terminal(f, "--resume", parent, status=True) as t:
@@ -270,7 +259,7 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     assert f.run("--resume", parent, "--print=json", "Hold idle.").returncode == 0
     idle = next(e["session"].split("@")[0] for e in f.record(parent) if e["kind"] == "child" and isinstance(e["event"], dict)
                 and e["event"].get("started", {}).get("name") == "idle49")
-    until(remote, idle, ended)
+    until(beta, idle, ended)
     before = len(recovery)
     replies += [reply("BUSY_49", "Bash", {"command": "true"}) for _ in range(20)] + [reply("BUSY_49", text="Busy done.")]
     assert beta.run("--print=json", "BUSY_49").returncode == 0
@@ -285,16 +274,16 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
                 reply("You are ancestor49,", "Bash", {"command": f"while [ ! -e {leaf_started} ]; do sleep 0.05; done"}),
                 agent("You are ancestor49,", "finish", status="finished", report="Ancestor finished."),
                 reply("You are leaf49,", "Bash", {"command": f"touch {leaf_started}; sleep 60"})]
-    ran = f.run("--resume", parent, "--print=json", "Close the ancestor.")
-    assert ran.returncode == 0, ran.stderr
+    f.ask("--resume", parent, "Close the ancestor.")
     ancestor = next(e["session"] for e in f.record(parent) if e["kind"] == "child" and isinstance(e["event"], dict)
                     and e["event"].get("started", {}).get("name") == "ancestor49")
     assert any(e["kind"] == "child" and e["event"] == "stopped" and e["session"].endswith("@b") for e in f.record(ancestor))
     assert not (local / "live" / ancestor).exists(), "the retired ancestor kept an outstanding remote fact"
-    # A local child's report still reaches its parent when its remote descendant is down.
+    # A local child's report still reaches its parent when its remote descendant is down. The
+    # parent's wait outlasts the outage steps below, however slow, so the report lands in it.
     ready, release = beta.cwd / "lost-ready49", beta.cwd / "lost-release49"
     replies += [agent(root, "start", name="outage49", placement="in_place", brief="Report during an outage."),
-                agent(root, "wait", timeout_ms=5000), reply(root, text="Outage report heard."),
+                agent(root, "wait", timeout_ms=50_000), reply(root, text="Outage report heard."),
                 agent("You are outage49,", "start", server="b", name="lost49", cwd=str(beta.cwd), brief="Hold."),
                 reply("You are outage49,", "Bash", {"command": f"while [ ! -e {release} ]; do sleep 0.05; done"}),
                 agent("You are outage49,", "finish", status="finished", report="OUTAGE_REPORT_49"),
@@ -302,7 +291,7 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     result = {}
     worker = threading.Thread(target=lambda: result.setdefault("ran", f.run("--resume", parent, "--print=json", "Report during the outage.")))
     worker.start()
-    until(SimpleNamespace(record=lambda _: [ready.exists()]), parent, any)
+    wait(ready.exists)
     # A read leaves reusable connections open. The peer then goes silent on those sockets
     # and refuses fresh connections: mail and child mutations must say nothing was sent.
     request(local, "/search?q=warm49", method="GET")
@@ -316,12 +305,10 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     replies += [agent("SILENT_49", "start", server="b", name="unsent49", cwd=str(beta.cwd), brief="Hold."),
                 message("SILENT_49", "note", to=f"{sid}@b", text="UNSENT_49"), reply("SILENT_49")]
     began = time.monotonic()
-    attempted = f.run("--print=json", "SILENT_49")
-    assert attempted.returncode == 0, attempted.stderr
-    results = [e for e in f.record(json.loads(attempted.stdout)["session"]) if e["kind"] == "result"]
+    results = [e for e in f.record(f.ask("SILENT_49")["session"]) if e["kind"] == "result"]
     assert len(results) == 2 and all(e["outcome"] == "error" and ("nothing was sent" in e["output"] or "was not sent" in e["output"]) for e in results), results
     assert time.monotonic() - began < 4, "silent pooled connections delayed a mutation"
-    assert not any(e.get("text") == "UNSENT_49" for e in far(sid)), "refused mail arrived"
+    assert not any(e.get("text") == "UNSENT_49" for e in beta.record(sid)), "refused mail arrived"
     stop(other)
     release.touch()
     worker.join(timeout=60)

@@ -16,4 +16,4 @@ for name, reply in (("early", response(items, completed=False)),
         assert len(ends) == 1 and isinstance(ends[0]["end"], dict) and "error" in ends[0]["end"], entries
         assert not [e for e in entries if e.get("kind") in ("call", "result", "response")], entries
         assert not (f.cwd / "first.txt").exists() and not (f.cwd / "second.txt").exists()
-        assert len(list(f.requests.glob("[0-9]*.body"))) == 6, list(f.requests.iterdir())
+        assert len(f.sent()) == 6, list(f.requests.iterdir())

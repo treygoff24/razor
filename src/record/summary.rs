@@ -1,10 +1,11 @@
 //! The same fold recovers a record and advances it after a committed append.
 
+mod voice;
+pub(crate) use voice::{Meeting, MeetingState};
+
+use super::calls::{action, ask, target};
 use crate::protocol::*;
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, path::PathBuf};
 
 /// A direct child's latest facts; the report keeps the API's first-line, 200-character
 /// preview (at most 800 UTF-8 bytes), with its entry id for the whole report.
@@ -32,25 +33,6 @@ impl ChildSummary {
     pub(crate) fn working(&self) -> bool {
         self.report.is_none() && !self.stopped && self.settled.is_none()
     }
-}
-
-/// A meeting recorded on the phone, from its start fact: the phone's id for it, the folder
-/// meetrec made, the phone that recorded it, and how far it got.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Meeting {
-    pub(crate) id: String,
-    pub(crate) folder: String,
-    pub(crate) device: Option<String>,
-    pub(crate) state: MeetingState,
-}
-
-/// Recording from its start, stopped by the person's end, and closed by its notes input or a
-/// cancel; it only moves forward. The batch pass's outcome is the folder's `final.json`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum MeetingState {
-    Recording,
-    Stopped,
-    Closed,
 }
 
 /// Facts retained without entry bodies or Responses items; historical ids cost eight bytes
@@ -105,6 +87,8 @@ pub(crate) struct Summary {
     /// This turn's `wait` Calls whose `cell_id` names one of `cells`, each with that exec Call.
     waits: Vec<(CallId, EntryId)>,
     pub(crate) last_end: Option<End>,
+    /// The model the latest turn end naming one ran on, the open conversation's.
+    pub(crate) ran: Option<String>,
     /// Each list keeps four ids through the latest rebuild cut, plus ids after that cut.
     pub(crate) asks: Vec<EntryId>,
     pub(crate) parent_inputs: Vec<EntryId>,
@@ -136,7 +120,7 @@ pub(crate) struct Summary {
     pub(crate) changed_files: Vec<PathBuf>,
     /// Tool calls over the whole record, including unresolved calls, and in its last hour.
     pub(crate) calls_made: u32,
-    pub(crate) hour: Option<crate::protocol::Hour>,
+    pub(crate) hour: Option<Hour>,
     /// Finished reports since upkeep: 2 is due, 3 has already been reminded.
     pub(crate) upkeep: u8,
     upkeep_writes: Vec<CallId>,
@@ -186,12 +170,16 @@ impl Summary {
         }
     }
 
-    pub(super) fn new(session: &SessionId, cwd: &Path, model: &str, choice: ModelSettings) -> Self {
+    /// The facts before the record's Start, whose fold sets the session's own.
+    pub(super) fn new(session: &SessionId) -> Self {
         Self {
             session: session.clone(),
-            cwd: cwd.into(),
-            model: model.into(),
-            settings: choice,
+            cwd: PathBuf::new(),
+            model: String::new(),
+            settings: ModelSettings {
+                effort: Effort::Low,
+                speed: Speed::Standard,
+            },
             handover: false,
             profile_version: String::new(),
             started: 0,
@@ -214,6 +202,7 @@ impl Summary {
             cells: Vec::new(),
             waits: Vec::new(),
             last_end: None,
+            ran: None,
             asks: Vec::new(),
             parent_inputs: Vec::new(),
             videos: Vec::new(),
@@ -313,32 +302,7 @@ impl Summary {
             _ => None,
         };
         let offers = reply.as_ref().is_some_and(|r| r.suggestion.is_some());
-        self.suggestion = match &entry.body {
-            _ if self.idle_handover && unseen(&entry.body) => self.suggestion,
-            Body::Input(input) if input.suggestions => {
-                self.suggesting = Some(entry.id);
-                None
-            }
-            Body::Text { .. } => offers.then_some((entry.id, false)),
-            Body::TurnEnd {
-                inputs,
-                end: End::Done,
-                closed: false,
-                ..
-            } if self.suggesting.is_some_and(|id| inputs.contains(&id)) => {
-                self.suggestion.map(|(id, _)| (id, true))
-            }
-            Body::Headline { .. }
-            | Body::ChangedFiles { .. }
-            | Body::Job(_)
-            | Body::Child { .. }
-            | Body::Withdrawn { .. }
-            | Body::Name { .. }
-            | Body::Effort { .. }
-            | Body::Notice { .. }
-            | Body::VoiceCall { .. } => self.suggestion,
-            _ => None,
-        };
+        self.suggest(entry, offers);
         let idle_close = matches!(
             entry.body,
             Body::TurnEnd {
@@ -359,12 +323,15 @@ impl Summary {
         }
         match &entry.body {
             Body::Start {
+                cwd,
+                model,
+                settings,
                 profile_version,
                 child,
                 name,
                 thread,
-                ..
             } => {
+                (self.cwd, self.model, self.settings) = (cwd.clone(), model.clone(), *settings);
                 self.profile_version = profile_version.clone();
                 self.started = entry.at;
                 self.child = child.clone();
@@ -375,42 +342,12 @@ impl Summary {
                     None => name.clone(),
                 };
             }
-            Body::Input(input) => {
-                if input.upkeep && input.from == Origin::Razor {
-                    self.upkeep = 3;
-                } else if self.upkeep < 2
-                    && matches!(
-                        input.from,
-                        Origin::Report {
-                            status: ReportStatus::Finished,
-                            ..
-                        }
-                    )
-                {
-                    self.upkeep += 1;
-                }
-                self.input(entry.id, input);
-            }
+            Body::Input(input) => self.input(entry.id, input),
             Body::VoiceCall {
                 call,
                 source,
                 event,
-            } => {
-                if *source == Source::Meeting {
-                    self.meeting(call, event);
-                }
-                let facts = &mut self.voice_calls;
-                facts.push((entry.id, matches!(event, CallEvent::Line { .. })));
-                let lines = facts.iter().filter(|(_, line)| *line).count();
-                let oldest = facts
-                    .iter()
-                    .position(|(_, line)| *line)
-                    .filter(|_| lines > 256);
-                if let Some(at) = oldest.or((facts.len() > 512).then_some(0)) {
-                    facts.remove(at);
-                    self.voice_calls_left_out += 1;
-                }
-            }
+            } => self.voice_call(entry.id, call, *source, event),
             Body::Name { name } => self.name = name.clone(),
             Body::Effort { effort } => self.settings.effort = *effort,
             Body::Fresh { schedule, due, .. } => self.schedule(schedule, *due),
@@ -428,50 +365,13 @@ impl Summary {
                     self.title_input = EntryId(0);
                 }
             }
-            Body::Call { call, name, input } => {
-                self.calls_made += 1;
-                let mut hour = self.hour.unwrap_or_default().at(entry.at);
-                hour.calls[11] = hour.calls[11].saturating_add(1);
-                self.hour = Some(hour);
-                let doing = (name.clone(), target(input), entry.at);
-                self.unresolved.push((call.clone(), entry.id, doing));
-                if matches!(action(name), "task" | "memory") && input["action"] == "write" {
-                    self.upkeep_writes.push(call.clone());
-                }
-                match action(name) {
-                    "exec" => self.cells.push((call.clone(), entry.id)),
-                    "wait" => self
-                        .waits
-                        .extend(self.cell(input).map(|c| (call.clone(), c))),
-                    _ => {}
-                }
-                self.question(entry.id, entry.at, name, input);
-            }
+            Body::Call { call, name, input } => self.call(entry, call, name, input),
             Body::Result {
                 call,
                 outcome,
                 inputs,
                 ..
-            } => {
-                if let Some(at) = self.upkeep_writes.iter().position(|id| id == call) {
-                    self.upkeep_writes.remove(at);
-                    if *outcome == Outcome::Success {
-                        self.upkeep = 0;
-                    }
-                }
-                self.unanswered.retain(|id| !inputs.contains(id));
-                self.failed += u32::from(*outcome == Outcome::Error);
-                if *outcome == Outcome::Error
-                    && let Some((_, id, _)) = self.unresolved.iter().find(|(c, ..)| c == call)
-                {
-                    self.questions.retain(|ask| ask.id.1 != *id);
-                }
-                if *outcome == Outcome::Unknown {
-                    let calls = self.unresolved.iter().filter(|(c, ..)| c == call);
-                    self.unknown.extend(calls.map(|(_, at, _)| *at));
-                }
-                self.unresolved.retain(|(c, ..)| c != call);
-            }
+            } => self.result(call, *outcome, inputs),
             Body::Job(event @ JobEvent::Started { job, .. }) => {
                 self.next_job = JobId(self.next_job.0.max(job.0 + 1));
                 self.jobs.push(event.clone());
@@ -488,12 +388,14 @@ impl Summary {
                 closed,
                 close_reason,
                 context,
+                model,
                 window,
                 report,
                 ..
             } => {
                 self.context = *context;
                 self.window = *window;
+                self.ran = model.clone().or(self.ran.take());
                 // A turn's report is always of the task it worked on, the current one.
                 self.reported = report.as_ref().map(|_| entry.id).or(self.reported);
                 self.turn_end(inputs, end, usage, *closed);
@@ -546,39 +448,118 @@ impl Summary {
         // A reply whose only line is its suggestion leaves the preview before it.
         let shown = reply.map(|r| r.text).filter(|t| !t.trim().is_empty());
         if let Some(text) = shown.filter(|_| !self.idle_handover) {
-            self.spoke_at = Some(entry.at);
-            self.last_reply.clear();
-            for word in text.split_whitespace() {
-                if !self.last_reply.is_empty() {
-                    self.last_reply.push(' ');
-                }
-                let room = 512 - self.last_reply.len();
-                self.last_reply
-                    .push_str(&word[..word.floor_char_boundary(room.min(word.len()))]);
-                if word.len() >= room || word.ends_with(['.', '!', '?']) {
-                    break;
-                }
-            }
-            // Until a child sets a headline, its newest reply's first line with content
-            // stands for one, cut to the headline tool's 64 KiB.
-            if self.child.is_some()
-                && self.headline_at.is_none()
-                && let Some(line) = text.lines().map(str::trim).find(|l| !l.is_empty())
-            {
-                self.headline = line[..line.floor_char_boundary(64 << 10)].into();
-            }
+            self.spoke(entry.at, text);
         }
         self.runs.fold(&self.session, entry, &self.unanswered);
     }
 
+    /// Tracks `suggestion` through `entry`: a reply that `offers` one sets it, the turn end
+    /// answering the input that asked for one confirms it, the facts listed keep it, an idle
+    /// handover's own entries (`unseen`) pass it by, and anything else (work, any input, a
+    /// question) withdraws it.
+    fn suggest(&mut self, entry: &Entry, offers: bool) {
+        self.suggestion = match &entry.body {
+            _ if self.idle_handover && unseen(&entry.body) => self.suggestion,
+            Body::Input(input) if input.suggestions => {
+                self.suggesting = Some(entry.id);
+                None
+            }
+            Body::Text { .. } => offers.then_some((entry.id, false)),
+            Body::TurnEnd {
+                inputs,
+                end: End::Done,
+                closed: false,
+                ..
+            } if self.suggesting.is_some_and(|id| inputs.contains(&id)) => {
+                self.suggestion.map(|(id, _)| (id, true))
+            }
+            Body::Headline { .. }
+            | Body::ChangedFiles { .. }
+            | Body::Job(_)
+            | Body::Child { .. }
+            | Body::Withdrawn { .. }
+            | Body::Name { .. }
+            | Body::Effort { .. }
+            | Body::Notice { .. }
+            | Body::VoiceCall { .. } => self.suggestion,
+            _ => None,
+        };
+    }
+
+    /// A reply the person sees, at `at`: the row's preview is its words to the end of its first
+    /// sentence, at most 512 bytes, and until a child sets a headline, the reply's first line
+    /// with content stands for one, cut to the headline tool's 64 KiB.
+    fn spoke(&mut self, at: Millis, text: &str) {
+        self.spoke_at = Some(at);
+        self.last_reply.clear();
+        for word in text.split_whitespace() {
+            if !self.last_reply.is_empty() {
+                self.last_reply.push(' ');
+            }
+            let room = 512 - self.last_reply.len();
+            self.last_reply
+                .push_str(&word[..word.floor_char_boundary(room.min(word.len()))]);
+            if word.len() >= room || word.ends_with(['.', '!', '?']) {
+                break;
+            }
+        }
+        if self.child.is_some()
+            && self.headline_at.is_none()
+            && let Some(line) = text.lines().map(str::trim).find(|l| !l.is_empty())
+        {
+            self.headline = line[..line.floor_char_boundary(64 << 10)].into();
+        }
+    }
+
+    /// A call, unresolved until its Result answers it: counted in the record and its hour, and
+    /// by its action an upkeep write, a code cell, a `wait` on one, or a question to the person.
+    fn call(&mut self, entry: &Entry, call: &CallId, name: &str, input: &serde_json::Value) {
+        self.calls_made += 1;
+        let mut hour = self.hour.unwrap_or_default().at(entry.at);
+        hour.calls[11] = hour.calls[11].saturating_add(1);
+        self.hour = Some(hour);
+        let doing = (name.into(), target(input), entry.at);
+        self.unresolved.push((call.clone(), entry.id, doing));
+        if matches!(action(name), "task" | "memory") && input["action"] == "write" {
+            self.upkeep_writes.push(call.clone());
+        }
+        match action(name) {
+            "exec" => self.cells.push((call.clone(), entry.id)),
+            "wait" => self
+                .waits
+                .extend(self.cell(input).map(|c| (call.clone(), c))),
+            _ => {}
+        }
+        self.question(entry.id, entry.at, name, input);
+    }
+
+    /// A call's Result: it answers the inputs it delivered, a successful upkeep write ends the
+    /// reminders, a failed question is no longer open, and an unknown outcome leaves its call
+    /// for the turn's end to judge.
+    fn result(&mut self, call: &CallId, outcome: Outcome, inputs: &[EntryId]) {
+        if let Some(at) = self.upkeep_writes.iter().position(|id| id == call) {
+            self.upkeep_writes.remove(at);
+            if outcome == Outcome::Success {
+                self.upkeep = 0;
+            }
+        }
+        self.unanswered.retain(|id| !inputs.contains(id));
+        self.failed += u32::from(outcome == Outcome::Error);
+        if outcome == Outcome::Error
+            && let Some((_, id, _)) = self.unresolved.iter().find(|(c, ..)| c == call)
+        {
+            self.questions.retain(|ask| ask.id.1 != *id);
+        }
+        if outcome == Outcome::Unknown {
+            let calls = self.unresolved.iter().filter(|(c, ..)| c == call);
+            self.unknown.extend(calls.map(|(_, at, _)| *at));
+        }
+        self.unresolved.retain(|(c, ..)| c != call);
+    }
+
     /// A schedule's latest due time, among at most 64 names, evicting the stalest for a new name.
     fn schedule(&mut self, name: &str, due: Millis) {
-        if self.scheduled.len() == 64 && !self.scheduled.contains_key(name) {
-            let oldest = self.scheduled.iter().min_by_key(|(_, due)| **due);
-            // A map at its nonzero capacity always has an oldest entry.
-            let name = oldest.expect("full schedule history").0.clone();
-            self.scheduled.remove(&name);
-        }
+        room(&mut self.scheduled, 64, name, |due| *due);
         let previous = self.scheduled.entry(name.into()).or_default();
         *previous = (*previous).max(due);
     }
@@ -589,15 +570,11 @@ impl Summary {
         self.runs.open()
     }
 
-    // A turn's end answers its inputs; its cache reads over its whole request input become the
-    // share reported, once a turn has reported any input.
+    /// A turn's end answers its inputs; its cache reads over its whole request input become the
+    /// share reported, once a turn has reported any input.
     fn turn_end(&mut self, inputs: &[EntryId], end: &End, usage: &Usage, closed: bool) {
         self.unanswered.retain(|id| !inputs.contains(id));
-        let facts = self.voice_calls.len();
-        self.voice_calls.retain(|(id, _)| !inputs.contains(id));
-        if self.voice_calls.len() < facts {
-            self.voice_calls_left_out = 0;
-        }
+        self.calls_answered(inputs);
         let unanswered = &self.unanswered;
         self.videos
             .retain(|(id, kept)| *kept || unanswered.contains(id));
@@ -647,36 +624,6 @@ impl Summary {
                 .collect(),
             at,
         });
-    }
-
-    // A start lists the meeting as the newest, recording; an end stops it and a cancel closes it.
-    fn meeting(&mut self, call: &str, event: &CallEvent) {
-        let state = match event {
-            CallEvent::Started { folder, device } => {
-                self.meetings.retain(|m| m.id != call);
-                self.meetings.push(Meeting {
-                    id: call.into(),
-                    folder: folder.clone().unwrap_or_default(),
-                    device: device.clone(),
-                    state: MeetingState::Recording,
-                });
-                self.meetings
-                    .drain(..self.meetings.len().saturating_sub(16));
-                return;
-            }
-            CallEvent::Ended {
-                reason: CallReason::Canceled,
-            } => MeetingState::Closed,
-            CallEvent::Ended { .. } => MeetingState::Stopped,
-            _ => return,
-        };
-        self.advance_meeting(call, state);
-    }
-
-    fn advance_meeting(&mut self, id: &str, state: MeetingState) {
-        if let Some(meeting) = self.meetings.iter_mut().find(|m| m.id == id) {
-            meeting.state = meeting.state.max(state);
-        }
     }
 
     fn input(&mut self, id: EntryId, input: &Input) {
@@ -736,7 +683,11 @@ impl Summary {
             }
             Origin::Answer { ask } => self.questions.retain(|q| q.id.1 != *ask),
             Origin::Schedule { name, due } => self.schedule(name, *due),
+            Origin::Razor if input.upkeep => self.upkeep = 3,
             Origin::Report { child, status } => {
+                if *status == ReportStatus::Finished && self.upkeep < 2 {
+                    self.upkeep += 1;
+                }
                 if let Some(c) = self.children.iter_mut().find(|c| &c.session == child) {
                     c.report = Some(Report {
                         status: *status,
@@ -773,10 +724,15 @@ impl Summary {
     }
 }
 
-/// A call's action under each route's name for it.
-fn action(name: &str) -> &str {
-    let razor = name.strip_prefix("mcp__razor__");
-    name.strip_prefix("functions.").or(razor).unwrap_or(name)
+/// Makes room for `name` in `map`, which holds at most `cap` names: a new name evicts the entry
+/// whose time `at` gives is earliest.
+pub(super) fn room<V>(map: &mut BTreeMap<String, V>, cap: usize, name: &str, at: fn(&V) -> u64) {
+    if map.len() != cap || map.contains_key(name) {
+        return;
+    }
+    if let Some((oldest, _)) = map.iter().min_by_key(|(_, v)| at(v)) {
+        map.remove(&oldest.clone());
+    }
 }
 
 /// What an idle handover the person never sees records: its input, the note turn's words and
@@ -797,33 +753,6 @@ fn unseen(body: &Body) -> bool {
         } => !closed && (*end == End::Done || inputs.is_empty()),
         _ => false,
     }
-}
-
-/// The input of a call that asks the person a question: a `message` of type question to the
-/// parent or to no one. A child's calls ask its parent, not the person; callers check that.
-pub(crate) fn ask(name: &str, input: &serde_json::Value) -> Option<serde_json::Value> {
-    said(name, input).filter(|input| input["type"] == "question")
-}
-
-/// The input of Razor's `message` note or question to the parent or to no one, under each
-/// route's name for it; another tool whose name ends in `message` is not it.
-pub(super) fn said(name: &str, input: &serde_json::Value) -> Option<serde_json::Value> {
-    if !["message", "mcp__razor__message", "functions.message"].contains(&name) {
-        return None;
-    }
-    let kind = matches!(input["type"].as_str(), Some("note" | "question"));
-    (kind && input["to"].as_str().is_none_or(|to| to == "parent")).then(|| input.clone())
-}
-
-/// What a call acts on: its command, file, pattern, path, address or query, else its first text,
-/// on one line of at most 120 bytes.
-pub(crate) fn target(input: &serde_json::Value) -> String {
-    let named = ["command", "file_path", "pattern", "path", "url", "query"];
-    let text = named.iter().find_map(|k| input[k].as_str());
-    let text = text.or_else(|| input.as_object()?.values().find_map(|v| v.as_str()));
-    let line = text.unwrap_or_default().split_whitespace();
-    let line = line.collect::<Vec<_>>().join(" ");
-    line[..line.floor_char_boundary(120)].into()
 }
 
 /// A text's first line, at most 200 characters: a report's preview and a run's line.

@@ -1,13 +1,9 @@
 """Real child reports and task writes drive one reminder; idle handover asks for upkeep."""
-import json
 from claude import reply
 from clock import wall_clock
 from driver import flow
+from model import tool
 import server
-
-
-def tool(marker, tool_name, **args):
-    return reply((None, f"mcp__razor__{tool_name}", args), match=marker)
 
 
 root = "ROOT_UPKEEP_77"
@@ -50,7 +46,7 @@ with flow(replies) as f:
     assert not reminders(child(1))
     second = child(2)
     assert len(reminders(second)) == 1 and reminders(second)[0]["from"] == "razor", second[-10:]
-    assert reminders(second)[0]["text"].strip() in sorted(f.requests.glob("[0-9]*.body"))[-1].read_text()
+    assert reminders(second)[0]["text"].strip() in f.sent()[-1]
     assert len(reminders(child(3))) == 1
     replies.extend([tool(root, "task", action="write", title="Kept after reports"),
                     reply(text="Task saved.", match=root)])
@@ -64,9 +60,7 @@ with flow(replies) as f:
 with wall_clock() as (_, env, advance):
     replies = [reply(text="Ready."), reply((None, "mcp__razor__handover", {"note": "Continue."}))]
     with flow(replies, config="[sessions]\nhandover_tokens = 0", env=env) as f:
-        first = f.run("--print=json", "Start the idle check.")
-        assert first.returncode == 0, first.stderr
-        session = json.loads(first.stdout)["session"]
+        session = f.ask("Start the idle check.")["session"]
         advance(3_000_000)
         entries = server.until(f, session, lambda es: any(e["kind"] == "rebuild" and e.get("trigger") == "idle" for e in es))
         request = next(e for e in entries if e.get("trigger") == "idle")

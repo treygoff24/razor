@@ -67,9 +67,7 @@ with flow([done(), slow, check, done(), done(), quick, done(), done(), logs, don
         config = f.home / ".razor/config.toml"
         config.write_text(config.read_text() + f'\n[live]\nurl={json.dumps(url)}\n')
         f.env["OPENAI_API_KEY"] = "flow-dummy-live-key"
-        seeded = f.run("--print=json", "Seed the call.")
-        assert seeded.returncode == 0, seeded.stderr
-        session = json.loads(seeded.stdout)["session"]
+        session = f.ask("Seed the call.")["session"]
         # A session started for a call runs on the call's model and effort, Razor's or the config's;
         # a model or effort the phone sends wins, and Razor tells the phone the call's.
         def start(**choice):
@@ -117,7 +115,7 @@ with flow([done(), slow, check, done(), done(), quick, done(), done(), logs, don
         assert [e["text"] for e in long_call if e["event"] == "line"] == [f"line{n:03d}." for n in range(300)], "long call lost record lines"
         server.post(f, f"/sessions/{session}/input", {"text": "Continue by message."})
         server.until(f, session, lambda es: sum(e["kind"] == "turn_end" for e in es) == 3)
-        users = [i for i in json.loads((f.requests / "005.body").read_text())["input"] if i.get("role") == "user"]
+        users = [i for i in f.request(5)["input"] if i.get("role") == "user"]
         view = "\n".join(p.get("text", "") for p in users[-1]["content"])
         shown = re.findall(r"line(\d{3})\.", view)
         omitted = re.findall(r"\b\d+\b", view)

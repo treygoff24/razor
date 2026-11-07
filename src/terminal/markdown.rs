@@ -436,7 +436,6 @@ impl<'a> State<'a> {
                 ));
                 current
             }
-            // Header cells in the heading's white bold.
             Tag::TableHead | Tag::TableRow => {
                 self.cells.clear();
                 let strong = current.fg(WHITE).add_modifier(Modifier::BOLD);

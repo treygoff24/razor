@@ -48,16 +48,15 @@ with flow(replies) as f:
     answered = [i for e in ends for i in e["inputs"] if i in ids]
     assert answered == ids and all(e["end"] == "done" for e in ends), ends
     assert len([e for e in entries if e["kind"] == "start"]) == 1, entries
-    requests = [json.dumps(json.loads(p.read_bytes())["messages"])
-                for p in sorted(f.requests.glob("[0-9]*.body"))]
+    requests = [json.dumps(json.loads(body)["messages"]) for body in f.sent()]
     context = json.dumps(rebuild["context"][:200])[1:-1]
     for request in requests:
         assert (asks[1] not in request and asks[2] not in request) or context in request, request
     last = requests[-1]
-    native = json.loads(sorted(f.requests.glob("[0-9]*.body"))[-1].read_bytes())["messages"]
+    native = json.loads(f.sent()[-1])["messages"]
     held = [m for m in native if m["role"] == "user" and asks[1] in json.dumps(m)]
     assert len(held) == 1, held
-    first_fresh = json.loads(sorted(f.requests.glob("[0-9]*.body"))[1].read_bytes())["messages"]
+    first_fresh = json.loads(f.sent()[1])["messages"]
     assert asks[1] in json.dumps([m for m in first_fresh if m["role"] == "user"][-1]) and asks[2] not in json.dumps(first_fresh), first_fresh
     assert [last.count(text) for text in asks] == [1, 1, 1], last
     positions = [last.index(context), last.index(asks[1]), last.index(asks[2])]
@@ -80,7 +79,7 @@ with flow(replies) as f:
     entries = server.until(f, session, lambda es: any(e["kind"] == "turn_end" and kept in e["inputs"] for e in es))
     rebuild = next(e for e in entries if e["kind"] == "rebuild")
     assert held not in rebuild["context"] and news in rebuild["context"], rebuild["context"]
-    last = json.dumps(json.loads(sorted(f.requests.glob("[0-9]*.body"))[-1].read_bytes())["messages"])
+    last = json.dumps(json.loads(f.sent()[-1])["messages"])
     context = json.dumps(rebuild["context"][:200])[1:-1]
     assert last.count(held) == 1 and last.index(context) < last.index(held), last
 
@@ -115,7 +114,7 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
     ends = [(e["end"], e["inputs"]) for e in entries if e["kind"] == "turn_end"]
     # Mail from outside the tree waits for the turn's end; the person's input behind it passes it.
     assert ends == [("done", ids + [after]), ("done", [mail[0]["entry"]])], (ids, ends)
-    second = sorted(f.requests.glob("[0-9]*.body"))[1].read_text()
+    second = f.sent()[1]
     assert all(f"NOTE_{i}." in second for i in range(64)), "the second request missed a note"
 
 wait = ("mcp__razor__agent", {"action": "wait", "timeout_ms": 30000})
@@ -161,5 +160,5 @@ for model in ("opus", "gpt-6.1-sol"):
         result = next(e for e in entries if e["kind"] == "result" and e["call"] == "cell")
         assert "took 64" in (out := result["output"]) and "hold 64 news" in out and result["inputs"] == mails[:64], out
         assert any(e["kind"] == "turn_end" and person in e["inputs"] for e in entries), model
-        last = sorted(f.requests.glob("[0-9]*.body"))[-1].read_text()
+        last = f.sent()[-1]
         assert all(last.count(f"PUMP_{i}.") == 1 for i in range(65)) and last.count("PERSON_34.") == 1, model

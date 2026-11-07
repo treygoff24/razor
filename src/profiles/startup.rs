@@ -64,14 +64,14 @@ pub(crate) async fn opening(
     let (prompt, skipped) = read.unwrap_or_else(|e| (profile.route.clone(), vec![e.to_string()]));
     let now = jiff::Zoned::now();
     let fields = [
-        ("{name}", s.name.clone()),
-        ("{session}", s.session.as_str().to_owned()),
-        ("{date}", now.strftime("%A %Y-%m-%d").to_string()),
-        ("{time}", now.strftime("%H:%M %Z (%Q, UTC%:z)").to_string()),
-        ("{machine}", machine()),
-        ("{folder}", cwd.display().to_string()),
+        ("name", s.name.clone()),
+        ("session", s.session.to_string()),
+        ("date", now.strftime("%A %Y-%m-%d").to_string()),
+        ("time", now.strftime("%H:%M %Z (%Q, UTC%:z)").to_string()),
+        ("machine", machine()),
+        ("folder", cwd.display().to_string()),
     ];
-    let mut facts = (fields.iter()).fold(text("facts").into(), |t: String, (k, v)| t.replace(k, v));
+    let mut facts = super::fill(text("facts"), &fields);
     facts.extend(branch.map(|branch| text("branch").replace("{branch}", &branch)));
     facts.extend(skipped);
     facts.extend(identity.map(|identity| format!("\n\n{identity}")));
@@ -82,17 +82,9 @@ impl Opening {
     /// The first input's prefix: the facts, the memory page, the skills, then the MCP servers,
     /// each part present at most once and separated by a blank line.
     pub(crate) fn page(&self, memory: String, skills: Option<String>, mcp: &str) -> String {
-        let parts = [
-            Some(&*self.facts),
-            Some(&*memory),
-            skills.as_deref(),
-            Some(mcp),
-        ];
-        let parts: Vec<_> = parts
-            .into_iter()
-            .flatten()
-            .filter(|p| !p.is_empty())
-            .collect();
+        let skills = skills.unwrap_or_default();
+        let parts = [&*self.facts, &*memory, &*skills, mcp];
+        let parts: Vec<_> = parts.into_iter().filter(|p| !p.is_empty()).collect();
         parts.join("\n\n")
     }
 }

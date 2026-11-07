@@ -42,7 +42,7 @@ pub(crate) fn shipped(name: &str) -> Option<PathBuf> {
 /// Makes Razor's home and any missing parents owner-only (0700), since its records hold whole
 /// conversations; a home that already exists keeps its mode. Serve, the clients that start it, and
 /// setup call this before writing there, so whichever runs first makes the home.
-pub fn make_home(home: &Path) -> Result<(), Error> {
+pub(crate) fn make_home(home: &Path) -> Result<(), Error> {
     use std::os::unix::fs::DirBuilderExt;
     let made = std::fs::DirBuilder::new()
         .recursive(true)
@@ -58,7 +58,7 @@ pub fn make_home(home: &Path) -> Result<(), Error> {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub model: String,
+    pub(crate) model: String,
     pub(crate) effort: Effort,
     /// The model and effort a session started for a call runs on, unless the caller names its
     /// own; a call to an existing session keeps that session's (docs/design/call.md).
@@ -67,9 +67,9 @@ pub struct Config {
     pub(crate) speed: Speed,
     pub(crate) rebuild: Rebuild,
     pub(crate) sessions: Sessions,
-    pub server: Server,
+    pub(crate) server: Server,
     /// `[remote]`: another machine's server this one's session commands use instead of its own.
-    pub remote: Option<Remote>,
+    pub(crate) remote: Option<Remote>,
     guards: Guards,
     tools: BTreeMap<String, Script>,
     pub(crate) web: tools::web::Config,
@@ -84,10 +84,10 @@ pub struct Config {
     /// a shipped provider of that name (docs/models.md#providers).
     pub(crate) providers: BTreeMap<String, Provider>,
     /// Razor itself reaches only the providers under `providers` (docs/security.md).
-    pub provider_only: bool,
+    pub(crate) provider_only: bool,
     /// `[models."<model>"]`: limits for every model, request settings for chat routes.
     pub(crate) models: BTreeMap<String, Model>,
-    pub claude: Claude,
+    pub(crate) claude: Claude,
     /// `[residents.<name>]`: each resident, by name, which is its session's id.
     pub(crate) residents: BTreeMap<SessionId, Resident>,
     /// The program that carries an ask to the person (for example a notifier that waits for a
@@ -187,10 +187,11 @@ pub(crate) struct LiveSettings {
     pub(crate) url: Option<String>,
     pub(crate) names: Vec<String>,
 }
-#[derive(Clone, Deserialize, Serialize)]
+/// Unset, the threshold is the shipped one for the model's window (`profiles::limits`).
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Rebuild {
-    pub(crate) threshold: f64,
+    pub(crate) threshold: Option<f64>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -203,12 +204,12 @@ pub(crate) struct Sessions {
 }
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Server {
-    pub address: Option<String>,
+pub(crate) struct Server {
+    pub(crate) address: Option<String>,
     pub(crate) https_url: Option<String>,
     /// The machine's shorthand the other servers pair this one under (`desk`, `laptop`): the
     /// first word of every root's name, read at each root's start. Empty: its project's.
-    pub name: String,
+    pub(crate) name: String,
     /// How a phone names this home. Empty: `name`, else the machine's name.
     pub(crate) label: String,
     pub(crate) realm: String,
@@ -222,10 +223,10 @@ pub struct Server {
 /// and the folder there that new sessions start in, else the launch folder's path.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Remote {
-    pub address: String,
-    pub key: PathBuf,
-    pub folder: Option<PathBuf>,
+pub(crate) struct Remote {
+    pub(crate) address: String,
+    pub(crate) key: PathBuf,
+    pub(crate) folder: Option<PathBuf>,
 }
 /// The Apple developer team and the app's bundle id, and a token signing key for each
 /// environment this server sends to; nothing goes to a device whose environment has none.
@@ -335,10 +336,10 @@ pub(crate) struct Responses {
 /// `[claude]`, a machine key: a project's file cannot set it.
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Claude {
+pub(crate) struct Claude {
     /// A command printing a Claude sign-in token, run for each conversation Razor opens on
     /// Claude; empty: the server's own sign-in (docs/design/claude.md).
-    pub sign_in: Vec<String>,
+    pub(crate) sign_in: Vec<String>,
     /// A JSON file another program keeps with each account's plan usage, read for the model
     /// rows of the account `sign_in` names (docs/design/claude.md).
     pub(crate) usage_file: Option<PathBuf>,
@@ -399,11 +400,6 @@ impl Default for Config {
             push: None,
             tasks: Tasks::default(),
         }
-    }
-}
-impl Default for Rebuild {
-    fn default() -> Self {
-        Self { threshold: 0.8 }
     }
 }
 impl Default for Sessions {
@@ -488,9 +484,7 @@ impl Config {
             Error::Invalid(format!("The config is invalid: {why}."))
         })?;
         config.model = crate::profiles::id(std::mem::take(&mut config.model));
-        if !config.rebuild.threshold.is_finite()
-            || !(0.0 < config.rebuild.threshold && config.rebuild.threshold <= 1.0)
-        {
+        if (config.rebuild.threshold).is_some_and(|t| !t.is_finite() || !(0.0 < t && t <= 1.0)) {
             return Err(Error::Invalid(
                 "rebuild.threshold must be greater than zero and at most one.".into(),
             ));

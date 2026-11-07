@@ -230,9 +230,7 @@ async fn effort(
     Json(c): Json<EffortChoice>,
 ) -> Reply {
     let entry = app.controller.effort(&id, c.effort).await?;
-    Ok(Json(
-        entry.map_or(json!({}), |entry| json!({ "entry": entry })),
-    ))
+    Ok(Json(entry.map_or(json!({}), |e| json!({ "entry": e }))))
 }
 
 #[derive(Deserialize)]
@@ -281,10 +279,7 @@ async fn project_skills(State(app): State<App>, Query(q): Query<Page>) -> Reply<
 
 async fn handover(State(app): State<App>, Path(id): Path<SessionId>) -> Reply {
     let entry = app.controller.handover(&id).await?;
-    Ok(Json(entry.map_or_else(
-        || json!({}),
-        |entry| json!({ "entry": entry }),
-    )))
+    Ok(Json(entry.map_or(json!({}), |e| json!({ "entry": e }))))
 }
 
 async fn answer(
@@ -297,7 +292,9 @@ async fn answer(
     Ok(Json(json!({ "entry": entry })))
 }
 
-/// A reading stream holds its device's mark on the session while it is open, for pushes.
+/// A reading stream holds its device's mark on the session while it is open, for pushes. With
+/// `heartbeat`, 15 seconds without a line send a heartbeat, so a quiet session's reader can tell
+/// a live stream from a dead connection.
 async fn events(
     State(app): State<App>,
     Extension(gone): Extension<Gone>,
@@ -311,9 +308,13 @@ async fn events(
         .attach(&id, after, (!q.follow).then_some(q.terminal.into()))
         .await?;
     let open = (!q.follow).then(|| app.devices.stream(device, &id));
-    let lines = received(lines).map(move |line| {
-        let _held = &open;
-        sent(line, q.native)
+    let sources = (received(lines), open);
+    let lines = stream::unfold(sources, move |(mut lines, open)| async move {
+        let line = tokio::select! {
+            line = lines.next() => sent(line?, q.native),
+            () = tokio::time::sleep(BEAT), if q.heartbeat => line_of(&Live::Heartbeat)?,
+        };
+        Some((line, (lines, open)))
     });
     Ok(ndjson(lines, gone))
 }

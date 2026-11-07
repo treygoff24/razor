@@ -47,9 +47,7 @@ impl Transcript {
             return None;
         };
         // Razor's own question, its card drawn from the call's decoded input.
-        if crate::record::ask(name, input).is_none() || input["type"] != "question" {
-            return None;
-        }
+        crate::record::ask(name, input)?;
         let answer = self.entries.range(e.id..).find_map(|(_, a)| match &a.body {
             Body::Input(Input {
                 from: Origin::Answer { ask },
@@ -98,9 +96,8 @@ pub(super) fn rows(a: &Asked, name: &str, columns: usize, now: u64, motion: bool
         _ => card(a, name, room, now),
     };
     let row = |l: Segs| {
-        Row::plain(Line::from(
-            [vec![Span::raw("  ")], clip_spans(l, room)].concat(),
-        ))
+        let spans = std::iter::once(Span::raw("  ")).chain(clip_spans(l, room));
+        Row::plain(Line::from_iter(spans))
     };
     lines.into_iter().map(row).collect()
 }
@@ -109,7 +106,7 @@ pub(super) fn rows(a: &Asked, name: &str, columns: usize, now: u64, motion: bool
 fn record(a: &Asked, name: &str, room: usize) -> Vec<Segs> {
     let right = clip_spans(vec![ink(" waiting", CYAN)], room);
     let head = vec![tab(" "), plain(" "), ink(name, DATA), ink(" asks", GRAY)];
-    let mut first = paint(head, room - w(&right), None);
+    let mut first = paint(head, room - spans_width(&right), None);
     first.extend(right);
     let dim = mix(CYAN, GLASS, 0.45);
     let text = clip(a.text, room.saturating_sub(2));
@@ -122,10 +119,7 @@ fn record(a: &Asked, name: &str, room: usize) -> Vec<Segs> {
 // columns of ground and the air.
 fn card(a: &Asked, name: &str, room: usize, now: u64) -> Vec<Segs> {
     let open = !matches!(a.state, State::Answered(..));
-    let budget = match room < usize::from(PHONE) && a.options.len() == 3 {
-        true => 12,
-        false => usize::MAX,
-    };
+    let budget = [usize::MAX, 12][usize::from(room < usize::from(PHONE) && a.options.len() == 3)];
     let mut lines = body(a, name, room.saturating_sub(4), now);
     let padded = lines.len() <= budget;
     if !padded {
@@ -134,23 +128,24 @@ fn card(a: &Asked, name: &str, room: usize, now: u64) -> Vec<Segs> {
     let air = open && lines.len() < budget;
     let inner = room.saturating_sub(2);
     let mut out = Vec::new();
-    let mut prev: Option<(Part, &Option<Segs>)> = None;
-    for (i, (part, line)) in lines.iter().enumerate() {
+    let mut prev: Option<(Part, Option<Color>)> = None;
+    for (i, (part, line)) in lines.into_iter().enumerate() {
         let header = |p: Part| matches!(p, Part::Header | Part::Asker);
         if let Some((_, shown)) = prev.filter(|(p, _)| air && header(*p))
-            && !header(*part)
+            && !header(part)
         {
             let mut gap = thread(i, Part::Other, open);
-            if let (Some(_), Some(g)) = (line, shown.as_ref().and_then(|l| ground(l))) {
+            if let (Some(_), Some(g)) = (&line, shown) {
                 gap.push(Span::styled(" ".repeat(inner), style(DATA, g)));
             }
             out.push(gap);
         }
-        let mut row = thread(i, *part, open);
-        let body = line.clone().unwrap_or_default();
-        match ground(&body).filter(|_| padded) {
+        let mut row = thread(i, part, open);
+        let body = line.unwrap_or_default();
+        let ground = body.iter().rev().find_map(|s| s.style.bg);
+        match ground.filter(|_| padded) {
             Some(g) => {
-                let fill = inner.saturating_sub(w(&body) + 1);
+                let fill = inner.saturating_sub(spans_width(&body) + 1);
                 row.push(Span::styled(" ", style(DATA, g)));
                 row.extend(body);
                 row.push(Span::styled(" ".repeat(fill), style(DATA, g)));
@@ -159,7 +154,7 @@ fn card(a: &Asked, name: &str, room: usize, now: u64) -> Vec<Segs> {
             None => row.extend(body),
         }
         out.push(row);
-        prev = Some((*part, line));
+        prev = Some((part, ground));
     }
     out
 }
@@ -185,14 +180,14 @@ fn body(a: &Asked, name: &str, cw: usize, now: u64) -> Vec<(Part, Option<Segs>)>
         let waited = crate::terminal::status::elapsed(at.saturating_sub(a.at));
         let meta = format!("waited {waited}");
         if let Some((_, road)) = rows.get_mut(1)
-            && w(road) + width(&meta) + 2 <= cw
+            && spans_width(road) + width(&meta) + 2 <= cw
         {
-            let pad = " ".repeat(cw - w(road) - width(&meta));
+            let pad = " ".repeat(cw - spans_width(road) - width(&meta));
             road.extend([plain(pad), ink(meta, GRAY)]);
         }
         let rows = rows.into_iter().enumerate();
         let lit = |(i, (part, s)): (usize, (Part, Segs))| {
-            let (road, s) = (w(&s) + 2, paint(s, cw, None));
+            let (road, s) = (spans_width(&s) + 2, paint(s, cw, None));
             (part, Some(if p < 1. { lit(i, s, p, road) } else { s }))
         };
         return rows.map(lit).collect();
@@ -248,10 +243,10 @@ fn open(a: &Asked, name: &str, cw: usize) -> Vec<(Part, Segs)> {
     let asker = |verb: bool| {
         [vec![bold(name, WHITE)], vec![ink(" asks", GRAY)]][..1 + usize::from(verb)].concat()
     };
-    let room = cw.saturating_sub(w(std::slice::from_ref(&tab)) + 1);
+    let room = cw.saturating_sub(width(&tab.content) + 1);
     let mut rows = match [asker(true), asker(false)]
         .into_iter()
-        .find(|l| wide || w(l) <= room)
+        .find(|l| wide || spans_width(l) <= room)
     {
         Some(l) => vec![(Part::Header, [vec![tab, plain(" ")], l].concat())],
         None => vec![
@@ -277,11 +272,7 @@ fn open(a: &Asked, name: &str, cw: usize) -> Vec<(Part, Segs)> {
             vec![indent(pad), cap, indent(label - pad - 3), words],
         ));
     }
-    let foot = if wide {
-        "options · read only"
-    } else {
-        "read only"
-    };
+    let foot = ["read only", "options · read only"][usize::from(wide)];
     if wide {
         rows.push((Part::Other, Vec::new()));
     }
@@ -303,7 +294,10 @@ fn folded(a: &Asked, name: &str, answer: &str, cw: usize) -> Vec<(Part, Segs)> {
     };
     let by = if wide { " asked  " } else { "  " };
     let mut asked = vec![ink("◆", dim), plain(" "), ink(name, GRAY), ink(by, GRAY)];
-    asked.push(ink(clip(a.text, cw.saturating_sub(w(&asked) + 1)), DATA));
+    asked.push(ink(
+        clip(a.text, cw.saturating_sub(spans_width(&asked) + 1)),
+        DATA,
+    ));
     let road = |said: bool| {
         let mut l = vec![ink(if wide { "┝━━▸ " } else { "┝━▸ " }, CYAN)];
         l.extend(said.then(|| ink("you chose ", CYAN)));
@@ -314,7 +308,7 @@ fn folded(a: &Asked, name: &str, answer: &str, cw: usize) -> Vec<(Part, Segs)> {
     rows.push((
         Part::Other,
         Some(road(true))
-            .filter(|r| w(r) + 2 <= cw)
+            .filter(|r| spans_width(r) + 2 <= cw)
             .unwrap_or_else(|| road(false)),
     ));
     let lead = if wide { "╰╌╌╌ " } else { "╰╌╌ " };
@@ -326,7 +320,7 @@ fn folded(a: &Asked, name: &str, answer: &str, cw: usize) -> Vec<(Part, Segs)> {
             bold(format!("{} ", n + 1), GRAY_DIM),
             ink(clip(option, room.saturating_sub(2)), GRAY_DIM),
         ];
-        if !line.is_empty() && w(&line) + 3 + w(&piece) > room {
+        if !line.is_empty() && spans_width(&line) + 3 + spans_width(&piece) > room {
             stubs.push(std::mem::take(&mut line));
         }
         if !line.is_empty() {
@@ -376,7 +370,7 @@ fn words_wrapped(text: &str, room: usize) -> Vec<String> {
 // The line cut and padded to `cw` columns, on `ground` where it has none of its own.
 fn paint(line: Segs, cw: usize, ground: Option<Color>) -> Segs {
     let mut line = clip_spans(line, cw);
-    let fill = cw.saturating_sub(w(&line));
+    let fill = cw.saturating_sub(spans_width(&line));
     line.push(plain(" ".repeat(fill)));
     for s in line.iter_mut().filter(|s| s.style.bg.is_none()) {
         s.style.bg = ground;
@@ -384,12 +378,6 @@ fn paint(line: Segs, cw: usize, ground: Option<Color>) -> Segs {
     line
 }
 
-fn ground(line: &[Span<'_>]) -> Option<Color> {
-    line.iter().rev().find_map(|s| s.style.bg)
-}
-fn w(line: &[Span<'_>]) -> usize {
-    line.iter().map(|s| width(&s.content)).sum()
-}
 fn plain(text: impl Into<String>) -> Span<'static> {
     Span::raw(text.into())
 }

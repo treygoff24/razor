@@ -8,7 +8,7 @@ use crate::record::Summary;
 use crate::residents;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use std::{cmp::Reverse, io::SeekFrom, path::PathBuf, sync::LazyLock, sync::Mutex};
 use tokio::{
@@ -18,12 +18,6 @@ use tokio::{
 
 /// The most agents `list` shows from one server.
 const LISTED: usize = 100;
-
-static WORDS: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {
-    // Invariant: the file is compiled into the binary, so it parses in every run of a build or
-    // in none, and the first mail of any flow shows which.
-    toml::from_str(include_str!("text/mail.toml")).expect("src/children/text/mail.toml parses")
-});
 
 #[derive(Deserialize)]
 pub(super) struct Message {
@@ -78,11 +72,7 @@ impl Children {
         } else {
             None
         };
-        // An unnamed thread signs its mail with its id, which the reader can answer.
-        let mut from = summary.name.clone();
-        if from.is_empty() {
-            from = caller.to_string();
-        }
+        let from = sender(&summary);
         let foreign_parent = summary
             .child
             .as_ref()
@@ -136,7 +126,7 @@ impl Children {
             (Some(to), kind) => {
                 mail(controller, caller, &to, id.clone(), kind, from, input.text).await?
             }
-            // It is their lock screen's notification; a spoken one keeps a voice note's limits.
+            // It is their lock screen's notification; a spoken one is checked as a voice note.
             (None, MailKind::Note)
                 if spoken.is_none()
                     && (input.text.chars().count() > 300 || input.text.contains(['\r', '\n'])) =>
@@ -403,6 +393,15 @@ pub(crate) fn name(first: &str, second: &str, taken: &[&str]) -> String {
     name
 }
 
+/// The name `s` signs its mail with: its own, or while it has none its id, which the reader
+/// can answer.
+pub(super) fn sender(s: &Summary) -> String {
+    match s.name.as_str() {
+        "" => s.session.to_string(),
+        name => name.to_owned(),
+    }
+}
+
 /// The last name of the folder `s` started in, its origin checkout's for a worktree child.
 pub(crate) fn project(s: &Summary) -> String {
     let worktree = s.child.as_ref().and_then(|c| c.worktree.as_ref());
@@ -423,13 +422,8 @@ pub(crate) fn repo(s: &Summary) -> Option<String> {
     let mut repos = REPOS.lock().unwrap_or_else(|e| e.into_inner());
     repos
         .entry(folder.clone())
-        .or_insert_with(|| repo_at(folder))
+        .or_insert_with(|| repo_info(folder).map(|(name, _)| name))
         .clone()
-}
-
-/// Resolves a folder's repository from git files without retaining it in the session cache.
-pub(crate) fn repo_at(folder: &Path) -> Option<String> {
-    repo_info(folder).map(|(name, _)| name)
 }
 
 /// A checkout's display name and cross-server identity, read from the same origin.
@@ -495,11 +489,6 @@ pub(crate) fn path_identity(path: &Path) -> String {
         .and_then(|home| path.strip_prefix(home).ok())
         .unwrap_or(path);
     format!("path:{}", relative.display())
-}
-
-/// One of `text/mail.toml`'s texts.
-pub(super) fn words(key: &str) -> &'static str {
-    WORDS.get(key).map_or("", String::as_str)
 }
 
 /// Admits `text` to `to` as mail, then records in the sender's record that it was sent.

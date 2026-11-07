@@ -1,7 +1,6 @@
 """Thinking summaries in the terminal: Claude's are asked for, since the API omits their text
 unless a request asks, and both makers' are drawn between the calls as an aside under no cap."""
 from dataclasses import replace
-import json
 
 import claude
 from driver import flow
@@ -14,10 +13,8 @@ LONG = " ".join(f"T{i:03}" for i in range(300))
 replies = [claude.reply((None, "mcp__razor__status", {}), thinking="CLAUDE_THOUGHT_65 before the call.", match=ASKED),
            claude.reply(text="claude-reply-65", thinking=LONG, match=ASKED)]
 with flow(replies) as f:
-    result = f.run("--print=json", "Think, look, reply.")
-    assert result.returncode == 0, result.stderr
-    session = json.loads(result.stdout)["session"]
-    assert json.loads((f.requests / "001.body").read_text())["thinking"]["display"] == "summarized"
+    session = f.ask("Think, look, reply.")["session"]
+    assert f.request(1)["thinking"]["display"] == "summarized"
     with Terminal(f, "--resume", session, rows=60) as t:
         t.shown("CLAUDE_THOUGHT_65", "claude-reply-65", "more lines · click to open")
         lines = t.screen.display
@@ -36,9 +33,7 @@ with flow(replies) as f:
 reasoning = {"type": "reasoning", "id": "rs_65", "summary": [
     {"type": "summary_text", "text": "**GPT_TITLE_A**"}, {"type": "summary_text", "text": "**GPT_TITLE_B**"}]}
 with flow([response([reasoning, call("status", "{}")]), done()], model="gpt-6.1-sol", config=PLAIN) as f:
-    result = f.run("--print=json", "Think, look, reply.")
-    assert result.returncode == 0, result.stderr
-    with Terminal(f, "--resume", json.loads(result.stdout)["session"]) as t:
+    with Terminal(f, "--resume", f.ask("Think, look, reply.")["session"]) as t:
         t.shown("GPT_TITLE_A", "GPT_TITLE_B", "flow done")
         rows = [line[17:].strip() for line in t.screen.display]  # past the tape
         assert "┊ GPT_TITLE_A" in rows and "┊ GPT_TITLE_B" in rows, t.text()

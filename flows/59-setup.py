@@ -10,8 +10,9 @@ import shutil
 import subprocess
 import time
 import tomllib
+import chat
 from driver import AUTH, BINARY, Reply, flow
-from model import reply
+from model import reply, tool
 from standin import serve
 
 
@@ -50,7 +51,7 @@ def terminal(f, argv, answers, binary=BINARY):
         os.close(master)
 
 
-with flow([reply(None, "mcp__razor__search", {"query": "setup saved key"}), reply(None)]) as f:
+with flow([tool(None, "search", query="setup saved key"), reply(None)]) as f:
     browser = f.home / "agent-browser"
     browser.write_text("#!/bin/sh\nexit 0\n")
     browser.chmod(0o755)
@@ -89,8 +90,7 @@ with flow([reply(None, "mcp__razor__search", {"query": "setup saved key"}), repl
                f.home / "web-requests") as url:
         with person.open("a") as config:
             config.write(f'\n[web.exa]\nbase_url = "{url}"\n')
-        result = f.run("--model", "opus", "--print=json", "Search with the saved key.")
-        assert result.returncode == 0, result.stderr
+        f.ask("--model", "opus", "Search with the saved key.")
         sent = json.loads((f.home / "web-requests/001.json").read_text())
         assert sent["headers"].get("x-api-key") == secret, "serve did not load the saved key"
     # Claude Code's CLI is signed in. Plain setup leaves it; --console runs its console sign-in.
@@ -112,8 +112,7 @@ with flow([reply(None, "mcp__razor__search", {"query": "setup saved key"}), repl
     assert refused.returncode != 0 and "flow-nul-" not in refused.stdout + refused.stderr, "NUL key was accepted or printed"
 
 # A gateway-only home can finish setup and doctor without Claude or ChatGPT credentials.
-chat = b'data: {"choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
-with flow([Reply(chat), Reply(b'{"error":{"message":"bad key"}}', status=401)]) as f:
+with flow([chat.reply({"content": "OK"}), Reply(b'{"error":{"message":"bad key"}}', status=401)]) as f:
     (f.home / ".razor/auth.json").unlink()
     f.env.pop("ANTHROPIC_API_KEY")
     browser = f.home / "agent-browser"
@@ -132,7 +131,7 @@ with flow([Reply(chat), Reply(b'{"error":{"message":"bad key"}}', status=401)]) 
     assert tomllib.loads(keys.read_text())["LOCAL_API_KEY"] == secret and keys.stat().st_mode & 0o777 == 0o600
     assert secret.encode() not in screen and b"Connect to your Razor servers" not in screen, screen
     assert not (f.home / "browser-installed").exists(), "provider_only installed a browser"
-    sent = json.loads((f.requests / "001.body").read_bytes())
+    sent = f.request(1)
     meta = json.loads((f.requests / "001.json").read_text())
     assert sent["model"] == "gateway59" and meta["headers"]["authorization"] == "Bearer " + secret, (sent, meta)
     result = f.run("doctor")
@@ -142,4 +141,4 @@ with flow([Reply(chat), Reply(b'{"error":{"message":"bad key"}}', status=401)]) 
     for model in ("sol", "opus"):
         refused = f.run("--model", model, "--print", "Use this sign-in.")
         assert refused.returncode != 0 and "provider_only" in refused.stderr, refused
-    assert len(list(f.requests.glob("[0-9]*.body"))) == 2, "a refused native route contacted its host"
+    assert len(f.sent()) == 2, "a refused native route contacted its host"

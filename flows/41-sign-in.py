@@ -26,20 +26,16 @@ replies = [replace(reply(text=word), headers=limit if word == "four" else ()) fo
 with flow(replies, config=config) as f:
     (f.home / ".razor/usage.json").write_text(json.dumps({"observed_at": int(time.time()),
         "accounts": {"work": {"flow-account": {"status": "ok", "limits": [fable]}}}}))
-    first = f.run("--print=json", "Say 1.")
-    assert first.returncode == 0, first.stderr
-    signed = [session := json.loads(first.stdout)["session"]]
+    signed = [session := f.ask("Say 1.")["session"]]
     for args in (["Say 2."], ["--resume", session, "Say 3."], ["--resume", session, "Say 4."]):
         if args[-1] == "Say 4.":  # A restart forgets every kept token.
             server.stop(f)
-        result = f.run("--print=json", *args)
-        assert result.returncode == 0, result.stderr
-        signed.append(json.loads(result.stdout)["session"])
+        signed.append(f.ask(*args)["session"])
     for n, token in ((1, 1), (2, 2), (3, 1), (4, 3)):
         headers = json.loads((f.requests / f"00{n}.json").read_text())["headers"]
         assert headers.get("authorization") == f"Bearer flow-token-{signed[n - 1]}-{token}", headers
         assert "x-api-key" not in headers, "the server's key signed in, not the command's token"
-    resumed = json.loads((f.requests / "004.body").read_bytes())["messages"]
+    resumed = f.request(4)["messages"]
     assert "Say 1." in json.dumps(resumed), "the resume lost its conversation"
     kinds = [e["kind"] for e in f.record(session)]
     assert "rebuild" not in kinds, f"the resume rebuilt instead of continuing: {kinds}"
@@ -68,9 +64,7 @@ revoked = Reply(b'{"type":"error","error":{"type":"authentication_error","messag
 invalid = Reply(b'{"type":"error","error":{"type":"invalid_request_error","message":"Bad request"}}', status=400)
 # The pinned CLI tries this 400 ten times and the 401 twice before reporting each failure.
 with flow([reply(text="before"), *([invalid] * 10), reply(text="unchanged"), refusal, reply(text="still"), revoked, revoked, reply(text="after")], config=config.replace('idle = 0', 'idle = 3600')) as f:
-    first = f.run("--print=json", "Before refusal.")
-    assert first.returncode == 0, first.stderr
-    session = json.loads(first.stdout)["session"]
+    session = f.ask("Before refusal.")["session"]
     failed = f.run("--print", "--resume", session, "Invalid.")
     assert failed.returncode != 0 and "Bad request" in failed.stderr, failed.stderr
     assert f.run("--print", "--resume", session, "Unchanged.").stdout.strip() == "unchanged"

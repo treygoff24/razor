@@ -2,7 +2,7 @@
 //! native data only.
 
 use super::{Error, Profile, Replay, Transport};
-use crate::protocol::{Effort, Millis, SessionId, Speed};
+use crate::protocol::{Effort, Millis, ModelSettings, SessionId, Speed};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -32,14 +32,7 @@ struct ImageFile {
 
 impl ImageFile {
     async fn open(part: &Value, dir: &Path) -> Option<Self> {
-        let path = Path::new(part["path"].as_str()?);
-        if !path.components().all(|c| matches!(c, Component::Normal(_))) {
-            return None;
-        }
-        let path = tokio::fs::canonicalize(dir.join(path)).await.ok()?;
-        if !path.starts_with(tokio::fs::canonicalize(dir).await.ok()?) {
-            return None;
-        }
+        let path = inside(part, dir).await?;
         let metadata = tokio::fs::metadata(&path).await.ok()?;
         (metadata.is_file() && metadata.len() <= IMAGE).then_some(Self { path, metadata })
     }
@@ -107,6 +100,11 @@ fn chat(profile: &Profile) -> Option<(Replay, Effort, Map<String, Value>)> {
     let endpoint = &profile.endpoint;
     (endpoint.transport == Transport::Chat)
         .then(|| (endpoint.replay, endpoint.top, endpoint.request.clone()))
+}
+
+/// The elements of `value` when it is an array, else none.
+fn each(value: &Value) -> std::slice::Iter<'_, Value> {
+    value.as_array().map_or(&[][..], Vec::as_slice).iter()
 }
 
 /// A declaration's name in either wire's shape.
@@ -182,19 +180,19 @@ impl Conversation {
 
     /// Appends the declarations whose bytes differ from the latest ones this conversation sent.
     pub(crate) fn offer(&mut self, profile: &Profile) {
-        let prefix = self.prefix["input"].as_array().into_iter().flatten();
+        let prefix = each(&self.prefix["input"]);
         let added = (prefix.chain(&self.items)).filter(|item| {
             matches!(
                 item["type"].as_str(),
                 Some("additional_tools" | "razor_tools")
             )
         });
-        let added = added.flat_map(|item| item["tools"].as_array().into_iter().flatten());
+        let added = added.flat_map(|item| each(&item["tools"]));
         let added = added.flat_map(|tool| match tool["type"] == "namespace" {
-            true => tool["tools"].as_array().map_or(&[][..], Vec::as_slice),
+            true => each(&tool["tools"]).as_slice(),
             false => std::slice::from_ref(tool),
         });
-        let top = self.prefix["tools"].as_array().into_iter().flatten();
+        let top = each(&self.prefix["tools"]);
         let latest: BTreeMap<_, _> = top
             .chain(added)
             .filter_map(|t| Some((named(t)?, t)))
@@ -207,12 +205,10 @@ impl Conversation {
             return;
         }
         // Chat has no way to add a tool after the prefix: `body` folds these into `tools`.
-        let item = match self.chat {
+        self.push(match self.chat {
             Some(_) => json!({"type": "razor_tools", "tools": changed}),
             None => addition(changed, self.lite),
-        };
-        self.items.push(item.clone());
-        self.pending.push(item);
+        });
     }
 
     /// Appends a request-side item the task builds in the Responses shape (an input or a call's
@@ -222,6 +218,11 @@ impl Conversation {
             Some(_) => self.chat_item(item),
             None => item,
         };
+        self.push(item);
+    }
+
+    /// Keeps `item` and sends it with the next request, whose response records it.
+    fn push(&mut self, item: Value) {
         self.items.push(item.clone());
         self.pending.push(item);
     }
@@ -232,13 +233,12 @@ impl Conversation {
         if item["type"] == "function_call_output" {
             let id = &item["call_id"];
             let calls = self.items.iter().rev();
-            let mut calls = calls.flat_map(|m| m["tool_calls"].as_array().into_iter().flatten());
+            let mut calls = calls.flat_map(|m| each(&m["tool_calls"]));
             let call = calls.find(|c| c["id"] == *id);
             let name = call.map_or(Value::Null, |c| c["function"]["name"].clone());
             return json!({"role": "tool", "tool_call_id": id, "name": name, "content": item["output"]});
         }
-        let parts = item["content"].as_array().into_iter().flatten();
-        let parts = parts.map(|p| match p["type"].as_str() {
+        let parts = each(&item["content"]).map(|p| match p["type"].as_str() {
             Some("input_image") => {
                 json!({"type": "image_url", "image_url": {"url": p["image_url"]}})
             }
@@ -274,7 +274,7 @@ impl Conversation {
     /// whose latest upload has more than an hour of Google's 48 left.
     pub(crate) fn stale(&self, mut shown: Vec<PathBuf>, now: Millis) -> Vec<PathBuf> {
         let parts = self.items.iter();
-        let parts = parts.flat_map(|i| i["content"].as_array().into_iter().flatten());
+        let parts = parts.flat_map(|i| each(&i["content"]));
         let videos = parts.filter(|p| p["type"] == "razor_video");
         shown.extend(videos.filter_map(|p| p["path"].as_str().map(PathBuf::from)));
         let uploads = self.uploads();
@@ -291,17 +291,12 @@ impl Conversation {
     /// Keeps `path`'s upload for this request and every later one: an item the next response
     /// records, so a reopened conversation has it too.
     pub(crate) fn renew(&mut self, path: &Path, uri: &str, expires: Millis) {
-        self.upload(json!({"type": "razor_upload", "path": path, "uri": uri, "expires": expires}));
+        self.push(json!({"type": "razor_upload", "path": path, "uri": uri, "expires": expires}));
     }
 
     /// Keeps why `path` could not be uploaded, as `renew` keeps an upload; `stale` tries it again.
     pub(crate) fn unsent(&mut self, path: &Path, error: &str) {
-        self.upload(json!({"type": "razor_upload", "path": path, "error": error}));
-    }
-
-    fn upload(&mut self, item: Value) {
-        self.items.push(item.clone());
-        self.pending.push(item);
+        self.push(json!({"type": "razor_upload", "path": path, "error": error}));
     }
 
     /// Ends the videos a finished turn saw: each one not kept for the conversation's life
@@ -320,8 +315,7 @@ impl Conversation {
     /// `num_last_images_to_include` names. An image whose file under `dir` can no longer be read
     /// is left out, so fewer come back, as when fewer were sent.
     pub(crate) async fn images(&self, count: usize, dir: &Path) -> Vec<String> {
-        let parts = (self.items.iter().rev())
-            .flat_map(|item| item["content"].as_array().into_iter().flatten().rev());
+        let parts = (self.items.iter().rev()).flat_map(|item| each(&item["content"]).rev());
         let parts =
             parts.filter(|p| matches!(p["type"].as_str(), Some("razor_image" | "input_image")));
         let mut urls = Vec::new();
@@ -385,11 +379,11 @@ impl Conversation {
     pub(crate) async fn body(
         &self,
         profile: &Profile,
-        choice: crate::protocol::ModelSettings,
+        choice: ModelSettings,
         session: &SessionId,
         dir: &Path,
     ) -> Vec<u8> {
-        let crate::protocol::ModelSettings { effort, speed } = choice;
+        let ModelSettings { effort, speed } = choice;
         let model = profile
             .endpoint
             .speed_ids
@@ -397,7 +391,7 @@ impl Conversation {
             .filter(|_| speed != Speed::Standard)
             .unwrap_or(&profile.endpoint.id)
             .as_str();
-        let prefix = self.prefix["input"].as_array().into_iter().flatten();
+        let prefix = each(&self.prefix["input"]);
         let (mut body, key, items) = match &self.chat {
             Some((_, top, request)) => {
                 let (body, messages) = self.chat_body(model, effort.min(*top), request);
@@ -412,10 +406,7 @@ impl Conversation {
         let uploads = self.uploads();
         let mut images = VecDeque::new();
         if self.chat.is_none() {
-            for part in items
-                .iter()
-                .flat_map(|i| i["content"].as_array().into_iter().flatten())
-            {
+            for part in items.iter().flat_map(|i| each(&i["content"])) {
                 if part["type"] == "razor_image" {
                     images.push_back(ImageFile::open(part, dir).await);
                 }
@@ -433,22 +424,7 @@ impl Conversation {
         };
         // The envelope is a nonempty object; its items are written after its last field.
         body.pop();
-        let tier = match (speed, &self.chat) {
-            (Speed::Fast, None) => Some(if profile.endpoint.key.is_some() {
-                "fast"
-            } else {
-                "priority"
-            }),
-            (Speed::Ultrafast, None) => Some("ultrafast"),
-            (Speed::Fast, Some((_, _, r)))
-                if profile.endpoint.id.starts_with("gemini-")
-                    && !r.contains_key("service_tier") =>
-            {
-                Some("priority")
-            }
-            _ => None,
-        };
-        if let Some(tier) = tier {
+        if let Some(tier) = self.tier(profile, speed) {
             body.extend_from_slice(format!(r#","service_tier":"{tier}""#).as_bytes());
         }
         body.extend_from_slice(format!(r#","{key}":["#).as_bytes());
@@ -462,6 +438,27 @@ impl Conversation {
         }
         body.extend_from_slice(b"]}");
         body
+    }
+
+    /// The `service_tier` a request at `speed` asks for: Fast is `fast` on an API key and
+    /// `priority` on the sign-in, Ultrafast `ultrafast`, and on chat a Gemini model's Fast is
+    /// `priority` unless its request fields name a tier.
+    fn tier(&self, profile: &Profile, speed: Speed) -> Option<&'static str> {
+        match (speed, &self.chat) {
+            (Speed::Fast, None) => Some(if profile.endpoint.key.is_some() {
+                "fast"
+            } else {
+                "priority"
+            }),
+            (Speed::Ultrafast, None) => Some("ultrafast"),
+            (Speed::Fast, Some((_, _, r)))
+                if profile.endpoint.id.starts_with("gemini-")
+                    && !r.contains_key("service_tier") =>
+            {
+                Some("priority")
+            }
+            _ => None,
+        }
     }
 
     /// The item with each `razor_image` part as the image its file holds now, or a line saying it
@@ -520,10 +517,9 @@ impl Conversation {
                 }
                 None => chat,
             };
-            let preview = if spill {
-                image.as_ref().unwrap().preview(profile).await
-            } else {
-                None
+            let preview = match image.as_ref().filter(|_| spill) {
+                Some(image) => image.preview(profile).await,
+                None => None,
             };
             *part = match (url.filter(|_| stable), preview) {
                 (_, Some(text)) => json!({"type": "input_text", "text": text}),
@@ -593,22 +589,14 @@ impl Conversation {
             #[serde(flatten)]
             request: &'a Map<String, Value>,
         }
-        let mut tools: Vec<&Value> = self.prefix["tools"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .collect();
-        let mut messages: Vec<&Value> = self.prefix["input"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .collect();
+        let mut tools: Vec<&Value> = each(&self.prefix["tools"]).collect();
+        let mut messages: Vec<&Value> = each(&self.prefix["input"]).collect();
         for item in self.items.iter().filter(|i| i["type"] != "razor_upload") {
             if item["type"] != "razor_tools" {
                 messages.push(item);
                 continue;
             }
-            for tool in item["tools"].as_array().into_iter().flatten() {
+            for tool in each(&item["tools"]) {
                 match tools.iter_mut().find(|t| named(t) == named(tool)) {
                     Some(slot) => *slot = tool,
                     None => tools.push(tool),
@@ -628,19 +616,22 @@ impl Conversation {
     }
 }
 
-/// A `razor_image` part's file as a data URL: only a relative path of plain names that resolves,
-/// symlinks followed, inside the session directory `dir`, and at most `IMAGE` bytes.
-async fn data_url(part: &Value, dir: &Path) -> Option<String> {
+/// A `razor_image` part's file: only a relative path of plain names that resolves, symlinks
+/// followed, inside the session directory `dir`.
+async fn inside(part: &Value, dir: &Path) -> Option<PathBuf> {
     let path = Path::new(part["path"].as_str()?);
     if !path.components().all(|c| matches!(c, Component::Normal(_))) {
         return None;
     }
     let file = tokio::fs::canonicalize(dir.join(path)).await.ok()?;
-    if !file.starts_with(tokio::fs::canonicalize(dir).await.ok()?) {
-        return None;
-    }
+    file.starts_with(tokio::fs::canonicalize(dir).await.ok()?)
+        .then_some(file)
+}
+
+/// A `razor_image` part's file (`inside`) as a data URL, at most `IMAGE` bytes.
+async fn data_url(part: &Value, dir: &Path) -> Option<String> {
     let mut bytes = Vec::new();
-    let file = tokio::fs::File::open(file).await.ok()?;
+    let file = tokio::fs::File::open(inside(part, dir).await?).await.ok()?;
     let read = file.take(IMAGE + 1).read_to_end(&mut bytes).await.ok()?;
     let media = part["media_type"].as_str().unwrap_or_default();
     (read as u64 <= IMAGE).then(|| format!("data:{media};base64,{}", STANDARD.encode(&bytes)))

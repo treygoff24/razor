@@ -49,7 +49,7 @@ impl Composer {
         }
         let words = Rect::new(r.x + 3, r.y + 1, r.width - 6, r.height - 1);
         let cursor = self.content(b, words, app);
-        let above = self.window.borrow().as_ref().is_some_and(|w| w.first > 0);
+        let above = self.window.borrow().first > 0;
         put(
             b,
             r.x,

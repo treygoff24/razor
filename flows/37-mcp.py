@@ -139,8 +139,7 @@ def files_case():
         replies = [claude.reply(("where37", "mcp__razor__mcp__legacy__where", {})), claude.reply(text="done")]
         # flow's model stand-in reads its original list by reference.
         model_replies.extend(replies)
-        result = work.run("--resume", other, "--print=json", "Read the local MCP directory.")
-        assert result.returncode == 0, result.stderr
+        work.ask("--resume", other, "Read the local MCP directory.")
         output = next(e for e in work.record(other) if e["kind"] == "result")
         assert str(linked) + ":literal" in output["output"], output
         assert json.loads(output["output"])["structured"]["inherited_web_keys"] == [], output
@@ -235,7 +234,7 @@ def oauth_case():
         entries = list(f.record(session))
         assert any(e["kind"] == "input" and e["from"] == {"answer": {"ask": question["id"]}} for e in entries), entries[-3:]
         assert redirect not in json.dumps(entries), "the pasted authorization code entered the record"
-        assert not list(f.requests.glob("[0-9]*.body")), "sign-in admitted an agent turn"
+        assert not f.sent(), "sign-in admitted an agent turn"
         assert next(r for r in operation(f, "list") if r["name"] == "dynamic")["signed_in"]
         # Finished at the callback instead, a session's sign-in still answers its question, which
         # is recorded before the address is returned.
@@ -247,7 +246,7 @@ def oauth_case():
         entries = list(f.record(session))
         assert any(e["kind"] == "input" and e["from"] == {"answer": {"ask": question["id"]}} for e in entries), entries[-3:]
         assert redirect not in json.dumps(entries), "the callback's authorization code entered the record"
-        assert not list(f.requests.glob("[0-9]*.body")), "sign-in admitted an agent turn"
+        assert not f.sent(), "sign-in admitted an agent turn"
         # Begun in a shell, so no session asked, a pasted address still completes the sign-in, and
         # the draft the terminal saved it in is cleared.
         cli(f, "sign-out", "dynamic")
@@ -377,7 +376,7 @@ def native_case(code):
         assert "HEADER_SECRET" not in json.dumps(row), row
         images = list((f.home / ".razor/sessions" / session / "images").glob("mcp-*.png"))
         assert images and images[0].read_bytes() == base64.b64decode(mcp.PNG), images
-        requests = [json.loads(p.read_text()) for p in sorted(f.requests.glob("[0-9]*.body"))]
+        requests = [json.loads(body) for body in f.sent()]
         assert len(requests) == 7, len(requests)
         first, found, rich = requests[:3]
         assert "mcp__remote__rich" not in json.dumps(first), "searched tool was declared upfront"
@@ -403,7 +402,7 @@ def native_case(code):
         assert refused["outcome"] == "error" and ("tool" in refused["output"].lower() or "not a function" in refused["output"]), refused
         assert len([r for r in external.requests if r["body"]["method"] == "tools/call"]) == len(calls)
         assert f.run("mcp", "list").stdout.startswith("No MCP servers configured."), "removed server remains configured"
-        final = json.loads(sorted(f.requests.glob("[0-9]*.body"))[-1].read_text())
+        final = json.loads(f.sent()[-1])
         unchanged(first, final, code)
     print(f"PASS 37-mcp {'GPT code' if code else 'Claude native'} search-next-request, prefix, rich, elicitation and live refusal", flush=True)
 

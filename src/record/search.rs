@@ -3,9 +3,7 @@
 //! window at a time, and keeps nothing between searches.
 
 use super::Summary;
-use crate::protocol::{
-    Body, Effort, Entry, EntryId, Hit, ModelSettings, Origin, Search, SessionId, Speed,
-};
+use crate::protocol::{Body, Entry, EntryId, Hit, Origin, Search, SessionId};
 use memchr::{memchr, memmem, memrchr, memrchr_iter};
 use std::os::unix::fs::FileExt;
 use std::{cmp::Reverse, fs, io::BufRead, io::Write, path::Path, path::PathBuf};
@@ -48,7 +46,6 @@ pub(super) fn line(entry: &Entry, s: &Summary) -> Option<String> {
     let flat = |text: &str| text.replace(['\t', '\n', '\r'], " ");
     let mut start = String::new();
     let (from, text): (&str, &str) = match &entry.body {
-        // The Start's own folder: a backfill's summary has none.
         Body::Start { cwd, thread, .. } => {
             let t = thread.as_deref();
             let resident = t.map_or("", |t| t.resident.as_str());
@@ -92,11 +89,7 @@ pub async fn backfill(home: &Path) {
 /// and stops at the first line it cannot read.
 fn build(dir: &Path, session: &SessionId) -> std::io::Result<()> {
     let record = fs::File::open(dir.join("record.jsonl"))?;
-    let settings = ModelSettings {
-        effort: Effort::Low,
-        speed: Speed::Standard,
-    };
-    let mut s = Summary::new(session, Path::new(""), "", settings);
+    let mut s = Summary::new(session);
     let made = dir.join("search.txt.new");
     let mut file = std::io::BufWriter::new(fs::File::create(&made)?);
     for stored in std::io::BufReader::new(record)

@@ -62,7 +62,7 @@ with tempfile.TemporaryDirectory() as scratch:
         served = serve_pipes(folder)
         result = f.run("--print=json", "Read the three pipes, then make both edits.", timeout=30)
         order = check(f, folder, served, result, ids, "alpha gamma\n")
-        request = json.loads((f.requests / "002.body").read_bytes())
+        request = f.request(2)
         seen = [block["tool_use_id"] for block in request["messages"][-1]["content"]
                 if block["type"] == "tool_result"]
         assert order == seen, (order, seen)
@@ -82,6 +82,6 @@ with tempfile.TemporaryDirectory() as scratch:
         result = f.run("--print=json", "Read the three pipes, then make both edits.", timeout=30)
         order = check(f, folder, served, result, ids, "alpha delta\n")
         assert order == ids, order
-        second = json.loads((f.requests / "002.body").read_bytes())
+        second = f.request(2)
         seen = [i["call_id"] for i in second["input"] if i["type"] == "function_call_output"]
         assert seen == ids, seen

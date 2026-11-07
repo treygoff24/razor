@@ -14,9 +14,7 @@ seen = []
 for cut in cuts:
     with flow([Reply(reply.body, (cut,)), done()], model="gpt-6.1-sol", config=PLAIN) as f:
         (f.cwd / name).write_text("payload 🪶\n")
-        result = f.run("--print=json", "Read the named file.")
-        assert result.returncode == 0, result.stderr
-        answer = json.loads(result.stdout)
+        answer = f.ask("Read the named file.")
         entries = list(f.record(answer["session"]))
         calls = [e for e in entries if e["kind"] == "call"]
         assert len(calls) == 1, calls
