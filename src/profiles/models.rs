@@ -1,120 +1,153 @@
-//! Model names, native routes and configured chat endpoints.
+//! Model names, providers and the route each name takes under the live settings.
 
 use super::{Endpoint, Error, Replay};
 use crate::config::Config;
 use crate::protocol::{Effort, Speed, SpeedChoice};
+use serde::{Deserialize, Serialize};
 
-/// The wire a model is reached over.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The wire a model is reached over, which is also a provider's `format`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Transport {
+    /// The Claude Agent SDK, speaking Anthropic's Messages API.
+    #[serde(rename = "anthropic")]
     Claude,
     Responses,
     /// OpenAI-compatible `POST {base_url}/chat/completions`, streamed (docs/design/generic.md).
-    Chat(&'static Chat),
+    Chat,
 }
 
-/// A chat model's shipped row; `[models."<model>"]` in config replaces any field but `top`.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Chat {
-    base_url: &'static str,
-    /// The environment variable holding the host's key: read for each request, sent only as
-    /// the bearer, never written to the record, a log or an error.
-    key: &'static str,
-    /// The host's id for the model.
+/// A shipped chat model's row: its provider and its id there, its context window, the highest
+/// effort it takes (a higher one is sent as this), which field earlier reasoning goes back under
+/// as its probe proved it, and the variant it gets when config names none, its leader in the
+/// evaluation. `[models."<model>"]` replaces its window, replay and variant.
+struct Chat {
+    provider: &'static str,
     id: &'static str,
-    /// The highest effort the model takes; a higher one is sent as this.
-    pub(super) top: Effort,
-    /// Which field earlier reasoning goes back under, as the row's probe proved it.
+    window: u64,
+    top: Effort,
     replay: Replay,
-    /// The variant the model gets when config names none: its leader in the evaluation.
+    variant: &'static str,
+}
+
+/// A model's route under the live settings: where its requests go, the provider it is on (none
+/// for Claude's and GPT's own sign-ins), its window when config or the catalog knows it, and on
+/// chat the variant it gets when config names none.
+#[derive(Clone)]
+pub(crate) struct Model {
+    pub(crate) endpoint: Endpoint,
+    pub(crate) provider: Option<String>,
+    pub(super) window: Option<u64>,
     pub(super) variant: &'static str,
 }
 
-impl Chat {
-    /// Resolves and validates a configured host against this row before it can send a request.
-    pub(crate) fn endpoint(
-        &self,
-        name: &str,
-        config: Option<&crate::config::Model>,
-    ) -> Result<Endpoint, Error> {
-        let defaults = crate::config::Model::default();
-        let config = config.unwrap_or(&defaults);
-        let url = config.base_url.as_deref().unwrap_or(self.base_url);
-        if url.is_empty() {
-            let names = CLAUDE
-                .iter()
-                .copied()
-                .chain(SHORT.iter().map(|(name, _)| *name))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(Error::Invalid(format!(
-                "{name} is neither a model Razor ships nor a configured chat model; check the name ({names}, or a full id from the model list), or add [models.\"{name}\"] with its base_url"
-            )));
-        }
-        if !reqwest::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https")) {
-            return Err(Error::Invalid(format!(
-                "[models.\"{name}\"] base_url must be an HTTP or HTTPS URL"
-            )));
-        }
-        Ok(Endpoint {
-            url: url.into(),
-            id: config
-                .id
-                .as_deref()
-                .unwrap_or(if self.id.is_empty() { name } else { self.id })
-                .into(),
-            speed_ids: config.speed_ids.clone(),
-            key: Some(config.key.as_deref().unwrap_or(self.key).into()),
-            replay: config.replay.unwrap_or(self.replay),
-            request: config.request.clone().unwrap_or_default(),
-        })
-    }
-}
-
-/// A model's route and context window; the SDK reports Claude's window itself.
-pub(crate) struct Model {
-    pub(crate) transport: Transport,
-    pub(super) window: Option<u64>,
-}
-
 impl Model {
-    /// Offered efforts in ascending order, capped by the shipped top on chat routes.
+    /// Offered efforts in ascending order, capped by a shipped chat row's top.
     pub(crate) fn efforts(&self) -> &'static [Effort] {
-        let top = match self.transport {
-            Transport::Chat(chat) => chat.top,
-            _ => Effort::Max,
-        };
+        let top = self.endpoint.top;
         &Effort::ALL[..Effort::ALL.partition_point(|effort| *effort <= top)]
     }
+}
 
-    /// Refuses invalid limits and connection settings that cannot apply to this route.
-    pub(crate) fn validate(&self, name: &str, row: &crate::config::Model) -> Result<(), Error> {
-        if row.window == Some(0)
-            || row
-                .threshold
-                .is_some_and(|t| !t.is_finite() || !(0.0 < t && t <= 1.0))
-        {
+/// The route `name` takes: Claude's names on the SDK with its own sign-in, GPT's on Razor's
+/// ChatGPT sign-in at `[responses] base_url`, a shipped chat name on its provider, and
+/// `<provider>/<id>` on that provider. With `provider_only` only a provider named under
+/// `[providers]` is allowed; a refusal says so.
+pub(crate) fn model(name: &str, config: &Config) -> Result<Model, Error> {
+    let route = route(name, config)?;
+    if config.provider_only
+        && !(route.provider.as_ref()).is_some_and(|p| config.providers.contains_key(p))
+    {
+        return Err(Error::Invalid(format!(
+            "provider_only is on, so Razor runs only models on a provider under [providers] in your settings, and {name} is on none; add its provider there (docs/models.md#providers) or set provider_only = false"
+        )));
+    }
+    Ok(route)
+}
+
+/// `model` without the `provider_only` check: what the name stands for.
+fn route(name: &str, config: &Config) -> Result<Model, Error> {
+    let row = config.models.get(name);
+    let chat = CHAT.iter().find(|(n, _)| *n == name).map(|(_, chat)| chat);
+    let mut endpoint = Endpoint {
+        transport: Transport::Claude,
+        url: String::new(),
+        key: None,
+        id: name.into(),
+        top: chat.map_or(Effort::Max, |c| c.top),
+        speed_ids: row.map(|r| r.speed_ids.clone()).unwrap_or_default(),
+        replay: (row.and_then(|r| r.replay)).unwrap_or(chat.map_or(Replay::Streamed, |c| c.replay)),
+        request: row.and_then(|r| r.request.clone()).unwrap_or_default(),
+    };
+    let (provider, id) = match (chat, name.split_once('/')) {
+        (Some(chat), _) => (Some(chat.provider), chat.id),
+        (None, Some((provider, id))) if !id.is_empty() => (Some(provider), id),
+        _ if CLAUDE.contains(&name) || name.starts_with("claude-") => (None, name),
+        _ if window(name).is_some() => {
+            endpoint.transport = Transport::Responses;
+            endpoint.url.clone_from(&config.responses.base_url);
+            (None, name)
+        }
+        _ => {
+            let names = CLAUDE.iter().chain(SHORT.iter().map(|(name, _)| name));
+            let names = names.copied().collect::<Vec<_>>().join(", ");
             return Err(Error::Invalid(format!(
-                "[models.\"{name}\"] needs a positive window and a threshold greater than zero and at most one"
+                "{name} is neither a model Razor ships nor a provider's model; check the name ({names}, or a full id from the model list), or name it <provider>/<id> with the provider under [providers]"
             )));
         }
-        if let Transport::Chat(chat) = self.transport {
-            return chat.endpoint(name, Some(row)).map(|_| ());
-        }
-        if row.base_url.is_some()
-            || row.key.is_some()
-            || row.id.is_some()
-            || row.request.is_some()
+    };
+    if let Some(provider) = provider {
+        let table = config.providers.get(provider);
+        let ship = PROVIDERS.iter().find(|(name, ..)| *name == provider);
+        let url = table
+            .and_then(|t| t.base_url.clone())
+            .or(ship.map(|s| s.2.into()));
+        endpoint.url = url.ok_or_else(|| {
+            Error::Invalid(format!(
+                "{name} is on the provider {provider}, which needs a [providers.{provider}] table with its base_url"
+            ))
+        })?;
+        let format = table.and_then(|t| t.format).or(ship.map(|s| s.1));
+        endpoint.transport = format.unwrap_or(Transport::Chat);
+        let key = table
+            .and_then(|t| t.key.clone())
+            .or(ship.map(|s| s.3.into()));
+        (endpoint.key, endpoint.id) = (Some(key.unwrap_or_default()), id.into());
+    }
+    Ok(Model {
+        endpoint,
+        provider: provider.map(Into::into),
+        window: chat.map(|c| c.window).or(window(id)),
+        variant: chat.map_or("{}", |c| c.variant),
+    })
+}
+
+/// Refuses invalid limits and request settings that cannot apply to `name`'s route.
+pub(crate) fn validate(
+    name: &str,
+    row: &crate::config::Model,
+    config: &Config,
+) -> Result<(), Error> {
+    if row.window == Some(0)
+        || row
+            .threshold
+            .is_some_and(|t| !t.is_finite() || !(0.0 < t && t <= 1.0))
+    {
+        return Err(Error::Invalid(format!(
+            "[models.\"{name}\"] needs a positive window and a threshold greater than zero and at most one"
+        )));
+    }
+    if route(name, config)?.endpoint.transport != Transport::Chat
+        && (row.request.is_some()
             || row.variant.is_some()
             || !row.speed_ids.is_empty()
-            || row.replay.is_some()
-        {
-            return Err(Error::Invalid(format!(
-                "[models.\"{name}\"] names a Claude or GPT model; remove base_url, key, id, request, variant, replay and speed_ids"
-            )));
-        }
-        Ok(())
+            || row.replay.is_some())
+    {
+        return Err(Error::Invalid(format!(
+            "[models.\"{name}\"] is not a chat model; remove request, variant, replay and speed_ids"
+        )));
     }
+    Ok(())
 }
 
 /// Resolves Razor's limits from live settings, then the catalog, then the SDK's report;
@@ -123,12 +156,17 @@ pub(crate) fn limits(name: &str, config: &Config, reported: Option<u64>) -> (Opt
     let row = config.models.get(name);
     let window = row
         .and_then(|r| r.window)
-        .or(model(name).window)
+        .or_else(|| route(name, config).ok()?.window)
         .or(reported.filter(|w| *w > 0));
     let threshold = row
         .and_then(|r| r.threshold)
         .unwrap_or(config.rebuild.threshold);
     (window, threshold)
+}
+
+/// GPT's shipped context windows, by id.
+fn window(id: &str) -> Option<u64> {
+    MODELS.iter().find(|(n, _)| *n == id).map(|(_, w)| *w)
 }
 
 const MODELS: &[(&str, u64)] = &[
@@ -153,15 +191,41 @@ const SHORT: &[(&str, &str)] = &[
     ("luna", "gpt-6-luna"),
     ("astra", "gpt-6-astra"),
 ];
-const RUNINFRA: &str = "https://api.runinfra.ai/v1";
-const CHAT: &[(&str, u64, Chat)] = &[
+/// The shipped providers: name, format, address and key variable; `[providers.<name>]` replaces
+/// any of the last three.
+const PROVIDERS: &[(&str, Transport, &str, &str)] = &[
+    (
+        "anthropic",
+        Transport::Claude,
+        "https://api.anthropic.com",
+        "ANTHROPIC_API_KEY",
+    ),
+    (
+        "google",
+        Transport::Chat,
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "GEMINI_API_KEY",
+    ),
+    (
+        "openai",
+        Transport::Responses,
+        "https://api.openai.com/v1",
+        "OPENAI_API_KEY",
+    ),
+    (
+        "runinfra",
+        Transport::Chat,
+        "https://api.runinfra.ai/v1",
+        "RUNINFRA_API_KEY",
+    ),
+];
+const CHAT: &[(&str, Chat)] = &[
     (
         "gemini-3.8-flash",
-        1_048_576,
         Chat {
-            base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
-            key: "GEMINI_API_KEY",
+            provider: "google",
             id: "gemini-3.8-flash",
+            window: 1_048_576,
             top: Effort::High,
             replay: Replay::Streamed,
             variant: include_str!("data/variants/gemini-lean.json"),
@@ -169,11 +233,10 @@ const CHAT: &[(&str, u64, Chat)] = &[
     ),
     (
         "deepseek-v4.1-flash-1017",
-        1_048_576,
         Chat {
-            base_url: RUNINFRA,
-            key: "RUNINFRA_API_KEY",
+            provider: "runinfra",
             id: "deepseek-v4-1-flash-1017",
+            window: 1_048_576,
             top: Effort::Max,
             replay: Replay::Streamed,
             variant: include_str!("data/variants/bash-coord.json"),
@@ -181,27 +244,16 @@ const CHAT: &[(&str, u64, Chat)] = &[
     ),
     (
         "glm-5.3-flash",
-        1_048_576,
         Chat {
-            base_url: RUNINFRA,
-            key: "RUNINFRA_API_KEY",
+            provider: "runinfra",
             id: "glm-5-3-flash",
+            window: 1_048_576,
             top: Effort::Max,
             replay: Replay::Streamed,
             variant: include_str!("data/variants/bash-coord.json"),
         },
     ),
 ];
-
-/// Its empty address, key and id are filled from `[models.NAME]`: no default host or auth, id = name.
-const CONFIGURED: Chat = Chat {
-    base_url: "",
-    key: "",
-    id: "",
-    top: Effort::Max,
-    replay: Replay::Streamed,
-    variant: "{}",
-};
 
 /// The id a model name stands for: a short GPT name's full id, any other name unchanged. Each
 /// place a name enters Razor calls it once, so records, status and requests hold full ids.
@@ -212,52 +264,28 @@ pub(crate) fn id(name: String) -> String {
         .map_or(name, |(_, id)| (*id).to_owned())
 }
 
-/// Native names use their own wire; other names require a configured chat endpoint.
-pub(crate) fn model(name: &str) -> Model {
-    if CLAUDE.contains(&name) || name.starts_with("claude-") {
-        return Model {
-            transport: Transport::Claude,
-            window: None,
-        };
-    }
-    if let Some((_, window, chat)) = CHAT.iter().find(|(n, ..)| *n == name) {
-        return Model {
-            transport: Transport::Chat(chat),
-            window: Some(*window),
-        };
-    }
-    let window = MODELS.iter().find(|(n, _)| *n == name).map(|(_, w)| *w);
-    Model {
-        transport: match window {
-            Some(_) => Transport::Responses,
-            None => Transport::Chat(&CONFIGURED),
-        },
-        window,
-    }
-}
-
 /// The chat endpoint `name` is reached at under `config`, when it takes video; `None` for
 /// Claude, GPT and every other chat model.
 pub(crate) fn video(name: &str, config: &Config) -> Option<Endpoint> {
-    let Transport::Chat(row) = model(name).transport else {
-        return None;
-    };
-    row.endpoint(name, config.models.get(name))
-        .ok()
-        .filter(Endpoint::video)
+    Some(model(name, config).ok()?.endpoint).filter(Endpoint::video)
 }
 
-/// The shipped model names; the server adds configured chat names to this list.
-pub(crate) fn models() -> Vec<String> {
-    MODELS
-        .iter()
-        .map(|(name, _)| (*name).to_owned())
-        .chain(CHAT.iter().map(|(name, ..)| (*name).to_owned()))
-        .chain(CLAUDE.iter().map(|name| (*name).to_owned()))
-        .collect()
+/// The model names Razor lists: the shipped ones, each `[models]` row's and each provider's
+/// listed models as `<provider>/<id>`, sorted and once each.
+pub(crate) fn models(config: &Config) -> Vec<String> {
+    let shipped = MODELS.iter().map(|(name, _)| *name);
+    let shipped = shipped
+        .chain(CHAT.iter().map(|(name, _)| *name))
+        .chain(CLAUDE.iter().copied());
+    let providers = config.providers.iter();
+    let listed = providers.flat_map(|(p, t)| t.models.iter().map(move |id| format!("{p}/{id}")));
+    let mut models = std::collections::BTreeSet::from_iter(shipped.map(String::from).chain(listed));
+    models.extend(config.models.keys().cloned());
+    models.into_iter().collect()
 }
 
-/// The route's choice, with known restrictions and descriptive costs; no account probe.
+/// The route's choice, with known restrictions and descriptive costs; no account probe. A
+/// provider's model takes the speeds its id takes on its own route.
 pub(crate) fn speed_choice(name: &str, speed: Speed, config: &Config) -> SpeedChoice {
     use std::{collections::BTreeMap, sync::LazyLock};
     static TEXT: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {
@@ -268,14 +296,16 @@ pub(crate) fn speed_choice(name: &str, speed: Speed, config: &Config) -> SpeedCh
         .models
         .get(name)
         .is_some_and(|r| r.speed_ids.contains_key(&speed));
-    let accepts = |key: &str| TEXT[key].split(',').any(|m| m == name);
-    let key = match (speed, model(name).transport) {
+    let route = route(name, config).map(|m| m.endpoint);
+    let (transport, id) = route.map_or((Transport::Chat, name.into()), |e| (e.transport, e.id));
+    let accepts = |key: &str| TEXT[key].split(',').any(|m| m == id);
+    let key = match (speed, transport) {
         (Speed::Standard, _) => "standard",
         (Speed::Fast, Transport::Responses) => "gpt_fast",
         (Speed::Ultrafast, Transport::Responses) if accepts("ultrafast_models") => "gpt_ultrafast",
         (Speed::Fast, Transport::Claude) if accepts("claude_models") => "claude",
-        (Speed::Fast, Transport::Chat(_)) if name.starts_with("gemini-") => "gemini",
-        (_, Transport::Chat(_)) if configured => "configured",
+        (Speed::Fast, Transport::Chat) if id.starts_with("gemini-") => "gemini",
+        (_, Transport::Chat) if configured => "configured",
         _ => "unavailable",
     };
     SpeedChoice {

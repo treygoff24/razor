@@ -1,7 +1,8 @@
 """The recap (docs/design/api.md): leaving a session reports the last entry
 shown; ten minutes after the last look (or the terminal's own, lost at a restart), not nine, the
-terminal recaps what came after it. Haiku at medium writes a Claude or open model session's recap
-and Terra at low a GPT session's, from the agent's words, then its newest steps."""
+terminal recaps what came after it. Haiku at medium writes a Claude session's recap, Terra at low
+a GPT session's and a provider's model its own session's, from the agent's words, then its newest
+steps."""
 from dataclasses import replace
 import json
 import claude
@@ -10,6 +11,7 @@ from driver import flow
 from model import reply
 from responses import reply as turn
 import server
+from standin import Reply
 from terminal import Terminal
 
 EARLIER, FINAL = "EARLIER69 " + "earlier " * 1500 + "END69", "FINAL69 " + "summary " * 400 + "END69"
@@ -21,8 +23,12 @@ replies = [reply("ALPHA69", text="a-first69"), reply("BRAVO69", text="b-first69"
            reply("LONG69", text="LONG69 " + "long " * 8000 + "CONCLUSION69"), replace(reply("b-slow69", text="STALE69"), cuts=tuple(range(1, 200))),
            # The GPT session's recap request also holds the prompt, so its reply comes first.
            turn('"model":"gpt-6.1-terra"', "GPT_WORDS69"),
-           *[reply("Tell the person", text="RECAP_WORDS69")] * 6]
-config = '[ui]\nmotion = false\n[models."open69"]\nbase_url = "{standin}"\n'
+           # The provider's session's recap is a chat request to its own model.
+           Reply(b'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"CHAT_WORDS69"}}]}\n\n'
+                 b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+                 match='"model":"open69"'),
+           *[reply("Tell the person", text="RECAP_WORDS69")] * 5]
+config = '[ui]\nmotion = false\n[providers.open69]\nbase_url = "{standin}"\n'
 with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as f:
     server.start(f)
 
@@ -42,9 +48,9 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
     b = root("b69", "BRAVO69")
     with Terminal(f, "--agents") as t:
         def shown(words):  # in the addressed session's transcript, right of the list
-            t.until(lambda t: "┐" in (top := t.screen.display[0]) and any(words in l[top.index("┐") + 1:] for l in t.screen.display))
+            t.until(lambda t: "╮" in (top := t.screen.display[0]) and any(words in l[top.index("╮") + 1:] for l in t.screen.display))
         shown("b-first69")
-        t.shown("○ a69", "○ b69")  # the list's layout, published each second, can trail
+        t.shown("○ a69", "▶ b69")  # the list's layout, published each second, can trail
         t.click("○ a69")
         shown("a-first69")
         # Switching away reports a's last entry shown, with when.
@@ -54,7 +60,7 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
         server.wait(lambda: server.agents(f)[a].get("seen") == last, 10, "switching away reported nothing")
         moves("MORE69", "a-more69")
         advance(9 * 60_000)
-        t.shown("╰ a-more69")  # the list has moved a's row before it is clicked
+        t.shown("↺ a-more69")  # the list has moved a's row before it is clicked
         t.click("○ a69")
         shown("a-more69")
         # Nine minutes away from focus, with a's record moved, asks nothing either.
@@ -68,7 +74,7 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
         t.click("○ b69")
         moves("FINAL69", "a-final69")
         advance(28 * 60_000)
-        t.shown("╰ a-final69")
+        t.shown("↺ a-final69")
         t.click("○ a69")
         t.shown("↺ away 10 min · RECAP_WORDS69")
         asked = [r.read_text() for r in f.requests.glob("*.body") if "Tell the person" in r.read_text()]
@@ -80,7 +86,7 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
         server.wait(lambda: server.agents(f)[b]["terminal"], 10, "the terminal never reconnected")
         moves("AFTER69", "b-after69", b)
         advance(40 * 60_000)
-        t.shown("╰ b-after69")
+        t.shown("↺ b-after69")
         t.click("○ b69")
         t.shown("↺ away 12 min")  # since the restart; a's recap said 10
         # A recap that lands after its return has ended, here by leaving and coming back, is not shown.
@@ -109,10 +115,10 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
     assert len(evidence.encode()) <= 32 << 10, len(evidence)
     gpt = server.post(f, "/sessions", {"cwd": str(f.cwd), "model": "sol"})["session"]
     body = written(gpt)
-    assert body["model"] == "gpt-6.1-terra" and body["reasoning"] == {"effort": "low"}, body
-    chat = server.post(f, "/sessions", {"cwd": str(f.cwd), "model": "open69"})["session"]
+    assert body["model"] == "gpt-6.1-terra" and body["reasoning"]["effort"] == "low", body
+    chat = server.post(f, "/sessions", {"cwd": str(f.cwd), "model": "open69/open69"})["session"]
     body = written(chat)
-    assert "haiku" in body["model"] and body["output_config"] == {"effort": "medium"}, body
+    assert body["model"] == "open69" and "Tell the person" in body["messages"][0]["content"], body
     # Newest words longer than the whole budget keep their start and their conclusion.
     evidence = written(root("long69", "LONG69"))["messages"][0]["content"][0]["text"]
     assert "words:\nLONG69" in evidence and "[…middle cut…]" in evidence and "CONCLUSION69\n" in evidence and len(evidence.encode()) <= 32 << 10, evidence

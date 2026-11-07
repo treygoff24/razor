@@ -8,7 +8,9 @@ mod startup;
 mod typescript;
 
 pub(crate) use conversation::{Conversation, IMAGE};
-pub(crate) use models::{Transport, id, limits, model, models, speed, speed_choice, video};
+pub(crate) use models::{
+    Model, Transport, id, limits, model, models, speed, speed_choice, validate, video,
+};
 pub(crate) use startup::{machine, opening, save};
 
 use crate::{config::Replay, protocol::SPILL, tools::Action};
@@ -48,15 +50,18 @@ pub(crate) fn mcp_text(key: &str, fields: &[(&str, &str)]) -> String {
 }
 
 /// Where one profile's requests go and what rides on each, as config resolved it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct Endpoint {
-    /// The Responses base the server fixed at startup, or the chat host's address.
+    pub(crate) transport: Transport,
+    /// The ChatGPT sign-in's Responses base, or a provider's address.
     pub(crate) url: String,
-    /// The chat host's key variable (`Some("")`: no auth); `None` on Responses, which uses
-    /// Razor's sign-in or public API key file.
+    /// A provider's key variable (`Some("")`: no auth); `None` on Claude's and GPT's own
+    /// sign-ins.
     pub(crate) key: Option<String>,
-    /// The model id the request names: the host's id, or Razor's name on Responses.
+    /// The model id the request names: the provider's id, or Razor's name on a sign-in.
     pub(crate) id: String,
+    /// The highest effort the model takes; a higher one is sent as this.
+    pub(crate) top: crate::protocol::Effort,
     pub(crate) speed_ids: std::collections::BTreeMap<crate::protocol::Speed, String>,
     pub(crate) replay: Replay,
     /// Top-level fields added to every chat request: a host's switch for keeping history.
@@ -64,15 +69,11 @@ pub(crate) struct Endpoint {
 }
 
 impl Endpoint {
-    /// Whether requests use the public OpenAI host rather than the signed-in backend.
-    pub(crate) fn public(&self) -> bool {
-        reqwest::Url::parse(&self.url).is_ok_and(|u| u.host_str() == Some("api.openai.com"))
-    }
-
     /// A chat endpoint at Google's OpenAI-compatibility path, `…/v1beta/openai`, beside which the
     /// host keeps its Files API: its model takes video (docs/design/video.md).
     pub(crate) fn video(&self) -> bool {
-        self.key.is_some() && self.url.trim_end_matches('/').ends_with("/v1beta/openai")
+        self.transport == Transport::Chat
+            && self.url.trim_end_matches('/').ends_with("/v1beta/openai")
     }
 }
 
@@ -90,7 +91,6 @@ pub(crate) struct Profile {
     pub(crate) nested: Vec<Declaration>,
     pub(crate) code_mode: bool,
     pub(crate) endpoint: Endpoint,
-    transport: Transport,
     wording: Value,
     /// What `razor` gives after its editable part: the family's own text, then how the route's
     /// tools and the record work.
@@ -231,42 +231,39 @@ fn builtins(variant: &Value, child: bool, mode: &str) -> Result<Vec<Value>, Erro
 }
 
 /// Binds at most 256 actions: built-ins to the shipped declarations, scripted and MCP tools to
-/// the schema they supplied, beside the maker's own web tools. Code mode is refused on the
-/// public API route and on chat. On chat a variant (docs/design/generic.md), config's or else
-/// the row's, changes or omits built-in declarations field by field and replaces the route
-/// text, and the version names it and the host. A child reads memory and may claim or comment
-/// on existing tasks; Codex's image generation is offered only with `image_gen`.
-#[allow(clippy::too_many_arguments)] // Each is one choice the declarations depend on.
+/// the schema they supplied, beside the maker's own web tools. Code mode is refused on a
+/// provider's Responses route and on chat. On chat a variant (docs/design/generic.md), config's
+/// or else the row's, changes or omits built-in declarations field by field and replaces the
+/// route text, and the version names it and the host; a provider's Claude or GPT version names
+/// its host. A child reads memory and may claim or comment on existing tasks; Codex's image
+/// generation, or for others a helper on it, is offered only with `image_gen`.
 pub(crate) fn load(
-    endpoint: Endpoint,
-    name: &str,
-    transport: Transport,
+    model: Model,
     code_mode: bool,
     variant: Option<&Value>,
     actions: Arc<[Action]>,
     child: bool,
     image_gen: bool,
 ) -> Result<Profile, Error> {
-    let (claude, chat) = (
-        transport == Transport::Claude,
-        matches!(transport, Transport::Chat(_)),
-    );
-    if model(name).transport != transport || actions.len() > 256 {
-        let refusal = "The model route or tool list does not fit this profile";
+    let transport = model.endpoint.transport;
+    let endpoint = model.endpoint;
+    let (claude, chat) = (transport == Transport::Claude, transport == Transport::Chat);
+    if actions.len() > 256 {
+        let refusal = "The tool list does not fit this profile";
         return Err(Error::Invalid(refusal.into()));
     }
-    let public = endpoint.public();
-    if code_mode && (chat || !claude && public) {
+    let keyed = endpoint.key.is_some();
+    if code_mode && (chat || !claude && keyed) {
         return Err(Error::Invalid(
             "API-key and chat routes support plain tools only".into(),
         ));
     }
     let row = match (variant, transport) {
-        (None, Transport::Chat(row)) => shipped(row.variant)?,
+        (None, Transport::Chat) => shipped(model.variant)?,
         _ => Value::Null,
     };
     let variant = variant.unwrap_or(&row);
-    let family = match (claude, code_mode) {
+    let mut family = match (claude, code_mode) {
         _ if chat => variant["route"]
             .as_str()
             .unwrap_or(include_str!("data/tools-generic.md"))
@@ -281,12 +278,18 @@ pub(crate) fn load(
             .collect::<Vec<_>>()
             .join("\n"),
     };
+    if image_gen && (claude || chat) {
+        family.push_str("\n\nTo make or edit an image, start a GPT helper with the agent tool using model `sol` and ask it to report the image file's path. You can view or deliver that file.");
+    }
     let handover = if claude && !code_mode {
         "mcp__razor__handover"
     } else {
         "handover"
     };
     let family_name = match (claude, chat) {
+        _ if !chat && keyed => {
+            format!("{}-{}", if claude { "claude" } else { "gpt" }, endpoint.url)
+        }
         (true, _) => "claude".to_owned(),
         // The host, id, replay and request fields, so a score certifies them.
         (_, true) => format!(
@@ -312,7 +315,6 @@ pub(crate) fn load(
         nested: Vec::new(),
         code_mode,
         endpoint,
-        transport,
         wording: shipped(include_str!("data/results.json"))?,
         route: format!(
             "{}\n\n{}",
@@ -371,7 +373,7 @@ pub(crate) fn load(
     if !code_mode {
         // OpenAI's hosted search, on the subscription; Lite carries no hosted tools.
         profile.tools.push(json!({"type": "web_search"}));
-        if image_gen && !public {
+        if image_gen {
             let input = shipped(include_str!("data/image-gen.json"))?["input"].take();
             let tool = profile.declare("imagegen", &imagegen("imagegen", "read"), input);
             profile.tools.push(tool);
@@ -384,10 +386,10 @@ pub(crate) fn load(
 impl Profile {
     /// A direct declaration in the transport's own shape.
     fn declare(&self, name: &str, description: &str, schema: Value) -> Value {
-        match self.transport {
+        match self.endpoint.transport {
             Transport::Claude => json!({"name": name, "description": description,
                 "inputSchema": schema}),
-            Transport::Chat(_) => json!({"type": "function", "function":
+            Transport::Chat => json!({"type": "function", "function":
                 {"name": name, "description": description, "parameters": schema}}),
             Transport::Responses => json!({"type": "function", "name": name,
                 "description": description, "parameters": schema, "strict": false}),
@@ -399,7 +401,7 @@ impl Profile {
     /// `image_gen`) and Lite's search join the nested ones first, each under its namespace's
     /// heading; on Claude, Claude Code's own web tools follow, on the subscription.
     fn exec(mut self, image_gen: bool) -> Result<Self, Error> {
-        let claude = self.transport == Transport::Claude;
+        let claude = self.endpoint.transport == Transport::Claude;
         let mut description = include_str!("data/exec.md").trim_end().to_owned();
         for nested in &self.nested {
             description += "\n\n";
@@ -481,7 +483,7 @@ impl Profile {
                 .map_err(|_| Error::Invalid(format!("{name} arguments are not valid JSON")))?,
             value => value,
         };
-        if self.transport == Transport::Claude
+        if self.endpoint.transport == Transport::Claude
             && !self.code_mode
             && let Some(mapped) = claude::input(name, &value)
         {
@@ -563,7 +565,7 @@ impl Profile {
         };
         let error = output["is_error"] == true || failed;
         let shell = kill || matches!(name, "Bash" | "bash" | "terminal" | "monitor");
-        if nested || self.transport != Transport::Claude || self.code_mode || !shell {
+        if nested || self.endpoint.transport != Transport::Claude || self.code_mode || !shell {
             return (output, error);
         }
         let job = output["job"].to_string();
@@ -651,7 +653,7 @@ impl Profile {
             "failed"
         };
         let notice = self.say(
-            if self.transport == Transport::Claude {
+            if self.endpoint.transport == Transport::Claude {
                 "notice"
             } else {
                 "plain_notice"

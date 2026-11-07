@@ -31,25 +31,18 @@ impl Transcript {
             size: u64::MAX,
             ..Rows::default()
         };
-        // Entries kept but not drawn: the line counts them, and a click draws one more window.
-        if start > 0 {
-            let back = self
-                .entries
-                .keys()
-                .nth(start.saturating_sub(super::MOUNT))
-                .copied();
+        // Items kept but not drawn: the line counts them, and a click draws one more window.
+        let earlier = self.entries.values().take(start);
+        if let n @ 1.. = earlier.clone().filter(|e| super::item(e)).count() {
+            let back = start - super::holding(earlier.rev(), super::MOUNT);
             let rest = format!(
                 " earlier item{} · scroll up or click to bring them back",
-                plural(start)
+                plural(n)
             );
-            let words = [
-                ("  ▲ ".into(), GRAY),
-                (start.to_string(), WHITE),
-                (rest, GRAY),
-            ];
+            let words = [("  ▲ ".into(), GRAY), (n.to_string(), WHITE), (rest, GRAY)];
             let words = words.map(|(w, ink)| Span::styled(w, Style::default().fg(ink)));
             rows.push(Row {
-                action: back.map(Action::Jump),
+                action: self.entries.keys().nth(back).copied().map(Action::Jump),
                 ..Row::plain(Line::from(words.to_vec()))
             });
         }

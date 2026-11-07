@@ -79,7 +79,7 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
         return json.loads(raw) if raw else None
 
     def far(session):
-        return [json.loads(line) for line in (other / "sessions" / session / "record.jsonl").read_text().splitlines()]
+        return [json.loads(line) for line in (other / "sessions" / session.removesuffix("@b") / "record.jsonl").read_text().splitlines()]
 
     def ended(entries):
         return any(e["kind"] == "turn_end" for e in entries)
@@ -88,6 +88,26 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
         return [e for e in f.record(session) if e["kind"] == "input" and "report" in e["from"]]
 
     remote = SimpleNamespace(record=far)
+    # A top-level agent starts independent sessions, with the note's actual sender on both homes.
+    top = "START_TOP_49"
+    replies += [agent(top, "start_top", cwd=".", brief="LOCAL_TOP_49"),
+                agent(top, "start_top", cwd=str(beta.cwd), server="b", brief="REMOTE_TOP_49"),
+                reply(top, text="Started both."), reply("LOCAL_TOP_49", text="Local top ran."),
+                reply("REMOTE_TOP_49", text="Remote top ran.")]
+    ran = f.run("--print=json", top)
+    assert ran.returncode == 0, ran.stderr
+    initiator = json.loads(ran.stdout)["session"]
+    entries = list(f.record(initiator))
+    calls = [e for e in entries if e["kind"] == "call" and e["input"].get("action") == "start_top"]
+    results = [json.loads(next(e["output"] for e in entries if e["kind"] == "result" and e["call"] == c["call"])) for c in calls]
+    for result, record, text, origin, suffix in ((results[0], f.record, "LOCAL_TOP_49", initiator, ""),
+                                                  (results[1], far, "REMOTE_TOP_49", initiator + "@a", "@b")):
+        session = result["session"]
+        entries = until(SimpleNamespace(record=record), session, lambda es: any(e.get("text") == ("Remote top ran." if suffix else "Local top ran.") for e in es))
+        assert not entries[0].get("child") and result["address"] == result["name"] + suffix and (session.endswith(suffix) if suffix else "@" not in session)
+        first = next(e for e in entries if e["kind"] == "input")
+        assert first["text"] == text and first["from"]["mail"]["id"][0] == origin, first
+    assert not any(e["kind"] == "child" for e in f.record(initiator))
     # A paired helper may comment but cannot claim: its parent's settle owns another list.
     replies += [reply("TASK_OWNER_49", "mcp__razor__task", {"action": "write", "title": "Remote work"}),
                 reply("TASK_OWNER_49")]
@@ -97,6 +117,7 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     replies += [agent(root, "start", server="b", name="oak49", cwd=str(beta.cwd), shared_brief="brief49", brief="Commit."),
                 agent(root, "start", server="b", name="over49", cwd=str(beta.cwd), brief="Over cap."),
                 message(root, "note", to="oak49", text="PARENT_NOTE_49"), agent(root, "wait"), agent(root, "wait"), reply(root, text="First report."),
+                agent(child, "start_top", cwd=str(beta.cwd), brief="Refuse child."),
                 reply(child, "Bash", {"command": "sleep 1; printf marker > marker49; git add -- marker49 && git -c user.name=Flow -c user.email=flow@example.invalid commit -m Marker"}),
                 message(child, "note", text="CHILD_NOTE_49"),
                 reply(child, "Bash", {"command": "sleep 60", "run_in_background": True}),
@@ -113,6 +134,7 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     sid = qualified.split("@")[0]
     assert qualified.endswith("@b") and started["event"]["started"]["worktree"] is None
     there = far(sid)
+    assert any(e["kind"] == "result" and e["outcome"] == "error" and "Only a top-level agent" in e["output"] for e in there)
     calls = {e["call"] for e in there if e["kind"] == "call" and e["name"] == "mcp__razor__task"}
     writes = [e for e in there if e["kind"] == "result" and e["call"] in calls]
     assert [e["outcome"] for e in writes] == ["error", "error", "success"], writes
@@ -151,7 +173,7 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     stop(other)
     replies += [agent(root, "continue", child="oak49", brief="SECOND_TASK_49"), reply(root, text="Not sent.")]
     assert f.run("--resume", parent, "--print=json", "Continue.").returncode == 0
-    assert "the child operation" in [e for e in f.record(parent) if e["kind"] == "result"][-1]["output"]
+    assert "it may have run" in [e for e in f.record(parent) if e["kind"] == "result"][-1]["output"]
     assert beta.run("devices").returncode == 0
     # Hold the new task, then submit a real saved report from its older task through peer auth.
     release = beta.cwd / "release49"

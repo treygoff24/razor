@@ -48,7 +48,7 @@ async fn question(
     options: Vec<String>,
 ) -> Result<String, Error> {
     let entry = ask(c, id, text, options, false).await?;
-    let mut lines = c.attach(id, entry, 0).await?;
+    let mut lines = c.attach(id, entry, None).await?;
     while let Some(line) = lines.recv().await {
         if let Ok(Event::Entry(e)) = serde_json::from_str(&line)
             && let Body::Input(Input {

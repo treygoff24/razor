@@ -76,7 +76,7 @@ with flow([]) as f:
     os.close(slave)
     output, deadline = b"", time.monotonic() + 30
     try:
-        while b"Use Claude, ChatGPT or both" not in output:
+        while b"Use Claude, ChatGPT, both, or an API key" not in output:
             assert time.monotonic() < deadline and child.poll() is None, f"the installer did not enter setup: {output!r}"
             if select.select([master], [], [], .1)[0]:
                 try:

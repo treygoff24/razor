@@ -161,7 +161,7 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
         why = next(y for y, line in enumerate(lines) if reason in line)
         idle = next(y for y, line in enumerate(lines) if "IDLE" in line)
         assert needs < why < idle, t.text()
-        assert t.screen.buffer[why][lines[why].index(reason)].fg == "3fd9f2", t.text()
+        assert "▲" in lines[why - 1] and "ERROR" in lines[why - 1], t.text()  # A failed turn's mark.
         t.send("/continue all\r")
         entries = server.until(f, parent, lambda es: any(e["kind"] == "turn_end" and ask in e["inputs"] for e in es))
         continued = next(e["id"] for e in entries if e["kind"] == "input" and e.get("from") == "person" and e["id"] != ask)

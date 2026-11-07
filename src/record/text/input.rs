@@ -1,7 +1,9 @@
 //! How a recorded input, and a live call's or a meeting's fact, reads to the model: the words
 //! of `input.toml` (RULES.md 16), drawn when a request or a rebuilt context is rendered.
 
-use crate::protocol::{BridgeInput, CallEvent, CallReason, EntryId, Input, MailKind, Origin};
+use crate::protocol::{
+    BridgeInput, CallEvent, CallReason, EntryId, ImageCopy, Input, MailKind, Origin,
+};
 use crate::protocol::{Source, Speaker};
 use crate::record::{Meeting, MeetingState, Summary};
 use serde_json::json;
@@ -52,6 +54,17 @@ pub(crate) fn heard(me: &Summary, dir: &Path, entry: EntryId, mut input: Input) 
     for file in &input.files {
         let path = dir.join(file);
         text += &words("attached").replace("{path}", &path.to_string_lossy());
+    }
+    for origin in &input.image_origins {
+        let copy = match origin.copy {
+            ImageCopy::Scaled => words("image_scaled"),
+            ImageCopy::PointerOnly => words("image_pointer"),
+        };
+        text += &words("image_origin")
+            .replace("{number}", &origin.number.to_string())
+            .replace("{copy}", copy)
+            .replace("{device}", &origin.device)
+            .replace("{path}", &json!(origin.path).to_string());
     }
     for image in &mut input.images {
         image.path = dir.join(&image.path);

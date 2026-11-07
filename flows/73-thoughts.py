@@ -104,7 +104,7 @@ def chat(*deltas, finish="stop"):
 # A chat host's reasoning deltas are one thought per response, and a cut one is voided too.
 replies = [chat({"reasoning_content": "Look "}, {"reasoning_content": "first."}, {"content": "glm-73"}),
            chat({"reasoning_content": "ABANDONED"}, finish=None), chat({"reasoning_content": "DONE"}, {"content": "glm"})]
-GLM = '[models."glm-5.3-flash"]\nbase_url = "{standin}"\n'
+GLM = '[providers.runinfra]\nbase_url = "{standin}"\n'
 with flow(replies, model="glm-5.3-flash", config=GLM, env={"RUNINFRA_API_KEY": "flow-key"}) as f:
     lines, session = turn(f, "Think and reply.")
     assert check(lines, 0) == (1, "ttdT"), lines

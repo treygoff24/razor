@@ -81,14 +81,14 @@ with flow(replies,
     assert server.listed(f, threads[-1])
 
     with Terminal(f, "--agents", columns=160, rows=40) as t:
-        t.shown("▸ Residents")
-        t.click("▸ Residents")
+        t.shown("RESIDENTS")
+        t.click("RESIDENTS")
         t.shown("+ New thread", "tc-five")
         # A closed thread leaves its resident for the folded Earlier, as a closed root does.
         assert not any(n in t.text() for n in (*named[:4], "fresh ·")), t.text()
         # Closed sessions' rows arrive in the background after a restart; click once all are in.
-        t.until(lambda t: any("▸ Earlier" in line and "4 agents" in line for line in t.screen.display))
-        t.click("▸ Earlier")
+        t.until(lambda t: any("EARLIER" in line and "4 AGENTS" in line for line in t.screen.display))
+        t.click("EARLIER")
         t.shown(*named[:4])
         assert {recent, oldest} <= set(agents := server.agents(f)) and not {old, rest[-1]} & set(agents)
 
@@ -100,7 +100,7 @@ with flow(replies,
             t.until(lambda t: len(ask("/sessions?resident=ember&jobs=false")) == n + len(spare))
             t.until(lambda t: "flow done" in "\n".join(line[54:] for line in t.screen.display))
             t.send(f"/name {name}\r")
-            t.until(lambda t: f"└ {name}" in "\n".join(line[:54] for line in t.screen.display)
+            t.until(lambda t: any(f"○ {name} " in line[:54] for line in t.screen.display)
                     and name in t.screen.display[2][54:])
 
         # From the row, and from `n` after moving down.
@@ -118,7 +118,7 @@ with flow(replies,
         t.click("▸ ○ ember")
         t.shown("+ New thread", "tc-six", "tc-seven")
         # Every arrow press lands on a drawn mark, up past the resident: its fold is no stop of its own.
-        t.click("└ tc-seven")
+        t.click("○ tc-seven ")
         t.send("`h")
         for _ in range(13):
             t.send("k")

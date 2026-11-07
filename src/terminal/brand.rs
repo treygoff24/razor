@@ -52,32 +52,7 @@ fn colour(value: &str) -> Option<Color> {
     u32::from_str_radix(digits, 16).ok().map(rgb)
 }
 
-// The theme's colour names.
+// The theme's colour named `name`.
 fn token(name: &str) -> Option<Color> {
-    Some(match name {
-        "glass" => GLASS,
-        "bezel" => BEZEL,
-        "bezelHi" => BEZEL_HI,
-        "recess" => RECESS,
-        "strip" => STRIP,
-        "agentBg" => AGENT_BG,
-        "violet" => VIOLET,
-        "violetDim" => VIOLET_DIM,
-        "white" => WHITE,
-        "data" => DATA,
-        "gray" => GRAY,
-        "grayDim" => GRAY_DIM,
-        "green" => GREEN,
-        "cyan" => CYAN,
-        "magenta" => MAGENTA,
-        "amber" => AMBER,
-        "red" => RED,
-        "redBg" => RED_BG,
-        "cyanBg" => CYAN_BG,
-        "youBg" => YOU_BG,
-        "chip" => CHIP,
-        "button" => BUTTON,
-        "addedBg" => ADDED_BG,
-        _ => return None,
-    })
+    THEME.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)
 }

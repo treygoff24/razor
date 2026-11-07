@@ -41,6 +41,9 @@ pub(crate) fn video_type(head: &[u8]) -> Option<&'static str> {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClientInput {
     pub text: String,
+    /// Origins of images whose original remains on the sending device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_origins: Vec<super::ImageOrigin>,
     #[serde(default)]
     pub images: Vec<String>,
     /// Paths that `POST /v1/sessions/{id}/files` returned, relative to the session's folder.
@@ -458,6 +461,9 @@ pub struct AgentView {
     /// names it) and when it started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) doing: Option<(String, String, Millis)>,
+    /// The last hour's tool calls; absent before the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) hour: Option<Hour>,
     /// Tool calls recorded over the whole session.
     pub(crate) calls_made: u32,
     /// Calls whose result was an error.
@@ -499,6 +505,25 @@ pub struct AgentView {
         deserialize_with = "count"
     )]
     pub(crate) terminals: u32,
+}
+
+/// Tool calls in each of the twelve five-minute periods (wall ms / 300,000) ending with `end`,
+/// oldest first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Hour {
+    pub(crate) end: u64,
+    pub(crate) calls: [u16; 12],
+}
+impl Hour {
+    /// The same counts as the hour ending in `at`'s period: periods that left it drop off, later
+    /// ones are empty; an `at` before `end` changes nothing.
+    pub(crate) fn at(self, at: Millis) -> Self {
+        let end = (at / 300_000).max(self.end);
+        let gone = (end - self.end).min(12) as usize;
+        let mut calls = [0; 12];
+        calls[..12 - gone].copy_from_slice(&self.calls[gone..]);
+        Self { end, calls }
+    }
 }
 
 fn any<S: serde::Serializer>(n: &u32, s: S) -> Result<S::Ok, S::Error> {

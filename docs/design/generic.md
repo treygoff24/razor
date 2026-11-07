@@ -4,17 +4,19 @@
 
 Trey's ruling, “okay, i like that, lets do it”, replaces `[chat."NAME"]` with
 `[models."NAME"]`. All models accept a positive `window` in tokens and a finite
-`threshold` greater than zero and at most one; connection fields (`base_url`,
-`key`, `id`, `request`, `variant`, `replay`) remain exclusive to chat routes,
-including the shipped chat rows. A Claude or GPT row with any connection field
-refuses with a sentence naming the row and the fields to remove. No migration:
+`threshold` greater than zero and at most one; request fields (`request`,
+`variant`, `replay`, `speed_ids`) remain exclusive to chat routes, including the
+shipped chat rows, and where a model is reached is its provider's
+(docs/design/providers.md). A Claude or GPT row with a request field refuses
+with a sentence naming the row and the fields to remove. No migration:
 no live config had a chat table yet. The table remains a machine
 setting, with the existing whole-row replacement between pack and person.
 
 ```toml
-[models.local]
+[providers.local]
 base_url = "http://127.0.0.1:1234/v1"
-id = "my-loaded-model"
+
+[models."local/my-loaded-model"]
 window = 32768
 threshold = 0.75
 
@@ -79,71 +81,9 @@ main, with the same scripted responses and dummy keys; no real model calls.
 Run flows 17, 18, 19, 25, 28, 30, 34 and 46 in their own systemd units, fmt,
 strict all-target Clippy, size and bridge typecheck.
 
-## Configured providers and code-mode defaults (2026-10-31)
+## Configured providers and code-mode defaults
 
-Any name outside the native Claude and GPT catalog uses the generic chat transport;
-it needs a row in the person's `~/.razor/config.toml` (or pack). For example, a
-local server exposing OpenAI-compatible chat accepts this configuration:
-
-```toml
-model = "local"
-
-[models.local]
-base_url = "http://127.0.0.1:1234/v1"
-id = "my-loaded-model"
-window = 32768 # Optional tokens; hand over at this model's threshold or rebuild.threshold.
-# key = "LOCAL_MODEL_API_KEY" # Optional environment-variable name for an authenticated host.
-
-[models.local.request]
-max_completion_tokens = 4096 # Optional, using the host's own request field.
-```
-
-The row's name is Razor's model name; `id` defaults to that name, `key` defaults
-to no authentication, replay to `streamed`, and effort is passed unchanged.
-There is no assumed context window for an unknown model. Every model may set a
-positive `window` and a `threshold` fraction in its `[models."<model>"]` row;
-configured limits beat the catalog or SDK report, and `rebuild.threshold` is the
-default. Claude's override governs Razor's checks only; the SDK is unchanged.
-An overflow rebuilds once from the record using the latest continuation note.
-If that request also overflows, the session pauses with its rebuilt byte size.
-The four plain file and shell tools (`read`, `write`, `edit`, `bash`) accompany Razor's coordination
-tools. A configured variant replaces that default as it does for shipped rows;
-shipped Gemini, DeepSeek and GLM keep their evaluated variants. Configured names
-also appear in the API's model list. No new price keys: Razor currently records
-token usage, and has no price reader; request limits already belong in `request`.
-
-Public surface changes are confined to the existing types: `profiles::model`
-returns a shared plain `Chat` row for an unknown name, `Config::profile` requires
-its configured address and resolves its fields, and `Profile::code_mode` in
-configuration becomes `Option<bool>`. `Endpoint::public() -> bool` guarantees
-that the parsed URL's host is `api.openai.com`, shared by profile defaults,
-profile refusal and request authentication. `Chat::endpoint(name, config)` shares
-host validation between config parsing and profile construction. Model names and
-this resolution live in `profiles/models.rs`, keeping the rendering file below
-800 physical lines. Other signatures stay unchanged.
-
-An unknown name without an address refuses: “NAME is neither a model Razor ships
-nor a configured chat model; check the name (opus, sonnet, haiku, fable, sol, terra,
-luna, astra, or a full id from the model list), or add [models."NAME"] with its base_url.” A native Claude or GPT row accepts limits and refuses connection fields, asking for their removal. Invalid URLs keep the
-existing HTTP-or-HTTPS sentence. A public API-key GPT route defaults to plain
-tools, the signed-in GPT route to code mode, and Claude to plain tools; explicit
-settings win. Chat always uses plain tools. Explicit code mode on the public
-API route keeps “API-key and chat routes support plain tools only.”
-
-The hard choice is resolving unknown names as chat before config supplies their
-address. This preserves the single model resolver used by session start,
-rebuild, recap and request completion; profile construction then refuses an
-unconfigured route before any model request. Threading config through every
-resolver would widen the controller and consume its exhausted line budget.
-
-Checks extend flow 46 with an unknown row's tool round trip and an unauthenticated local request,
-and flow 28 with a public API-key turn and explicit refusal, red-proofed against
-main. Public-API traffic must stay on a local stand-in with a dummy key.
-Run those, 39, and existing config/API flows 25 and 30, plus fmt, clippy and size.
-
-The rulings: Gemini 3.8 Flash at high, DeepSeek V4.1 Flash 1017 at max, GLM 5.3 Flash at high (about 20:10: "so gemini deepseek glm"). DeepSeek and GLM run on RunInfra with Fireworks as the fallback, his host ruling of 2026-10-27 after a benchmark of the hosts that day. Every agent-facing choice gets hill-climbed per model once the path works (about 20:00: "we ship the optimal, most token efficient, most performant and high capability version"). The evaluation starts cheap: "we can get directional evidence high level cheaply, then better evidence w/ more data for the hard calls".
-
-In one sentence: the generic path is the Responses loop's task over a second wire, OpenAI-compatible chat, which sends every assistant message back as it streamed in (with one setting for which field the reasoning goes back under). Everything the model sees is data that an evaluation arm can swap without code.
+Where a model is reached is its provider's, a `[providers.<name>]` table or a shipped one, and its models are named `<provider>/<id>` (docs/design/providers.md). A `[models."<model>"]` row holds what is the model's: its `window`, `threshold`, and on chat its `request`, `replay`, `variant` and `speed_ids`. There is no assumed context window for an unknown model; configured limits beat the catalog or SDK report, and `rebuild.threshold` is the default. Claude's override governs Razor's checks only; the SDK is unchanged. An overflow rebuilds once from the record using the latest continuation note; if that request also overflows, the session pauses with its rebuilt byte size. A provider's chat model gets the four plain file and shell tools (`read`, `write`, `edit`, `bash`) beside Razor's coordination tools; a configured variant replaces that default, and shipped Gemini, DeepSeek and GLM keep their evaluated variants. A provider's Responses route defaults to plain tools, the signed-in GPT route to code mode, and Claude to plain tools; explicit settings win, chat always uses plain tools, and explicit code mode on a provider's Responses route keeps "API-key and chat routes support plain tools only."
 
 ## The models and their hosts
 
@@ -166,6 +106,8 @@ What each host's documentation says, read today:
 So sending reasoning back is necessary but not sufficient: a host can need a request-side field to keep what it is sent. That field is per-endpoint data (`request`, below), and the probe proves retention by an answer only kept reasoning can give, never by a 200 alone.
 
 ## Public surface
+
+With providers (docs/design/providers.md), `Transport` has no payload, a shipped `Chat` row names its provider and its id there, `Endpoint` also carries the transport, the key variable and the top effort, `profiles::model` takes the config, and a `[models]` row holds no address, key or id. The rest of this surface is as built.
 
 ```rust
 // ---- src/profiles/mod.rs -------------------------------------------------------------------
@@ -326,7 +268,7 @@ The evaluation runner (not included in this repository), `<evaluation>/run.py`:
 ```toml
 # <evaluation>/arms.toml: a chat arm names its host, key, prices (dollars per million: input, cache
 # read, output) and the model's output ceiling; the runner points the attempt's
-# [models."<model>"] base_url at its spend proxy, which forwards to the host, and copies no
+# provider's base_url at its spend proxy, which forwards to the host, and copies no
 # sign-in.
 [deepseek]
 program = "razor"
@@ -480,11 +422,11 @@ If Gemini's pilot lands at the high estimate, its two step 4 arms wait for stage
 
 ## Hosts: the fallback is a config edit
 
-Moving DeepSeek or GLM to Fireworks is one `[models."<model>"]` table: `base_url`, `key`, `id`, and `request = {reasoning_history = "preserved"}`. It is usable only after Fireworks' own probe passes with that table, since its serving template can strip reasoning and its history table lists neither model; until then the fallback is documented, not shipped. Automatic failover is ruled out in this version. Automatic failover would cost: classifying which failures move a session (a 503 after `post`'s retries, a 429, an outage) without moving on a model's own errors; a second key and id per model; a rebuild at every switch, since the profile version names the host and the two hosts stream reasoning under different fields; a cold cache on the new host, so the first request pays full price for the whole context; and recording which host served each response so a score stays honest. About 50 lines and a flow, plus a mid-session change of host the person did not choose.
+Moving DeepSeek or GLM to Fireworks is a `[providers.fireworks]` table (`base_url`, `key`) and the model's `fireworks/<id>` row with `request = {reasoning_history = "preserved"}`. It is usable only after Fireworks' own probe passes with that table, since its serving template can strip reasoning and its history table lists neither model; until then the fallback is documented, not shipped. Automatic failover is ruled out in this version. Automatic failover would cost: classifying which failures move a session (a 503 after `post`'s retries, a 429, an outage) without moving on a model's own errors; a second key and id per model; a rebuild at every switch, since the profile version names the host and the two hosts stream reasoning under different fields; a cold cache on the new host, so the first request pays full price for the whole context; and recording which host served each response so a score stays honest. About 50 lines and a flow, plus a mid-session change of host the person did not choose.
 
 ## The flow
 
-`flows/46-generic.py`, against the stand-in, which replays chat streams as it replays the others. The driver also writes each chat model's `[models."<model>"] base_url` as the stand-in, and the flow sets each key to a dummy.
+`flows/46-generic.py`, against the stand-in, which replays chat streams as it replays the others. The flow writes each shipped provider's `base_url` (`[providers.runinfra]`, `[providers.google]`) as the stand-in, and sets each key to a dummy.
 
 - **DeepSeek** (effort max), reasoning streamed as `reasoning` the way RunInfra sends it: `write`, then `edit` and `bash` in one response, then a text reply; a second input, then `read`; one call with malformed arguments. Asserts the file and each result; that request 2 sends back reply 1's message as assembled (reasoning joined across a chunk cut inside a multibyte character, `role` once, no `index`) with one `tool` message; that request 4 carries the text-only reply's reasoning; the malformed call's error result and `{}` in what goes back; tool messages in call order; `reasoning_effort` max; `x-session-id`; the key's value in no file under the flow's home, also after a reply and a 400 error that echo it, whose text the person still sees with the key removed.
 - **GLM** (effort high), reasoning streamed as `reasoning_content`, with `replay = "reasoning"` and the bare-`bash` variant: the request's declarations hold no `read`, `write` or `edit`, the variant's version is in the record's profile version, and the reasoning goes back under `reasoning` only.

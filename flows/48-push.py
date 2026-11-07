@@ -45,7 +45,7 @@ replies = [*ask("ASK48"), turn("ASK48", "deliver", line="DELIVERED48", url="http
            turn("NOTE48", "noted48"), turn("MUTE48", "message", type="note", text="Muted48."),
            turn("MUTE48", "muted48"), turn("LONG48", "message", type="note", text="x" * 301),
            turn("LONG48", "message", type="note", text="two\nlines"), turn("LONG48", "long48"),
-           turn("REPLY48A", "replied48a"), turn("REPLY48B", "replied48b"),
+           turn("REPLY48A", "replied48a"), turn("REPLY48B", "replied48b"), turn("VIEW48", "viewed48"),
            Reply(b'{"error":{"code":"invalid_request_error","message":"flow failure"}}', status=400,
                  match="STUCK48"), *ask("QUESTION48"), *ask("OFF48"), turn("ELSEWHERE48", "elsewhere48"),
            *ask("ANSWER48"), turn("ANSWER48", "answered48")]
@@ -292,6 +292,20 @@ key = {json.dumps(str(apns.key))}
         assert next(e for e in ended(replied) if e["kind"] == "input")["device"] == "one"
         wait(lambda: kinds("a1", replied) == ["finished"] and kinds("b2", replied) == ["finished"])
         assert level("a1", replied) == ["active"], alerts("a1")
+        # Following as a background view neither marks presence nor suppresses the sender's push.
+        viewed = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+        before = server.agents(f)[viewed]
+        with server.send(f, "GET", f"/sessions/{viewed}/events?follow=true&terminal=true", key=one) as stream:
+            assert json.loads(stream.readline())["kind"] == "attached"
+            during = server.agents(f)[viewed]
+            assert (during.get("looked_at"), during.get("terminal", False)) == (before.get("looked_at"), before.get("terminal", False)), during
+            assert api(f, "POST", f"/sessions/{viewed}/input", one, {"text": "VIEW48"})[0] == 200
+            while json.loads(stream.readline())["kind"] != "turn_end":
+                pass
+            wait(lambda: kinds("a1", viewed) == ["finished"])
+            assert level("a1", viewed) == ["active"], alerts("a1")
+        after = server.agents(f)[viewed]
+        assert (after.get("looked_at"), after.get("terminal", False)) == (before.get("looked_at"), before.get("terminal", False)), after
         watched = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
         with server.send(f, "GET", f"/sessions/{watched}/events", key=one) as stream:
             assert json.loads(stream.readline())["kind"] == "attached"

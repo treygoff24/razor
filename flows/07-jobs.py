@@ -30,7 +30,7 @@ with flow([Reply((REPLIES / f"{name}.sse").read_bytes()) for name in names] + gp
     assert "ready" in outputs[1]["output"] and "ready" in outputs[2]["output"], outputs[1:3]
     assert "job-1" in outputs[3]["output"], outputs[3]
     assert "job-2" in outputs[4]["output"], outputs[4]
-    # The second job is stopped at its one-second timeout, not the 30-minute default, and no
+    # The second job is stopped at its one-second timeout, and no
     # result shows its end, so a notice wakes the session.
     def answered(entries):
         notices = [e for e in entries if e["kind"] == "input" and e["from"] == "razor"]
@@ -47,6 +47,7 @@ with flow([Reply((REPLIES / f"{name}.sse").read_bytes()) for name in names] + gp
     started = {e["job"]: e for e in jobs if e["event"] == "started"}
     ended = {e["job"]: e["end"] for e in jobs if e["event"] == "ended"}
     assert sorted(started) == sorted(ended) == [1, 2], jobs
+    assert started[1].get("deadline") is None and started[2]["deadline"] > started[2]["at"], started
     assert "signal" in ended[1] and "signal" in ended[2], ended
     try:
         os.kill(started[1]["pid"], 0)
@@ -75,7 +76,7 @@ with flow([Reply((REPLIES / f"{name}.sse").read_bytes()) for name in names] + gp
 # Monitor's trained command shape starts an ordinary job; its exit wakes the session once.
 from claude import reply
 from server import post, start
-with flow([reply(("monitor", "mcp__razor__monitor", {"description": "Wait for release", "timeout_ms": 10000,
+with flow([reply(("monitor", "mcp__razor__monitor", {"description": "Wait for release",
                                         "command": "while [ ! -e release ]; do sleep 0.05; done; printf monitor-ready"})),
            reply(text="armed"), reply(text="flow done")]) as f:
     result = f.run("--print=json", "Monitor release.")
@@ -84,6 +85,8 @@ with flow([reply(("monitor", "mcp__razor__monitor", {"description": "Wait for re
     entries = list(f.record(session))
     output = next(e for e in entries if e["kind"] == "result" and e["call"] == "monitor")
     assert output["outcome"] == "success" and "job-1" in output["output"], output
+    started = next(e for e in entries if e["kind"] == "job" and e["event"] == "started")
+    assert started.get("deadline") is None, started
     tools = {t["name"] for t in json.loads((f.requests / "001.body").read_bytes())["tools"]}
     assert "mcp__razor__monitor" in tools and "Monitor" not in tools, tools
     (f.cwd / "release").touch()

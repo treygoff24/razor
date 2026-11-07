@@ -13,7 +13,6 @@ use std::{cmp::Reverse, collections::BTreeMap, path::PathBuf};
 #[derive(Deserialize)]
 struct Place {
     path: PathBuf,
-    repo: Option<String>,
     identity: String,
     at: Option<u64>,
 }
@@ -32,8 +31,9 @@ pub struct Start {
 type Project<'a> = (String, String, Vec<(&'a str, &'a Place)>);
 
 impl Start {
-    /// One row per repository, or folder name outside git, matching the filter: recently used
-    /// first, then found ones; each with its newest folder on each server, newest first.
+    /// One row per repository, or folder outside git, matching the filter: recently used first,
+    /// then found ones; each with its newest folder on each server, newest first, and named by
+    /// that folder as the agents list names a project, not by its remote.
     fn projects(&self) -> Vec<Project<'_>> {
         let mut by = BTreeMap::<String, BTreeMap<&str, &Place>>::new();
         for (server, (_, places)) in &self.servers {
@@ -51,13 +51,8 @@ impl Start {
             .map(|(identity, places)| {
                 let mut places: Vec<_> = places.into_iter().collect();
                 places.sort_by_key(|(_, p)| Reverse(p.at));
-                let p = places[0].1;
-                let name = p
-                    .repo
-                    .clone()
-                    .or_else(|| p.path.file_name().map(|n| n.to_string_lossy().into_owned()))
-                    .unwrap_or_default();
-                (identity, name, places)
+                let name = places[0].1.path.file_name().unwrap_or_default();
+                (identity, name.to_string_lossy().into_owned(), places)
             })
             .collect();
         let mut names = BTreeMap::new();

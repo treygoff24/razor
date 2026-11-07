@@ -79,7 +79,9 @@ with flow(replies, model="gpt-6.1-sol", config='startup = ["razor", "project"]\n
     # 30/42 (opus low) and 20/42 (terra medium) to 41/42 for each, so the extra tokens stay.
     # 12,159 with razor.md's "Browser and desktop" section (Trey, 2026-11-06: "update the Razor
     # system prompt to let agents know about agent browser and agent desktop").
-    assert estimate < 12_160, estimate
+    # 12,226 with the agent tool's start_top (Trey, 2026-11-06: top-level agents "spin up other
+    # root level agents for me").
+    assert estimate <= 12_226, estimate
     offered = next(i for i in prefix if i["type"] == "additional_tools")["tools"]
     tools = next(t for t in offered if t["name"] == "functions")["tools"]
     assert {t["name"] for t in tools} == {"exec", "wait"}, tools
@@ -133,15 +135,14 @@ with flow(replies, model="gpt-6.1-sol", config='startup = ["razor", "project"]\n
     assert not any(e["kind"] == "rebuild" for e in f.record(answer["session"])), "native resume rebuilt instead"
 
 # An API-key route needs no code-mode setting. The loopback stand-in is the explicit HTTP
-# proxy, so the real public hostname selects key auth while every request stays local.
-with flow([done()], model="gpt-6.1-sol") as f:
+# proxy, so the shipped openai provider's public hostname is asked while every request stays local.
+with flow([done()], model="openai/gpt-6.1-sol") as f:
     config = f.home / ".razor/config.toml"
     original = config.read_text()
     proxy = json.loads(original.split("base_url = ", 1)[1].strip())
-    f.env.update({"HTTP_PROXY": proxy, "NO_PROXY": ""})
-    config.write_text(original.replace(proxy, "http://api.openai.com/v1"))
+    f.env.update({"HTTP_PROXY": proxy, "NO_PROXY": "", "OPENAI_API_KEY": "flow-public-key"})
+    config.write_text(original + '\n[providers.openai]\nbase_url = "http://api.openai.com/v1"\n')
     (f.home / ".razor/auth.json").unlink()
-    (f.home / ".razor/key").write_text("flow-public-key")
     result = f.run("--print=json", "Reply on the API key.")
     assert (f.requests / "001.json").exists(), (result.stdout, result.stderr)
     meta = json.loads((f.requests / "001.json").read_text())
@@ -159,17 +160,26 @@ with flow([done()], model="gpt-6.1-sol") as f:
     assert refused.returncode != 0 and "API-key and chat routes support plain tools only" in refused.stderr, refused
     assert len(list(f.requests.glob("[0-9]*.body"))) == 1, "refused code mode contacted the host"
 
-# Common model limits do not make native routes accept chat connection fields. Empty request
-# objects count as an override too, and alias collisions and invalid fractions refuse locally.
+# Common model limits do not make native routes accept chat connection fields, and a row's old
+# connection fields name where they moved, in the detached server's log too, beside a leftover key
+# file. Empty request objects count as an override too, and alias collisions and invalid
+# fractions refuse locally.
 with flow([]) as f:
     config = f.home / ".razor/config.toml"
     original = config.read_text()
     for name in ("opus", "sol"):
-        for field in ('base_url = "http://127.0.0.1:1"', 'key = "DUMMY_KEY"', 'id = "other"',
-                      'request = {}', 'variant = {}', 'replay = "streamed"'):
+        for field in ('base_url = "http://127.0.0.1:1"', 'key = "DUMMY_KEY"', 'request = {}',
+                      'variant = {}', 'replay = "streamed"', 'id = "other"'):
             config.write_text(original + f'\n[models.{name}]\n{field}\n')
             refused = f.run("serve")
-            assert refused.returncode != 0 and "remove base_url, key, id, request, variant, replay and speed_ids" in refused.stderr, refused
+            said = (f"[models.{name}] cannot hold base_url, key or id: they moved to [providers.<name>] as base_url, key and models, and the model is named <provider>/<id> (docs/configuration.md#providers)."
+                    if field.split()[0] in ("base_url", "key", "id") else "remove request, variant, replay and speed_ids")
+            assert refused.returncode != 0 and said in refused.stderr, refused
+    # The settings still hold the last row, sol's id.
+    (f.home / ".razor/key").write_text("flow-old-key")
+    assert f.run("--print", "An old row.").returncode != 0
+    log = (f.home / ".razor/server.log").read_text()
+    assert "[models.sol] cannot hold base_url, key or id" in log and "key is no longer read" in log, log
     for field in ("window = 0", "threshold = 0", "threshold = 1.1", "threshold = nan", "threshold = inf"):
         config.write_text(original + f'\n[models.opus]\n{field}\n')
         refused = f.run("serve")

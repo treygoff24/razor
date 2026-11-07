@@ -81,7 +81,6 @@ pub struct Card<'a> {
     pub clock: String,
     /// How long it has run, when its start is read.
     pub ran: Option<u64>,
-    pub location: String,
     doing: Doing,
 }
 
@@ -159,7 +158,6 @@ impl<'a> Card<'a> {
             silent: silent.is_some(),
             clock: ran.map_or("?".into(), timer),
             ran,
-            location: String::new(),
             doing,
         }
     }
@@ -231,7 +229,7 @@ impl<'a> Card<'a> {
         })
     }
 
-    // The name and clock stay; location takes the model/state's space on a root card.
+    // The name and clock stay; the model and state take the room left.
     fn identity(
         &self,
         size: Size,
@@ -241,10 +239,9 @@ impl<'a> Card<'a> {
     ) -> Vec<Span<'static>> {
         let (detail, short) = say;
         let clock = width(&self.clock);
-        let location = width(&self.location);
-        let compact = size == Size::Compact || size == Size::Mini && location > 0;
+        let compact = size == Size::Compact;
         let context = usize::from(compact && fill(self.agent).is_some()) * 6;
-        let reserve = clock + location + context + 2 + usize::from(location > 0);
+        let reserve = clock + context + 2;
         let name = clip(&self.agent.name, room.saturating_sub(reserve).max(1));
         let mid = room.saturating_sub(width(&name) + clock + 2);
         let ink = match (open, self.over) {
@@ -257,10 +254,7 @@ impl<'a> Card<'a> {
         } else {
             bold(name, ink)
         }];
-        if location > 0 {
-            row.extend([span("  ", GRAY), span(self.location.clone(), GRAY)]);
-        }
-        if size == Size::Mini && location == 0 && mid >= 6 {
+        if size == Size::Mini && mid >= 6 {
             row.push(span("  ", GRAY));
             row.extend(match &self.doing {
                 Doing::Call(mark, target, _) => vec![
@@ -271,13 +265,12 @@ impl<'a> Card<'a> {
                 _ => self.doing(mid.saturating_sub(2)),
             });
         }
-        let model =
-            (location == 0 && size == Size::Compact && detail.model).then(|| self.model(short));
+        let model = (size == Size::Compact && detail.model).then(|| self.model(short));
         let words = width(" · ") + width(self.word);
         if let Some(m) = model.filter(|m| width(m) + width(" · ") + words <= mid) {
             row.extend([span(" · ", GRAY_DIM), span(m, GRAY)]);
         }
-        if location == 0 && size != Size::Mini && words <= mid {
+        if size != Size::Mini && words <= mid {
             row.extend([span(" · ", GRAY_DIM), span(self.word, self.tone)]);
         }
         if compact && fill(self.agent).is_some() {

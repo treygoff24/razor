@@ -6,13 +6,13 @@ version=${1:?version required} out=${2:?output directory required} base=${3:?bas
 case "$version" in *[!a-zA-Z0-9._-]*|'') echo 'Invalid version' >&2; exit 1;; esac
 case "$base" in *[!a-zA-Z0-9._:/~-]*|'') echo 'Invalid base URL' >&2; exit 1;; esac
 case "${RAZOR_PLATFORM:-$(uname -s)-$(uname -m)}" in
-  Linux-x86_64|linux-x64) platform=linux-x64; target=x86_64-unknown-linux-gnu; desktop=591ae7f4a38479dc045df97e27447c0c8b530441730ab6b990e27c813162af44; helper=agent-desktop-linux-clipboard-owner; browser=c4351f3802ffa5254d8c69f20a52e2fcf56925c6016fcf4203db25a07d811379; rg=x86_64-unknown-linux-musl; rg_sha=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c; jq=linux-amd64; jq_sha=b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f ;;
-  Linux-aarch64|linux-arm64) platform=linux-arm64; target=aarch64-unknown-linux-gnu; desktop=68e8ebbb4f80e44485d2f1cf972943a38ee43108e2e0ce56bdfa641fd1599f68; helper=agent-desktop-linux-clipboard-owner; browser=00d291f45e1c4d527b3aa08c70c54c7c3030fde0794f8d4575aaa3ca1680f728; rg=aarch64-unknown-linux-musl; rg_sha=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915; jq=linux-arm64; jq_sha=8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309 ;;
-  Darwin-arm64|darwin-arm64) platform=darwin-arm64; target=aarch64-apple-darwin; desktop=219813428bb1ad8decae172faed05c5964a2415170df402e2786ccfa6452ba82; helper=agent-desktop-macos-helper; browser=19680f06cf87d0095c318a2e80bea6b71523d95d3b651cd18d81885cd182477a; rg=aarch64-apple-darwin; rg_sha=3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4; jq=macos-arm64; jq_sha=2d75340ba57a4b4b4c8708a21c2dc8e958a48aaa8bba13b27f77f6e4c0eca07e ;;
+  Linux-x86_64|linux-x64) platform=linux-x64; target=x86_64-unknown-linux-gnu; cua=linux-x86_64-binary; cua_sha=0b3d4913773a88c46bbceb364809254a6ca636e285e81392b69c0c86d42cb922; browser=c4351f3802ffa5254d8c69f20a52e2fcf56925c6016fcf4203db25a07d811379; rg=x86_64-unknown-linux-musl; rg_sha=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c; jq=linux-amd64; jq_sha=b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f ;;
+  Linux-aarch64|linux-arm64) platform=linux-arm64; target=aarch64-unknown-linux-gnu; cua=linux-arm64-binary; cua_sha=93a4d8596743fcc7ba0288c1fd87d5ad40d1c3d80b9df5518084ea14f94e5589; browser=00d291f45e1c4d527b3aa08c70c54c7c3030fde0794f8d4575aaa3ca1680f728; rg=aarch64-unknown-linux-musl; rg_sha=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915; jq=linux-arm64; jq_sha=8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309 ;;
+  Darwin-arm64|darwin-arm64) platform=darwin-arm64; target=aarch64-apple-darwin; cua=darwin-universal-binary; cua_sha=257c40e5eba0da2348f30469a6dd0a0a1222ae5d2bca52c10e5d494f81b1abfa; browser=19680f06cf87d0095c318a2e80bea6b71523d95d3b651cd18d81885cd182477a; rg=aarch64-apple-darwin; rg_sha=3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4; jq=macos-arm64; jq_sha=2d75340ba57a4b4b4c8708a21c2dc8e958a48aaa8bba13b27f77f6e4c0eca07e ;;
   *) echo 'Unsupported platform; use Linux x86_64 or aarch64, or macOS arm64.' >&2; exit 1 ;;
 esac
 stage=$(mktemp -d)
-trap 'rm -rf "$stage" "$stage.zip" "$stage.rg" "$stage.desktop"' EXIT
+trap 'rm -rf "$stage" "$stage.zip" "$stage.rg" "$stage.cua" "$stage.arm64"' EXIT
 mkdir -p "$out" "$stage/tools"
 if [ -n "${RAZOR_BINARY:-}" ]; then binary=$RAZOR_BINARY
 elif [[ $platform = linux-* ]]; then
@@ -41,8 +41,8 @@ sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum 
 # Downloads $1 to $2, which must match the pinned SHA-256 $3.
 fetch() { curl -fsSL "$1" -o "$2" && [ "$(sha256 "$2" | cut -d ' ' -f 1)" = "$3" ] || { echo "Download or checksum failed: $1" >&2; exit 1; }; }
 fetch "https://github.com/vercel-labs/agent-browser/releases/download/v0.41.2/agent-browser-$platform" "$stage/agent-browser" "$browser"
-fetch "https://github.com/vercel-labs/agent-desktop/releases/download/v1.2.0/agent-desktop-v1.2.0-$target.tar.gz" "$stage.desktop" "$desktop"
-tar -xzf "$stage.desktop" -C "$stage" agent-desktop "$helper"
+fetch "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.40.6/cua-driver-rs-0.40.6-$cua.tar.gz" "$stage.cua" "$cua_sha"
+tar -xzf "$stage.cua" -C "$stage" cua-driver
 # ripgrep and jq for agents' shells, in tools/, which serve puts last on PATH so the person's own copies win.
 fetch "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-$rg.tar.gz" "$stage.rg" "$rg_sha"
 tar -xzf "$stage.rg" -C "$stage/tools" --strip-components=1 "ripgrep-15.2.0-$rg/rg"
@@ -55,8 +55,12 @@ chmod +x "$stage/agent-browser" "$stage/tools/jq"
 if [[ $platform = darwin-* ]]; then
   app=$stage/Razor.app/Contents
   mkdir -p "$app/MacOS" && cp scripts/Info.plist "$app/" && cp "$(dirname "$binary")/razor-launcher" "$app/MacOS/Razor"
+  # Cua Driver's own Developer ID signature covers each architecture's part on its own, so the
+  # Apple silicon part alone keeps it, and the program keeps its maker's signature.
+  lipo "$stage/cua-driver" -thin arm64 -output "$stage.arm64"
+  mv "$stage.arm64" "$stage/cua-driver"
   if [ -n "${RAZOR_SIGN_IDENTITY:-}" ]; then
-    codesign --force --options runtime --timestamp --sign "$RAZOR_SIGN_IDENTITY" "$stage/razor" "$stage/agent-browser" "$stage/agent-desktop" "$stage/$helper" "$stage/tools/rg" "$stage/tools/jq" "$stage/Razor.app"
+    codesign --force --options runtime --timestamp --sign "$RAZOR_SIGN_IDENTITY" "$stage/razor" "$stage/agent-browser" "$stage/tools/rg" "$stage/tools/jq" "$stage/Razor.app"
   else codesign --force --sign - "$stage/Razor.app"; fi
   if [ -n "${RAZOR_NOTARY_PROFILE:-}" ]; then
     ditto -c -k "$stage" "$stage.zip"

@@ -18,7 +18,7 @@ chunks = [{"choices": [{"index": 0, "delta": {"reasoning_content": "Fast thought
           {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}]
 fast = Reply(("".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n").encode())
 with flow([fast] * 4, model="glm-5.3-flash",
-          config='[models."glm-5.3-flash"]\nbase_url = "{standin}"\n', env={"RUNINFRA_API_KEY": "flow-key"}) as f:
+          config='[providers.runinfra]\nbase_url = "{standin}"\n', env={"RUNINFRA_API_KEY": "flow-key"}) as f:
     server.start(f)
     class Relay(BaseHTTPRequestHandler):
         def log_message(self, *_):

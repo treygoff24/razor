@@ -1,40 +1,28 @@
 //! The top of the agents list: one line for the servers and one for the residents, each folded
 //! to what needs the person (a silent server, a usage window from 70%, a resident asking or
 //! failed) and opening into its table.
-use super::{App, agents, cards::tone, status::Row, text::*, view::Action};
+use super::{App, agents, agents::on, cards::tone, status::Row, text::*, view::Action};
 use crate::protocol::{ResidentDay, RunState, Server, SessionId, State, views::SectionKind};
 use ratatui::text::{Line, Span};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Both lines, each followed by its table while open, then a blank row.
+/// The servers line, its table while open, and the residents' panel.
 pub(super) fn rows(app: &App, width: usize, now: u64) -> Vec<Row> {
     let mut out = servers(app, width, now);
-    let residents = residents(app, width, now);
-    // The residents end in the rule each group ends in; without them, a blank row.
-    let end = "─".repeat(width * usize::from(!residents.is_empty()));
-    out.extend(residents);
-    out.push(Row(Line::from(span(end, GRAY_DIM)), None, Vec::new()));
+    out.extend(residents(app, width, now));
     out
 }
 
 fn servers(app: &App, width: usize, now: u64) -> Vec<Row> {
     let usage = usage(app, now);
-    let silent: Vec<_> = (app.servers.iter())
-        .filter_map(|s| s.silent.map(|at| (s, age(at, now))))
-        .map(|(s, age)| format!("{}·{} {age}m", s.machine, realm(s)))
-        .collect();
-    let state = if silent.is_empty() {
-        span(format!("all {} answer", app.servers.len()), GRAY)
-    } else {
-        app.next.every(now, 60_000);
-        Span::styled(format!("⊘ {}", silent.join(", ")), bold(AMBER, GLASS))
-    };
+    let state = silent(app, now).map_or_else(
+        || span(format!("all {} answer", app.servers.len()), GRAY),
+        |s| Span::styled(s, bold(AMBER, GLASS)),
+    );
     let mut parts = vec![vec![state]];
     if let Some(((_, name), p)) = usage.iter().max_by(|a, b| a.1.total_cmp(b.1)) {
-        parts.push(vec![
-            span(format!("{name} "), tone(p / 100., 0.9)),
-            reading(Some(*p)),
-        ]);
+        let name = span(format!("{name} "), tone(p / 100., 0.9));
+        parts.push(vec![name, reading(Some(*p))]);
     }
     let mut out = vec![folded(app, "servers", parts, width)];
     if !app.list.toggled.contains("servers") {
@@ -76,6 +64,17 @@ fn servers(app: &App, width: usize, now: u64) -> Vec<Row> {
     out
 }
 
+/// The servers not answering, as `⊘ linux·work 3m, mac·home 1m`, each with the minutes since it
+/// last did; none while all answer.
+pub(super) fn silent(app: &App, now: u64) -> Option<String> {
+    let silent: Vec<_> = (app.servers.iter())
+        .filter_map(|s| s.silent.map(|at| (s, age(at, now))))
+        .map(|(s, age)| format!("{}·{} {age}m", s.machine, realm(s)))
+        .collect();
+    app.next.every(now, 60_000);
+    (!silent.is_empty()).then(|| format!("⊘ {}", silent.join(", ")))
+}
+
 /// Each server's highest reading of each usage window among its agents, by server name, leaving
 /// out a reading past its reset; the list is drawn again when the soonest kept one resets.
 fn usage(app: &App, now: u64) -> BTreeMap<(&str, &str), f64> {
@@ -103,118 +102,124 @@ fn realm(s: &Server) -> &str {
     if label.is_empty() { &s.name } else { label }
 }
 
+// The residents as a framed panel: its tab and count with the next wake on its top edge, each
+// resident's row, its new-thread row and its threads; folded until opened, the top edge alone.
 fn residents(app: &App, width: usize, now: u64) -> Vec<Row> {
-    let all: Vec<_> = app
-        .servers
-        .iter()
+    let all: Vec<_> = (app.servers.iter())
         .flat_map(|s| s.residents.iter().map(|r| (r.session.on(&s.name), r)))
         .collect();
     if all.is_empty() {
         return Vec::new();
     }
-    let action = Action::Section("residents".into());
+    let (action, tone) = (Action::Section("residents".into()), agents::tone(None));
     let open = app.list.toggled.contains("residents");
-    let room = width.saturating_sub(if width >= 46 {
-        agents::GUTTER as usize + 2
-    } else {
-        0
+    let next = (all.iter().filter_map(|(_, r)| r.upcoming.first())).min_by_key(|(_, at)| at);
+    let next = next.map_or(String::new(), |(_, at)| {
+        format!(" · NEXT {}", hhmm(app, *at))
     });
-    let mut body = Vec::new();
-    for (id, r) in all.iter().filter(|_| open) {
-        // Each resident's block after the first stands a blank row below the one before.
-        if !body.is_empty() {
-            body.push(Row(Line::default(), None, Vec::new()));
-        }
-        body.extend(resident(app, id, r, room, now));
+    let held = agents::count(all.len(), "RESIDENT");
+    let held = format!(" {held}{next} {}", ["▸ ", ""][usize::from(open)]);
+    let held = on(held, tone.soft, tone.ground, false);
+    let mut top = [agents::shut(width), agents::top(width, true)][usize::from(open)].clone();
+    if app.list.open && app.list.selected.as_ref() == Some(&action) {
+        top.replace_range(..3, "❯");
     }
-    let next = all
-        .iter()
-        .filter_map(|(_, r)| r.upcoming.first())
-        .min_by_key(|(_, at)| at);
-    let mark = agents::mark(app, &action, !open);
-    let name = format!("{mark} Residents");
-    let state = format!("{} resident{}", all.len(), plural(all.len()));
-    let next = next.map(|(_, at)| format!("next {}", hhmm(app, *at)));
-    let mut labels = vec![Line::from(span(name.clone(), WHITE))];
-    // Folded, the section is one line: its name and, beside it, its count and next wake.
+    let at = width.saturating_sub(super::text::width(&held.content) + 2);
+    let parts = vec![
+        (2, agents::named(None, "Residents", tone)),
+        (at, vec![held]),
+    ];
+    let top = agents::over(&top, tone.frame, tone.ground, parts);
+    let mut out = vec![Row(Line::from(top), Some(action), Vec::new())];
     if !open {
-        let held = [Some(state), next].into_iter().flatten();
-        let held = Line::from(span(held.collect::<Vec<_>>().join(" · "), GRAY));
-        body = vec![Row(held, Some(action.clone()), Vec::new())];
-    } else {
-        labels.push(Line::from(span(format!("  {state}"), GRAY)));
-        labels.extend(next.map(|n| Line::from(span(format!("  {n}"), GRAY))));
+        return out;
     }
-    if width >= 46 {
-        agents::gutter(body, labels, action)
-    } else {
-        // Narrow, the heading is its own line and holds the count; folded, nothing follows it.
-        if !open {
-            body.clear();
-        }
-        let name = Line::from(span(format!("{name} · {}", all.len()), WHITE));
-        body.insert(0, Row(name, Some(action), Vec::new()));
-        body
+    for (i, (id, r)) in all.iter().enumerate() {
+        let gap = agents::framed(Span::raw(" "), Vec::new(), width, tone, None);
+        out.extend((i > 0).then(|| Row(gap, None, Vec::new())));
+        out.extend(resident(app, (id, r), width, tone, now));
     }
+    let foot = agents::foot(width, true, None, [tone.frame, tone.soft, tone.ground]);
+    out.push(Row(foot.into(), None, Vec::new()));
+    out
 }
 
-// One resident's line (asking, its last run failed, or working or idle with its next wake) and,
-// unless its block is shut, the new-thread line and its threads.
-fn resident(app: &App, id: &SessionId, r: &ResidentDay, room: usize, now: u64) -> Vec<Row> {
-    let mut body = Vec::new();
-    let agent = app.agents.get(id);
+// One resident's row (asking, its last run failed, or working or idle with its next wake) and,
+// unless its block is shut, the new-thread row and its threads.
+fn resident(
+    app: &App,
+    (id, r): (&SessionId, &ResidentDay),
+    width: usize,
+    tone: agents::Tone,
+    now: u64,
+) -> Vec<Row> {
+    let (agent, g) = (app.agents.get(id), tone.ground);
     let (mark, words, ink) = if agent.is_some_and(|a| !a.asks.is_empty()) {
-        ("?", "asking".into(), CYAN)
+        ("◆", "asking".into(), AMBER)
     } else if let Some((wake, _, RunState::Failed)) = r.runs.first() {
-        ("!", format!("{wake} failed"), RED)
+        ("▲", format!("{wake} failed"), RED)
     } else {
-        let active = agent.is_some_and(|a| a.state == State::Working);
-        let next = r.upcoming.first().map_or(String::new(), |(wake, at)| {
-            format!("{wake} {}", hhmm(app, *at))
-        });
-        let (mark, ink) = if active {
-            ("◐", GREEN)
-        } else {
-            ("○", GRAY)
-        };
-        (mark, next, ink)
+        let next = r
+            .upcoming
+            .first()
+            .map(|(wake, at)| format!("{wake} {}", hhmm(app, *at)));
+        let working = agent.is_some_and(|a| a.state == State::Working);
+        let (mark, ink) = [("○", GRAY), ("●", GREEN)][usize::from(working)];
+        (mark, next.unwrap_or_default(), ink)
     };
-    let space = room.saturating_sub(super::text::width(&words) + 5);
-    let name = clip(r.session.as_str(), space.max(1));
-    let gap = " ".repeat(space.saturating_sub(super::text::width(&name)) + 1);
     let selected = app.list.selected == Some(Action::Agent(id.clone()));
     // The resident's block folds as a parent's children do, by its home session's id.
     let (fold, kids) = (id.to_string(), app.list.layout().into_iter());
     let shut = app.list.toggled.contains(&fold);
-    let kids: Vec<_> = (kids.flat_map(|l| &l.sections))
-        .filter(|s| s.kind == SectionKind::Residents)
+    let kids = (kids.flat_map(|l| &l.sections)).filter(|s| s.kind == SectionKind::Residents);
+    let kids = kids
         .flat_map(|s| &s.sessions)
         .skip_while(|r| &r.session != id)
-        .skip(1)
-        .take_while(|r| r.depth > 0)
-        .collect();
-    let arrow = ["▾", "▸"][usize::from(shut)];
-    let arrow = Span::styled(arrow, bold([GRAY, CYAN][usize::from(selected)], GLASS));
-    let mut line = Line::from(vec![
+        .skip(1);
+    let kids: Vec<_> = kids.take_while(|r| r.depth > 0).collect();
+    let room = width.saturating_sub(10 + super::text::width(&words));
+    let name = clip(r.session.as_str(), room);
+    let gap = " ".repeat(room.saturating_sub(super::text::width(&name)) + 1);
+    let arrow = on(
+        ["▾ ", "▸ "][usize::from(shut)],
+        [GRAY, CYAN][usize::from(selected)],
+        g,
+        true,
+    );
+    let (mark, name) = (
+        on(format!("{mark} "), ink, g, false),
+        on(name, WHITE, g, true),
+    );
+    let content = vec![
         arrow,
-        span(" ", GRAY),
-        span(mark, ink),
-        span(" ", GRAY),
-        Span::styled(name, bold(WHITE, GLASS)),
-        span(format!("{gap}{words}"), GRAY),
-    ]);
+        mark,
+        name,
+        on(format!("{gap}{words}"), GRAY, g, false),
+    ];
+    let mut line = agents::framed(Span::raw(" "), content, width, tone, None);
     let hides = kids.iter().any(|r| app.focus.as_ref() == Some(&r.session));
     agents::addressed(&mut line, app.focus.as_ref() == Some(id) || shut && hides);
-    let action = Some(Action::Agent(id.clone()));
-    body.push(Row(line, action, vec![(0, Action::Section(fold))]));
+    let folds = vec![(1, Action::Section(fold))];
+    let mut body = vec![Row(line, Some(Action::Agent(id.clone())), folds)];
     if shut {
         return body;
     }
     let new = Action::Thread(id.clone());
-    let mark = [" ", "❯"][usize::from(app.list.selected.as_ref() == Some(&new))];
-    let line = Line::from(span(format!("{mark} + New thread"), CYAN));
+    let lead = on(
+        [" ", "❯"][usize::from(app.list.selected.as_ref() == Some(&new))],
+        CYAN,
+        g,
+        true,
+    );
+    let line = agents::framed(
+        lead,
+        vec![on("  + New thread", CYAN, g, false)],
+        width,
+        tone,
+        None,
+    );
     body.push(Row(line, Some(new), Vec::new()));
-    body.extend(agents::section_rows(app, kids, room as u16, now));
+    body.extend(agents::agent_rows(app, kids, width, tone, now));
     body
 }
 

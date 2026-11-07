@@ -58,7 +58,7 @@ Commands are not rebased. An MCP server's `command` starts in the project's fold
 
 Settings about you or the machine may be set only in your own file, `~/.razor/config.toml`, or in a pack, never in a project's files. A project file that sets one is ignored whole, and Razor keeps that file's last good settings, with a message naming the file and the keys, such as `/home/you/code/app/.razor/config.toml cannot set ui; move these keys to the person's file.` `razor config`, `razor mcp` and `/mcp` refuse to change such a file and show that message; nothing else shows it yet. These are the settings:
 
-- the server and models: `server`, `release_updates`, `remote`, `models`, `claude`, `responses.base_url`, the whole `[sessions]` table, `call_model`, `call_effort`;
+- the server and models: `server`, `release_updates`, `remote`, `providers`, `provider_only`, `models`, `claude`, `responses.base_url`, the whole `[sessions]` table, `call_model`, `call_effort`;
 - what conversations start with: `startup`, `children.startup`, `skills`, `skill_updates`, `pack`;
 - programs Razor runs for you: `ask`, `notify`, `speech`, `transcribe`, `capture`, `play`, `plugins`;
 - safety: `guards`;
@@ -71,7 +71,7 @@ Settings about you or the machine may be set only in your own file, `~/.razor/co
 ## When a change applies
 
 - Most changes apply at the next turn.
-- `server.address` and `responses.base_url` apply when the server restarts, and Razor says so when you change them ([Troubleshooting](troubleshooting.md#restarting-the-server) says how to restart).
+- `server.address` applies when the server restarts, and Razor says so when you change it ([Troubleshooting](troubleshooting.md#restarting-the-server) says how to restart).
 - `keys.toml` is read when the server starts, so run `razor restart` after `razor keys`.
 - A file that does not parse, names an unknown key, or holds a wrong value, is ignored, and Razor keeps that file's last good settings. For your file and the pack's, the terminal app's status pane and `server.log` name the file and the problem.
 - A server whose own file or pack is broken does not start, and `server.log` says why.
@@ -79,24 +79,23 @@ Settings about you or the machine may be set only in your own file, `~/.razor/co
 
 ## Keys
 
-API keys are read from the server's environment. `razor keys` asks for the optional ones and saves them in `~/.razor/keys.toml`, readable only by you, and the server fills any of them its environment lacks from that file when it starts; an exported variable wins. `keys.toml` holds only these:
+API keys are read from the server's environment, and `~/.razor/keys.toml`, readable only by you, holds the ones you save with Razor: one line each, the variable's name and its key. When the server starts it sets each variable its environment lacks from that file, so an exported variable wins, and agents' shells and MCP servers get none of the names the file lists. Setup's API key choice writes a provider's key there, and `razor keys` asks for the optional ones:
 
 | Variable | Used for |
 | --- | --- |
+| A provider's `key`, such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `RUNINFRA_API_KEY` or your gateway's | That provider's models ([Models and sign-in](models.md#providers)); `OPENAI_API_KEY` also carries the phone client's voice calls |
 | `EXA_API_KEY`, `PARALLEL_API_KEY`, `FIRECRAWL_API_KEY` | The web tools `search`, `fetch` and `answer` ([Browser, voice and search](browser-voice-search.md)) |
 | `ELEVENLABS_API_KEY` | The bundled speech program; a restricted key needs the Text to Speech and Voices (read) permissions |
 
-Each name is optional, and the file is readable only by you (`chmod 600 ~/.razor/keys.toml` if you write it yourself). Any other name, or an empty value, stops the server and `razor doctor` from starting, with a sentence naming the four it may hold:
+A name is letters, digits and `_`, not starting with a digit, and each key a nonempty string; anything else stops the server and `razor doctor` from starting, with a sentence saying so. If you write the file yourself, make it private with `chmod 600 ~/.razor/keys.toml`, then run `razor restart`:
 
 ```toml
 # ~/.razor/keys.toml
 EXA_API_KEY = "your-exa-key"
-PARALLEL_API_KEY = "your-parallel-key"
-FIRECRAWL_API_KEY = "your-firecrawl-key"
-ELEVENLABS_API_KEY = "your-elevenlabs-key"
+GATEWAY_API_KEY = "your-gateway-key"
 ```
 
-One more key lives in its own file: `~/.razor/key` holds an OpenAI API key, which Razor uses when `[responses] base_url` points at `api.openai.com` (see [Model routes](#model-routes)), and for the phone client's voice calls. Model sign-ins are kept by each provider's own login, and other models' keys come from the server's environment ([Models and sign-in](models.md#other-model-families)).
+Model sign-ins are kept by each provider's own login ([Models and sign-in](models.md)).
 
 ## Terminal keys
 
@@ -111,7 +110,7 @@ status = ["Ctrl-Y"]
 detach = ["q", "d", "D"]
 ```
 
-Missing actions keep their defaults; `[]` unbinds an action. `overview` in `global` (F3 by default) opens the agents overview and leaves it again; the overview takes the `list` keys, with `up` and `down` moving between agents and folded groups, `right` opening the selected agent or unfolding the selected group, `fold` folding the selected agent's group and `left` doing nothing. `outward` in `line_start` (Left at the start of a composer line) goes from a helper to its parent, and from any other session opens the agents list beside it, then the overview; `inward` in `draft_end` (Right at the end of the draft while the list is open) closes the list. `outward` was named `list` until November 2026, and a setting that still names `line_start.list` is refused as an unknown action, keeping the terminal's last valid keys. While more than one question waits, Left and Right at an empty draft are the `question` context's `previous` and `next` instead, stepping between the questions.
+Missing actions keep their defaults; `[]` unbinds an action. `overview` in `global` (F3 by default) opens the agents overview and leaves it again; the overview takes the `list` keys, with `up` and `down` moving between agents and folded groups, `right` opening the selected agent or unfolding the selected group, `fold` folding the selected agent's group, `left` doing nothing, and `group_1` to `group_9` (the keys 1 to 9) selecting a numbered top-level group, as they do in the list. `outward` in `line_start` (Left at the start of a composer line) goes from a helper to its parent, and from any other session opens the agents list beside it, then the overview; `inward` in `draft_end` (Right at the end of the draft while the list is open) closes the list. `outward` was named `list` until November 2026, and a setting that still names `line_start.list` is refused as an unknown action, keeping the terminal's last valid keys. While more than one question waits, Left and Right at an empty draft are the `question` context's `previous` and `next` instead, stepping between the questions.
 
 ### The prefix
 
@@ -206,23 +205,33 @@ These change how Razor reaches Claude and GPT; most people never set them. `[pro
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `[profiles.claude] code_mode` | `false` | Code mode: instead of separate tools, the model gets one `exec` tool and writes JavaScript that calls Razor's tools, which lets it batch many reads in one step. This turns it on for Claude. |
-| `[profiles.codex] code_mode` | `true` on the ChatGPT sign-in, `false` at `api.openai.com` | The same for GPT models. It cannot be turned on at `api.openai.com`. |
-| `[profiles.codex] image_gen` | `false` | Gives GPT on the ChatGPT sign-in Codex's image generation, which makes and edits images on your subscription. Off, its 2,500-byte description is left out of every GPT conversation. It takes effect at the next turn; a project may set it. |
-| `[responses] base_url` | `"https://chatgpt.com/backend-api/codex"` | Where GPT requests go. `"https://api.openai.com/v1"` bills an OpenAI API key instead of your ChatGPT sign-in: the key alone in the file `~/.razor/key`, which is not part of `keys.toml`. Needs a restart. |
+| `[profiles.codex] code_mode` | `true` on the ChatGPT sign-in, `false` on a provider | The same for GPT models. It cannot be turned on for a provider's model, such as `openai/gpt-6.1-sol`. |
+| `[profiles.codex] image_gen` | `true` | On the ChatGPT sign-in, gives GPT Codex's image generation, which makes and edits images on your subscription, and tells other models, a provider's GPT aside, to use a GPT helper; not with `provider_only` on. Set `false` to remove the helper sentence and leave the 2,500-byte tool description out of GPT conversations. It takes effect at the next turn; a project may set it. |
+| `[responses] base_url` | `"https://chatgpt.com/backend-api/codex"` | Where requests on Razor's ChatGPT sign-in go. GPT on an OpenAI API key is a provider's model instead, such as `openai/gpt-6.1-sol` ([Models and sign-in](models.md#with-an-openai-api-key)). |
 | `[claude] sign_in` | `[]` | A command and its arguments that print a Claude sign-in token. Razor runs it for each conversation it opens on Claude, so a script of yours can pick the account. Empty: Claude Code's own sign-in. |
 | `[claude] usage_file` | none | A JSON file that another program keeps with each Claude account's plan usage; Razor reads it to show the usage of the account `sign_in` picked. |
 
-### Models
+### Providers
 
-`[models."<name>"]` adds a model or changes a shipped one. For Claude and GPT only `window` and `threshold` may be set; the rest are for chat endpoints.
+`[providers.<name>]` is one provider: where its models are reached, with the variable holding its key. Its models are named `<name>/<id>`. A table named after a shipped provider (`anthropic`, `openai`, `google`, `runinfra`) changes only the fields it sets ([Models and sign-in](models.md#providers)).
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `base_url` | the shipped row's, else required | The OpenAI-compatible endpoint; Razor posts to `<base_url>/chat/completions`. |
-| `key` | the shipped row's, else none | The name of the environment variable holding the endpoint's key. Never the key itself. |
-| `id` | the shipped row's, else the row's name | The model id the endpoint expects. |
-| `speed_ids` | empty | Chat model variants, for example `speed_ids = { fast = "accounts/fireworks/routers/kimi-k3-fast" }`. The base URL, credentials, profile, effort and context limits stay the same. Missing variants are unavailable. Gemini Fast uses its priority tier directly; a conflicting `request.service_tier` is refused. |
-| `window` | the shipped or reported size | The context size in tokens. |
+| `format` | the shipped provider's, else `"chat"` | The API it speaks: `"chat"` (OpenAI-compatible chat), `"responses"` (OpenAI's Responses API) or `"anthropic"` (Anthropic's Messages API, through Claude Code). |
+| `base_url` | the shipped provider's, else required | Its address; Razor posts to `<base_url>/chat/completions` or `<base_url>/responses`, and Claude Code to `<base_url>/v1/messages`. |
+| `key` | the shipped provider's, else none | The name of the variable holding its key, saved in `keys.toml` or exported ([Keys](#keys)). Never the key itself. With none, Razor sends no key. |
+| `models` | `[]` | The model ids `/model` lists for it. |
+
+`provider_only = true` makes Razor itself reach only the providers named under `[providers]` ([Security](security.md#contacting-only-your-model-provider)). It is `false` by default, and only your own file or a pack may set it.
+
+### Models
+
+`[models."<name>"]` changes how Razor treats one model, a shipped one or a provider's. For Claude and GPT only `window` and `threshold` may be set; the rest are for chat models.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `speed_ids` | empty | Chat model variants, for example `speed_ids = { fast = "accounts/fireworks/routers/kimi-k3-fast" }`. The provider, credentials, profile, effort and context limits stay the same. Missing variants are unavailable. Gemini Fast uses its priority tier directly; a conflicting `request.service_tier` is refused. |
+| `window` | the shipped or reported size | The context size in tokens. Razor does not guess one for a provider's model, so set it. |
 | `threshold` | `[rebuild] threshold` | This model's own rebuild threshold. |
 | `replay` | `"streamed"` | How the model's earlier reasoning is sent back with the next request: `streamed` as it arrived, `reasoning` or `reasoning_content` in the field of that name, which some hosts require, or `none`. |
 | `request` | none | Extra fields sent with every request, such as an option only that host has. |
@@ -236,7 +245,7 @@ These decide what every conversation is told before your first message, and whic
 | --- | --- | --- |
 | `startup` | `["razor", "project"]`; the starter pack's is `["persona.md", "razor", "about", "project", "rules.md"]` | The parts of a top-level conversation's system prompt, in order. Three words are not files: `razor` is Razor's own text about its tools, `project` is the `AGENTS.md` and `CLAUDE.md` files from the repository root down to the session's folder, and `about` is `~/.razor/about.md`. Anything else is a file, or a folder whose first 64 `.md` files are read. |
 | `skills` | `[]` | More folders of skills: written instructions an agent loads by name, one folder per skill with a `SKILL.md`. These are searched last, after the folders below. |
-| `skill_updates` | `true` | Update eligible machine skills on the first server wake and then daily. Set `false` to stop future runs and restore shipped pack skills in lookup; an update already running finishes. |
+| `skill_updates` | `true` | Update eligible machine skills on the first server wake and then daily. Set `false` to stop future runs and restore shipped pack skills in lookup; an update already running finishes. With `provider_only` on, none runs. |
 | `pack` | the starter pack | The pack folder. Naming one replaces the starter pack; removing the name brings it back. |
 
 Razor looks for skills in this order, and when two folders hold a skill of the same name, the first one wins:
@@ -266,7 +275,7 @@ An agent can start a helper as a reviewer or a researcher, which gives it Razor'
 | `[children] grace` | `"3m"` | How long a helper that stopped without reporting is given before Razor asks it once to finish. |
 | `[children] reviewer` | none | A file whose text replaces Razor's instructions for a helper started as a reviewer. |
 | `[children] researcher` | none | The same for a helper started as a researcher. |
-| `[children] watcher` | `"gemini-3.8-flash"` | The model of the watcher: a helper Razor starts by itself when a client sends a video (the terminal app does not) to a session whose model cannot watch video, and which reports a description and a timeline of key moments. Its key goes in the server's environment like any other model's ([Models and sign-in](models.md#other-model-families)); for the default that is `GEMINI_API_KEY`. Without the key no watcher starts, and the session gets only the video's file path. |
+| `[children] watcher` | `"gemini-3.8-flash"` | The model of the watcher: a helper Razor starts by itself when a client sends a video (the terminal app does not) to a session whose model cannot watch video, and which reports a description and a timeline of key moments. Its key goes in `keys.toml` or the server's environment like any other model's ([Keys](#keys)); for the default that is `GEMINI_API_KEY`. With `provider_only` on, no watcher starts. Without the key no watcher starts, and the session gets only the video's file path. |
 
 ### Guards
 
@@ -300,7 +309,7 @@ ask = ["curl", "-fsS", "-o", "/dev/null", "https://ntfy.sh/your-unguessable-topi
 | `capture` | `[]` | A program that writes 16 kHz mono 16-bit PCM from the microphone to standard output. Empty: no recording. |
 | `play` | `["afplay", "-r", "{rate}"]` on macOS, `[]` elsewhere | The player; `{rate}` becomes the speed, and the audio file's path is added last. |
 
-[Browser, voice and search](browser-voice-search.md) has working values for each platform.
+[Browser, voice and search](browser-voice-search.md) has working values for each platform. With `provider_only` on, Razor runs neither `speech` nor `transcribe`.
 
 ### Web
 
@@ -311,7 +320,7 @@ ask = ["curl", "-fsS", "-o", "/dev/null", "https://ntfy.sh/your-unguessable-topi
 | `[web] answer` | `[]`; the starter pack's is `["exa", "parallel"]` | The same for `answer`, a cited answer. Firecrawl has none. |
 | `[web.<provider>] base_url` | the provider's public address | Another address for `exa`, `parallel` or `firecrawl`, such as a proxy. |
 
-A web tool appears only while one of its providers has a key. With none, agents keep their model's own web tools.
+A web tool appears only while one of its providers has a key, and never with `provider_only` on. With none, agents keep their model's own web tools.
 
 ### MCP servers
 
@@ -383,7 +392,7 @@ before = ["call"]
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `release_updates` | `true` | Download newer stable Razor releases at server startup and daily, ready for `razor restart`. Set `false` to stop future background checks; `razor update` still works. Source builds never update automatically. |
+| `release_updates` | `true` | Download newer stable Razor releases at server startup and daily, ready for `razor restart`. Set `false` to stop future background checks; `razor update` still works. Source builds never update automatically, and with `provider_only` on none runs; `razor update`, typed by you, still does. |
 | `[server] address` | none: the local socket only | A `host:port` the server also listens on, for other devices and for paired servers, the Razor servers on your other machines that you connect to this one; plain HTTP, so use a private network ([More machines](machines.md)). Needs a restart. |
 | `[server] https_url` | none | An HTTPS address that reaches this server, used to finish MCP sign-ins. Without it, you paste the address the browser landed on. |
 | `[server] name` | empty | This machine's short name: the first word of the name of each new session you start, and the machine name other servers show. Empty: sessions are named after their project. |
@@ -407,8 +416,11 @@ before = ["call"]
 The theme's colour names:
 
 ```text
-glass  bezel  bezelHi  recess  strip  agentBg  violet  violetDim  white  data  gray  grayDim
-green  cyan  magenta  amber  red  redBg  cyanBg  youBg  chip  button  addedBg
+glass  bezel  bezelHi  recess  strip  data  white  gray  grayDim  cyan  green  magenta
+amber  red  violet  violetDim  violetHi  lamp  agentBg  youBg  cyanBg  redBg  amberBg  addedBg
+chip  button  group-slate  group-steel  group-indigo  group-plum  group-rose  group-clay
+group-sand  group-moss  panel-slate  panel-steel  panel-indigo  panel-plum  panel-rose
+panel-clay  panel-sand  panel-moss  panel  panelInk  panelGray  chipInk  clock  clockBg  askWords
 ```
 
 ```toml

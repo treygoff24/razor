@@ -40,20 +40,18 @@ pub(super) async fn recap(
     let asked = async {
         let evidence = evidence(&app, &summary, after).await?;
         let config = app.controller.config().await;
-        // Trey, 2026-11-04: "Claude sessions should use haiku medium, gpt sessions terra low,
-        // open source model sessions also haiku".
-        match profiles::model(&summary.model).transport {
-            Transport::Responses => app
-                .responses
-                .recap(&config.responses.base_url, &id, PROMPT, &evidence)
-                .await
-                .ok(),
-            Transport::Claude | Transport::Chat(_) => {
-                crate::claude::recap(&summary.cwd, PROMPT, &evidence)
-                    .await
-                    .ok()
-            }
+        let mut route = profiles::model(&summary.model, &config).ok()?;
+        // Trey, 2026-11-04: "Claude sessions should use haiku medium, gpt sessions terra low"; a
+        // provider's session uses its own model there, never a second provider (6 Nov 2026).
+        let endpoint = &mut route.endpoint;
+        match (endpoint.transport, &endpoint.key) {
+            (Transport::Claude, None) => endpoint.id = "haiku".into(),
+            (Transport::Responses, None) => endpoint.id = profiles::id("terra".into()),
+            _ => {}
         }
+        let (home, cwd) = (&app.home, &summary.cwd);
+        let asked = super::ready::answer(home, &app.responses, cwd, &route, &id, PROMPT, &evidence);
+        asked.await.ok()
     };
     let text = tokio::time::timeout(Duration::from_secs(20), asked)
         .await

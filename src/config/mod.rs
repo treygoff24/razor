@@ -58,7 +58,7 @@ pub fn make_home(home: &Path) -> Result<(), Error> {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub(crate) model: String,
+    pub model: String,
     pub(crate) effort: Effort,
     /// The model and effort a session started for a call runs on, unless the caller names its
     /// own; a call to an existing session keeps that session's (docs/design/call.md).
@@ -80,7 +80,12 @@ pub struct Config {
     pub(crate) stuck: Stuck,
     profiles: Profiles,
     pub(crate) responses: Responses,
-    /// `[models."<model>"]`: limits for every model, connection settings for chat routes.
+    /// `[providers.<name>]`: each provider's format, address, key variable and listed models, over
+    /// a shipped provider of that name (docs/models.md#providers).
+    pub(crate) providers: BTreeMap<String, Provider>,
+    /// Razor itself reaches only the providers under `providers` (docs/security.md).
+    pub provider_only: bool,
+    /// `[models."<model>"]`: limits for every model, request settings for chat routes.
     pub(crate) models: BTreeMap<String, Model>,
     pub claude: Claude,
     /// `[residents.<name>]`: each resident, by name, which is its session's id.
@@ -175,7 +180,7 @@ pub(crate) struct Tasks {
 }
 
 /// A machine key: calls go to OpenAI, or to `url`, which speaks GPT-Live's protocol (a stand-in, or
-/// the person's own relay); either gets the home's `key` file when it has one.
+/// the person's own relay); either gets `OPENAI_API_KEY` when it is set.
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct LiveSettings {
@@ -274,7 +279,7 @@ pub(crate) struct Stuck {
 struct Profile {
     pub(crate) code_mode: Option<bool>,
     /// Codex's image generation, which only GPT on the sign-in has.
-    image_gen: bool,
+    image_gen: Option<bool>,
 }
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -282,14 +287,11 @@ struct Profiles {
     claude: Profile,
     codex: Profile,
 }
-/// One model's settings, each replacing its shipped row's (docs/design/generic.md); a
-/// machine key, refused in a project's file. `key` names a variable and never holds a key.
+/// One model's settings, each replacing its shipped row's (docs/design/generic.md); a machine
+/// key, refused in a project's file.
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Model {
-    pub(crate) base_url: Option<String>,
-    pub(crate) key: Option<String>,
-    pub(crate) id: Option<String>,
     pub(crate) speed_ids: BTreeMap<Speed, String>,
     /// Context tokens; when set, the session asks for a handover at its rebuild threshold.
     pub(crate) window: Option<u64>,
@@ -312,6 +314,19 @@ pub(crate) enum Replay {
     None,
 }
 
+/// A provider: its format (`chat` when neither config nor a shipped provider names one), its
+/// address, the variable holding its key (none: no auth; it never holds a key), and the model ids
+/// Razor lists for it. A field left out is the shipped provider's.
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Provider {
+    pub(crate) format: Option<crate::profiles::Transport>,
+    pub(crate) base_url: Option<String>,
+    pub(crate) key: Option<String>,
+    pub(crate) models: Vec<String>,
+}
+
+/// The ChatGPT sign-in's address.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Responses {
@@ -357,6 +372,8 @@ impl Default for Config {
             stuck: Stuck::default(),
             profiles: Profiles::default(),
             responses: Responses::default(),
+            providers: BTreeMap::new(),
+            provider_only: false,
             models: BTreeMap::new(),
             claude: Claude::default(),
             residents: BTreeMap::new(),
@@ -457,6 +474,15 @@ impl Config {
     }
 
     fn parse(table: toml::Table) -> Result<Self, Error> {
+        // A row written before providers is told where its fields moved; nothing migrates it.
+        let rows = table.get("models").and_then(toml::Value::as_table);
+        let old = |(_, row): &(_, &toml::Value)| {
+            ["base_url", "key", "id"].map(|f| row.get(f)) != [None; 3]
+        };
+        if let Some((name, _)) = rows.into_iter().flatten().find(old) {
+            let moved = "cannot hold base_url, key or id: they moved to [providers.<name>] as base_url, key and models, and the model is named <provider>/<id> (docs/configuration.md#providers).";
+            return Err(Error::Invalid(format!("[models.{name}] {moved}")));
+        }
         let mut config: Self = table.try_into().map_err(|e: toml::de::Error| {
             let why = e.message().trim_end().replace('\n', " ");
             Error::Invalid(format!("The config is invalid: {why}."))
@@ -487,11 +513,6 @@ impl Config {
                 "Two model rows name the same model; keep one row.".into(),
             ));
         }
-        for (name, row) in &config.models {
-            crate::profiles::model(name)
-                .validate(name, row)
-                .map_err(|e| Error::Invalid(e.to_string()))?;
-        }
         if config.web.answer.contains(&tools::web::Provider::Firecrawl) {
             return Err(Error::Invalid(
                 "Firecrawl has no answer action; use exa or parallel in web.answer.".into(),
@@ -500,34 +521,58 @@ impl Config {
         Ok(config)
     }
 
+    /// What the merged settings name across files: each provider's name and address, each model
+    /// row against its route, and with `provider_only` a default model on a provider.
+    fn check(self) -> Result<Self, Error> {
+        let invalid = |e: crate::profiles::Error| Error::Invalid(e.to_string());
+        for (name, provider) in &self.providers {
+            let url = provider.base_url.as_deref().map(reqwest::Url::parse);
+            if url.is_some_and(|u| !u.is_ok_and(|u| matches!(u.scheme(), "http" | "https"))) {
+                let why = format!("[providers.{name}] base_url must be an HTTP or HTTPS URL.");
+                return Err(Error::Invalid(why));
+            }
+        }
+        for (name, row) in &self.models {
+            crate::profiles::validate(name, row, &self).map_err(invalid)?;
+        }
+        if self.provider_only {
+            crate::profiles::model(&self.model, &self).map_err(invalid)?;
+        }
+        Ok(self)
+    }
+
     /// The selected family and code-mode setting bind one snapshot of available actions, as a
-    /// child's when `child` is set.
+    /// child's when `child` is set. With `provider_only`, Claude Code's WebFetch, which fetches
+    /// from this machine, is left out.
     pub(crate) fn profile(
         &self,
-        endpoint: &str,
+        home: &Path,
         model: &str,
         actions: std::sync::Arc<[tools::Action]>,
         child: bool,
     ) -> Result<crate::profiles::Profile, crate::profiles::Error> {
-        use crate::profiles::{self, Endpoint, Transport};
-        let route = profiles::model(model).transport;
-        let chat = self.models.get(model);
-        let own = || Endpoint {
-            url: endpoint.into(),
-            id: model.into(),
-            ..Default::default()
+        use crate::profiles::{self, Transport};
+        let route = profiles::model(model, self)?;
+        let mode = match route.endpoint.transport {
+            Transport::Claude => self.profiles.claude.code_mode.unwrap_or(false),
+            Transport::Responses => {
+                (self.profiles.codex.code_mode).unwrap_or(route.endpoint.key.is_none())
+            }
+            Transport::Chat => false,
         };
-        let (mode, endpoint) = match route {
-            Transport::Claude => (self.profiles.claude.code_mode.unwrap_or(false), own()),
-            Transport::Responses => (
-                self.profiles.codex.code_mode.unwrap_or(!own().public()),
-                own(),
-            ),
-            Transport::Chat(row) => (false, row.endpoint(model, chat)?),
-        };
-        let variant = chat.and_then(|c| c.variant.as_ref());
-        let image = self.profiles.codex.image_gen;
-        profiles::load(endpoint, model, route, mode, variant, actions, child, image)
+        let variant = self.models.get(model).and_then(|c| c.variant.as_ref());
+        // Codex's image generation runs on the ChatGPT sign-in: GPT there gets it, and Claude and
+        // chat a helper on it, never a provider's GPT.
+        let image = (route.endpoint.key.is_none()
+            || route.endpoint.transport != Transport::Responses)
+            && !self.provider_only
+            && home.join("auth.json").exists()
+            && self.profiles.codex.image_gen.unwrap_or(true);
+        let mut profile = profiles::load(route, mode, variant, actions, child, image)?;
+        if self.provider_only {
+            profile.tools.retain(|tool| tool["builtin"] != "WebFetch");
+        }
+        Ok(profile)
     }
 
     /// The startup list `session` opens with: its own when it is a resident that names one.
@@ -569,17 +614,30 @@ impl Settings {
     }
 
     /// Freezes session actions and their local MCP root from this settings snapshot; the caller
-    /// adds the plugins' tools.
+    /// adds the plugins' tools. With `provider_only` there are no web verbs, and the MCP servers a
+    /// project's shared `.razor/config.toml` brings stay off (docs/security.md).
     pub(crate) fn tools(&self) -> tools::Config {
+        use crate::protocol::McpScope as Mcp;
         let skills = self.skills();
+        let only = self.config.provider_only;
+        let shared = self.destination(Mcp::Project).ok().filter(|d| only && d.1);
+        let mut mcp = self.config.mcp.clone();
+        for (name, server) in &mut mcp {
+            let source = self.sources.get(&format!("mcp.{name}"));
+            server.enabled &= shared.as_ref().is_none_or(|d| source != Some(&d.0));
+        }
         tools::Config {
             delete_guard: self.config.guards.delete,
             described: skills.len() - self.config.skills.len(),
             skills,
             scripts: self.config.tools.clone(),
-            mcp: self.config.mcp.clone(),
+            mcp,
             mcp_cwd: self.project.clone(),
-            web: self.config.web.clone(),
+            web: if only {
+                Default::default()
+            } else {
+                self.config.web.clone()
+            },
             plugins: BTreeMap::new(),
         }
     }

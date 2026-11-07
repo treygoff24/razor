@@ -34,7 +34,7 @@ with flow([]) as f:
         assert path.read_bytes() == before and voice(f) == changed
 
 said = lambda text: response([{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}])
-with flow([done(), said("Checked."), said("Fast."), done(), response([call("bash", '{"command": "until [ -e go ]; do sleep .05; done"}')]), done()], model="sol", config=PLAIN + '\n[server]\naddress="127.0.0.1:0"\n[models.slow]\nbase_url="{standin}"\nkey=""') as f:
+with flow([done(), said("Checked."), said("Fast."), done(), response([call("bash", '{"command": "until [ -e go ]; do sleep .05; done"}')]), done()], model="sol", config=PLAIN + '\n[server]\naddress="127.0.0.1:0"\n[providers.slow]\nbase_url="{standin}"') as f:
     seeded = f.run("--print=json", "Seed the call.")
     assert seeded.returncode == 0, seeded.stderr
     session = json.loads(seeded.stdout)["session"]
@@ -44,7 +44,6 @@ with flow([done(), said("Checked."), said("Fast."), done(), response([call("bash
         assert len(seen) == 1 and seen[0].get("type") == "closed" and seen[0].get("reason") == reason, ("refusal after upgrade", reason, seen)
     asyncio.run(refused(session, "key"))
     asyncio.run(refused("missing", "error"))
-    (f.home / ".razor/key").write_text("flow-dummy-live-key")
     # A refused choice after a held one changes nothing; the hand-off carries the held one, a
     # handover, and the new model's rebuilt request ends with the person's words.
     script = [{"after": "session.input_audio.append", "type": "session.input_transcript.delta", "delta": "Check it.", "start_ms": 0, "end_ms": 900}, {"type": "session.delegation.created", "offset_ms": 900, "delegation": {"id": "c1", "target": "client"}}]
@@ -66,7 +65,7 @@ with flow([done(), said("Checked."), said("Fast."), done(), response([call("bash
         if event.get("type") == "chose":
             server.post(f, f"/sessions/{session}/input", {"text": "Go fast.", "speed": "fast"})
             server.until(f, session, lambda es: es[-2].get("text") == "Fast.")
-        if reply := {"ready": '{"type":"choose","model":"slow"}', "chose": bytes(960), "refused": '{"type":"end"}'}.get(event.get("type")):
+        if reply := {"ready": '{"type":"choose","model":"slow/slow"}', "chose": bytes(960), "refused": '{"type":"end"}'}.get(event.get("type")):
             await ws.send(reply)
     with serve(script) as again:
         config.write_text(config.read_text().replace(endpoint, again))

@@ -63,7 +63,7 @@ impl Session {
     pub(super) fn render(&self, model: &str, actions: Arc<[Action]>) -> Result<Profile, Error> {
         let child = self.record.summary().child.is_some();
         let config = &self.settings.config;
-        Ok(config.profile(&self.c.inner.endpoint, model, actions, child)?)
+        Ok(config.profile(&self.c.inner.home, model, actions, child)?)
     }
 
     /// Why the conversation cannot go on with `model`, rendered as `profile`: another profile,
@@ -103,7 +103,7 @@ impl Session {
             let reason = lost.then(|| "the last turn did not finish".to_owned());
             let reason = reason.or_else(|| self.unkept(&model, &profile));
             let keep = self.context.filter(|_| !unread && reason.is_none());
-            let tokens = profiles::tokens(profiles::model(&model).transport, bytes);
+            let tokens = profiles::tokens(profile.endpoint.transport, bytes);
             let handover =
                 (self.context.is_some() && keep.is_none_or(|n| n >= floor)).then_some(tokens);
             let switch = Switch {
@@ -153,7 +153,7 @@ impl Session {
     /// The native history a clean reopening continues, when the model path keeps one.
     pub(super) async fn resume(&mut self) -> Result<Option<Resume>, Error> {
         let s = self.record.summary();
-        Ok(match profiles::model(&self.model).transport {
+        Ok(match self.profile.endpoint.transport {
             Transport::Claude => match &s.native {
                 Some(Native::Claude { conversation, uuid }) => Some(Resume::Claude {
                     conversation: conversation.clone(),
@@ -161,7 +161,7 @@ impl Session {
                 }),
                 _ => None,
             },
-            Transport::Responses | Transport::Chat(_) if !s.responses.is_empty() => {
+            Transport::Responses | Transport::Chat if !s.responses.is_empty() => {
                 let mut history = Vec::new();
                 for id in &s.responses {
                     if let Some(Native::Responses { additions, items }) =
@@ -182,7 +182,7 @@ impl Session {
                 let items = profiles::Conversation::resume(&self.profile, history)?.snapshot();
                 Some(Resume::Responses { items })
             }
-            Transport::Responses | Transport::Chat(_) => None,
+            Transport::Responses | Transport::Chat => None,
         })
     }
 
@@ -231,7 +231,7 @@ impl Session {
             // Every open follows an admitted input or rebuild, even after unloading.
             open: s.last.0,
             cwd: s.cwd.clone(),
-            model: self.model.clone(),
+            model: self.profile.endpoint.id.clone(),
             effort: self.model_settings.effort,
             speed: self.model_settings.speed,
             resume,
@@ -243,13 +243,13 @@ impl Session {
             .await
             .map_err(other("speaking to the model path"))?;
         let (inner, claude) = (&self.c.inner, &self.settings.config.claude);
-        match profiles::model(&self.model).transport {
+        match self.profile.endpoint.transport {
             Transport::Claude => inner
                 .bridge
                 .start(dir, claude, s.child.is_some(), watching, incoming, outgoing)
                 .await
                 .map_err(other("using the model path"))?,
-            Transport::Responses | Transport::Chat(_) => {
+            Transport::Responses | Transport::Chat => {
                 let (native, mut replies) = mpsc::channel(64);
                 (inner.responses).start(dir, watching, incoming, native);
                 tokio::spawn(async move {
@@ -292,7 +292,11 @@ impl Session {
         let entry = self.append(Body::Effort { effort }, None).await?;
         self.model_settings.effort = effort;
         let speed = self.model_settings.speed;
-        let model = self.conversation.as_ref().map(|c| c.model.clone());
+        // The conversation's own model, by its id at its provider.
+        let model = self
+            .conversation
+            .as_ref()
+            .map(|c| c.profile.borrow().endpoint.id.clone());
         self.say(|session| ToBridge::Effort {
             session,
             model: model.unwrap_or_default(),
@@ -328,7 +332,10 @@ impl Session {
             self.model_settings.speed = input.speed.unwrap_or(self.model_settings.speed);
         }
         let settings = self.model_settings;
-        let model = self.conversation.as_ref().map(|c| c.model.clone());
+        let model = self
+            .conversation
+            .as_ref()
+            .map(|c| c.profile.borrow().endpoint.id.clone());
         self.say(|session| ToBridge::Effort {
             session,
             model: model.unwrap_or_default(),

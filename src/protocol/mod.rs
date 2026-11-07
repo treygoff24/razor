@@ -430,6 +430,9 @@ pub struct Input {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) device: Option<String>,
     pub(crate) text: String,
+    /// Origins of images whose original remains on the sending device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) image_origins: Vec<ImageOrigin>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -541,6 +544,23 @@ impl Input {
             ..Default::default()
         }
     }
+}
+
+/// The original of a scaled or absent image, on the sending device.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageOrigin {
+    pub(crate) number: usize,
+    pub(crate) path: String,
+    pub(crate) device: String,
+    pub(crate) copy: ImageCopy,
+}
+
+/// What reached the model in place of the original.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageCopy {
+    Scaled,
+    PointerOnly,
 }
 
 /// A session-owned image; paths in records are relative to the session directory.

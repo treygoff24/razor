@@ -32,7 +32,7 @@ impl Responses {
         let body = json!({"id": session.as_str(), "model": model, "input": input,
             "commands": commands, "max_output_tokens": 10_000,
             "settings": {"allowed_callers": ["direct"], "external_web_access": false}});
-        let mut tokens = self.credentials(false, None).await?;
+        let mut tokens = self.credentials(None).await?;
         for retry in [true, false] {
             let mut post = (self.client.post(&url).bearer_auth(&tokens.access_token))
                 .header("session_id", session.as_str())
@@ -42,7 +42,7 @@ impl Responses {
             }
             let response = post.send().await.map_err(other("sending a web search"))?;
             if response.status() == StatusCode::UNAUTHORIZED && retry {
-                tokens = self.credentials(false, Some(&tokens.access_token)).await?;
+                tokens = self.credentials(Some(&tokens.access_token)).await?;
                 continue;
             }
             // The status alone, never the endpoint's message: one may echo the request's bearer.

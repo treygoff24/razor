@@ -41,7 +41,7 @@ The effort is a setting of the session (`/effort`, or the `effort` field when yo
 
 ## Helper briefs
 
-A helper started with the `agent` tool (`action: start`, `model: sol` or another GPT alias, `effort`, `kind`, `placement`) sees only its `brief`, so the brief carries the whole contract above plus:
+A helper started with the `agent` tool (`action: start`, `model: sol` or another GPT alias, `effort`, `kind`, `placement`) receives its startup files and `brief`, but not your conversation, so the brief carries the whole contract above plus:
 
 - the exact owned files or the read-only scope,
 - what the helper decides alone and what it must stop for,

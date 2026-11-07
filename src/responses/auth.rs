@@ -1,4 +1,4 @@
-//! Razor's own ChatGPT sign-in: `$RAZOR_HOME/auth.json`, or `$RAZOR_HOME/key` for the public API.
+//! Razor's own ChatGPT sign-in: `$RAZOR_HOME/auth.json`.
 
 use super::{Error, Responses, bounded, other};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -29,26 +29,8 @@ struct Auth {
 impl Responses {
     /// The bearer for one request. A sign-in token is refreshed within five minutes of expiry, or
     /// when `stale` names the token a 401 just refused.
-    pub(super) async fn credentials(
-        &self,
-        public: bool,
-        stale: Option<&str>,
-    ) -> Result<Tokens, Error> {
+    pub(super) async fn credentials(&self, stale: Option<&str>) -> Result<Tokens, Error> {
         let _lock = self.auth.lock().await;
-        if public {
-            let bytes = read(&self.home.join("key"))
-                .await?
-                .ok_or_else(|| Error::Refused(super::key_missing(&self.home)))?;
-            let key = String::from_utf8(bytes).map_err(|_| Error::Auth)?;
-            let access_token = Some(key.trim())
-                .filter(|k| !k.is_empty())
-                .ok_or(Error::Auth)?
-                .into();
-            return Ok(Tokens {
-                access_token,
-                ..Tokens::default()
-            });
-        }
         let bytes = read(&self.home.join("auth.json"))
             .await?
             .ok_or_else(|| Error::Refused(super::SIGN_IN_MISSING.into()))?;

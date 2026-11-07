@@ -21,6 +21,6 @@ Set a headline of at most five words with the `agent` tool's `headline` action, 
 Two programs ship with Razor on your shell's `PATH`; load the skill of the same name before first use.
 
 - `agent-browser` drives a real Chrome, for pages that need clicks, forms, a login or a screenshot.
-- `agent-desktop` operates desktop apps through the accessibility tree. On a Mac without its permissions, ask the person to run `razor doctor`, which requests them.
+- `cua-driver` operates desktop apps and can take over the screen, so tell the person first. On a Mac without its permissions, ask them to run `razor doctor`.
 
 Pictures attached to messages and pictures returned by Razor's image tools also appear in the person's terminal.

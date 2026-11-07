@@ -1,5 +1,5 @@
-//! `razor setup`, the first run (docs/design/setup.md), and the optional keys it saves in
-//! keys.toml. Setup asks in the person's terminal and blocks on them throughout; nothing else
+//! `razor setup`, the first run (docs/design/setup.md), and the keys it saves in keys.toml.
+//! Setup asks in the person's terminal and blocks on them throughout; nothing else
 //! runs in its process. Beyond saving configuration, each step is a program the person could run
 //! themselves: `razor install`, each provider's own sign-in, `agent-browser install` and `razor
 //! doctor`; then main opens the terminal app if they want it. Setup writes to standard error,
@@ -20,43 +20,88 @@ use toml_edit::DocumentMut;
 /// server's own.
 pub(crate) const PORTS: RangeInclusive<u16> = 7433..=7442;
 
-/// The variables keys.toml may set: the web providers' keys and ElevenLabs' for voice. A model's
-/// sign-in is never one of them; each provider's own login keeps it.
+/// The optional keys `razor keys` asks for: the web providers' and ElevenLabs' for voice.
 pub fn names() -> impl Iterator<Item = &'static str> {
     (crate::tools::web::keys().map(|(name, _)| name)).chain(["ELEVENLABS_API_KEY"])
 }
 
-/// Sets each of `names` that the environment lacks from home/keys.toml, so an exported value
-/// wins. Main calls it before any thread starts. An error never holds a value.
+/// The names keys.toml listed when this process started.
+static SAVED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Sets each variable home/keys.toml lists that the environment lacks, so an exported value wins,
+/// and keeps the file's names for `environment`. Main calls it before any thread starts. An error
+/// never holds a value. A leftover key file, which Razor no longer reads, is named on standard
+/// error: doctor's terminal, serve's log.
 pub fn load(home: &Path) -> Result<(), Error> {
-    let keys = saved(&home.join("keys.toml"))?.1;
-    for name in names().filter(|name| std::env::var_os(name).is_none()) {
-        if let Some(key) = keys.get(name).and_then(toml_edit::Item::as_str) {
-            // SAFETY: main calls this before the runtime starts any thread.
-            unsafe { std::env::set_var(name, key) }
-        }
+    let old = home.join("key");
+    if old.exists() {
+        let old = old.display();
+        eprintln!(
+            "Key file: {old} is no longer read; save its key as OPENAI_API_KEY in keys.toml, name the model openai/<id>, then delete the file."
+        );
     }
+    let keys = saved(&home.join("keys.toml"))?.1;
+    for (name, key) in keys
+        .iter()
+        .filter(|(name, _)| std::env::var_os(name).is_none())
+    {
+        // SAFETY: main calls this before the runtime starts any thread; `saved` checked both.
+        unsafe { std::env::set_var(name, key.as_str().unwrap_or_default()) }
+    }
+    let _ = SAVED.set(keys.iter().map(|(name, _)| name.to_owned()).collect());
     Ok(())
 }
 
-/// keys.toml's text, for a compare-and-replace, and its keys: only `names`, each a nonempty
-/// string with no NUL (`set_var` would panic and print it). A TOML error quotes the file, so none
-/// is shown.
+/// The environment agents' shells, MCP servers and Cua Driver's daemon start from: this
+/// process's, less `names`, every name keys.toml listed, set from it or exported, and Claude's
+/// keys. Razor's own keys stay with Razor: a program that printed its environment would put them
+/// in the record (Trey, 2026-10-28, for the web keys; 6 Nov 2026, for every key keys.toml holds).
+pub(crate) fn environment() -> std::collections::BTreeMap<String, String> {
+    let saved = SAVED.get().into_iter().flatten().map(String::as_str);
+    let withheld: Vec<_> = names().chain(saved).chain(crate::claude::KEYS).collect();
+    let vars = std::env::vars();
+    vars.filter(|(name, _)| !withheld.contains(&name.as_str()))
+        .collect()
+}
+
+/// Where `name`'s value comes from, never the value: keys.toml when the file holds what the
+/// environment has, else the environment; `None` when it is unset.
+pub(crate) fn source(home: &Path, name: &str) -> Option<&'static str> {
+    let value = std::env::var(name).ok().filter(|value| !value.is_empty())?;
+    let keys = saved(&home.join("keys.toml")).map(|(_, keys)| keys);
+    let filed =
+        keys.is_ok_and(|keys| keys.get(name).and_then(toml_edit::Item::as_str) == Some(&value));
+    Some(["the environment", "keys.toml"][usize::from(filed)])
+}
+
+/// keys.toml's text, for a compare-and-replace, and its keys: each named in letters, digits and
+/// `_`, not starting with a digit, and a nonempty string with no NUL (`set_var` would panic and
+/// print it). A TOML error quotes the file, so none is shown.
 fn saved(path: &Path) -> Result<(String, DocumentMut), Error> {
     let before = pack::text(path, true)?;
     let keys = before.parse::<DocumentMut>().ok().filter(|keys| {
         keys.iter().all(|(name, value)| {
-            names().any(|n| n == name)
-                && value
-                    .as_str()
-                    .is_some_and(|v| !v.trim().is_empty() && !v.contains('\0'))
+            !name.starts_with(|c: char| c.is_ascii_digit())
+                && !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && (value.as_str()).is_some_and(|v| !v.trim().is_empty() && !v.contains('\0'))
         })
     });
     let wrong = || {
-        let (names, path) = (names().collect::<Vec<_>>().join(", "), path.display());
-        Error::Invalid(format!("{path} may set only {names}, as nonempty strings."))
+        Error::Invalid(format!(
+            "{} holds lines NAME = \"key\", each name letters, digits and _, each key a nonempty string.",
+            path.display()
+        ))
     };
     Ok((before, keys.ok_or_else(wrong)?))
+}
+
+/// Saves `key` as `name` in keys.toml at 0600, keeping its other lines.
+fn save(home: &Path, name: &str, key: &str) -> Result<(), Error> {
+    let path = home.join("keys.toml");
+    let (before, mut keys) = saved(&path)?;
+    keys[name] = toml_edit::value(key);
+    replace(&path, &before, &keys.to_string())
 }
 
 /// Save optional keys together at 0600, retaining each saved value on Enter. Cancellation
@@ -88,23 +133,46 @@ pub fn keys(home: &Path) -> Result<(), Error> {
 pub async fn run(home: &Path, console: bool) -> Result<bool, Error> {
     terminal("setup")?;
     let loaded = Config::load(home).await?;
-    let (claude, chatgpt) = loop {
-        let typed = line("Use Claude, ChatGPT or both [Claude]")?;
-        match letters(&typed).to_lowercase().as_str() {
-            "" | "c" | "claude" => break (true, false),
-            "g" | "gpt" | "chatgpt" | "openai" | "codex" => break (false, true),
-            "b" | "both" => break (true, true),
-            _ => eprintln!("Razor read {typed:?}; type claude, chatgpt or both, then Enter."),
-        }
-    };
+    let prompt = "Use Claude, ChatGPT, both, or an API key [Claude]";
+    let (claude, chatgpt) = ask(
+        prompt,
+        "type claude, chatgpt, both or key",
+        |typed| match letters(typed).to_lowercase().as_str() {
+            "" | "c" | "claude" => Some((true, false)),
+            "g" | "gpt" | "chatgpt" | "codex" => Some((false, true)),
+            "b" | "both" => Some((true, true)),
+            "k" | "key" | "api" | "apikey" => Some((false, false)),
+            _ => None,
+        },
+    )?;
+    if (claude || chatgpt) && loaded.provider_only {
+        let why = "provider_only is on, and a Claude or ChatGPT sign-in never satisfies it; run razor setup and choose key, or set provider_only = false first.";
+        return Err(Error::Invalid(why.into()));
+    }
     super::make_home(home)?;
     // A top-level key may always open the file, so the person's own lines stay as they are.
     let file = home.join("config.toml");
-    let config = pack::text(&file, true)?;
-    if !claude && !pack::parse(&config, &file, false)?.0.contains_key("model") {
-        replace(&file, &config, &format!("model = \"sol\"\n{config}"))?;
+    let before = pack::text(&file, true)?;
+    let parsed = before.parse::<DocumentMut>();
+    let mut settings = parsed.map_err(|e| Error::Invalid(format!("{}: {e}", file.display())))?;
+    let mut only = false;
+    if !claude && !chatgpt {
+        let provider = provider(home, &mut settings)?;
+        only = yes("Contact nothing but your model provider? (for work machines)")?;
+        // Either answer is written, so a rerun's no turns a saved yes off.
+        settings["provider_only"] = toml_edit::value(only);
+        if only {
+            implicit(&mut settings, "providers")[&provider].or_insert(toml_edit::table());
+        }
+    } else if !claude && settings.get("model").is_none() {
+        settings["model"] = toml_edit::value("sol");
     }
-    reach(&file, &loaded.server).await?;
+    let connect = !only && yes("Connect to your Razor servers on other machines")?;
+    reach(&mut settings, &file, &loaded.server, connect).await;
+    let after = settings.to_string();
+    if after != before {
+        replace(&file, &before, &after)?;
+    }
     let razor = std::env::current_exe().map_err(|e| {
         Error::Invalid(format!(
             "Cannot find the Razor executable ({e}); reinstall Razor, then run razor setup."
@@ -129,11 +197,13 @@ pub async fn run(home: &Path, console: bool) -> Result<bool, Error> {
     }
     // A release ships agent-browser beside razor, a folder only `serve` puts on PATH.
     let browser = tool("agent-browser");
-    if !ran(Command::new(&browser).arg("install")) && cfg!(target_os = "linux") {
+    let shown = browser.display().to_string().replace('\'', "'\\''");
+    if only {
         eprintln!(
-            "Missing system libraries? Run '{}' install --with-deps; it uses sudo.",
-            browser.display().to_string().replace('\'', "'\\''")
+            "With provider_only, setup downloads no browser; to add it, run '{shown}' install."
         );
+    } else if !ran(Command::new(&browser).arg("install")) && cfg!(target_os = "linux") {
+        eprintln!("Missing system libraries? Run '{shown}' install --with-deps; it uses sudo.");
     }
     if !ran(Command::new(&razor).arg("doctor")) {
         let why = "Fix what doctor reports, then run razor setup again.";
@@ -142,13 +212,125 @@ pub async fn run(home: &Path, console: bool) -> Result<bool, Error> {
     yes("Open Razor for your first message")
 }
 
-/// Names this server, and with Tailscale running gives it an address other machines reach, where
-/// the settings set neither; says what it wrote and where to change it.
-async fn reach(file: &Path, server: &super::Server) -> Result<(), Error> {
-    let before = pack::text(file, true)?;
+/// Asks which provider's API key to use and the key, hidden; saves it in keys.toml at 0600 and
+/// makes the provider's model the default, and calls' when the settings name none. Another
+/// endpoint also gets its `[providers]` table and, with a known window, its model's row; with no
+/// key typed or saved, it sends none. Its provider's name.
+fn provider(home: &Path, settings: &mut DocumentMut) -> Result<String, Error> {
+    const SHIPPED: [(&str, &str); 4] = [
+        ("anthropic", "anthropic/opus"),
+        ("openai", "openai/gpt-6.1-sol"),
+        ("google", "gemini-3.8-flash"),
+        ("runinfra", "deepseek-v4.1-flash-1017"),
+    ];
+    let prompt =
+        "Whose key: anthropic, openai, google, runinfra, or other for another endpoint [other]";
+    let help = "type anthropic, openai, google, runinfra or other";
+    let read = |typed: &str| match letters(typed).to_lowercase().as_str() {
+        "" | "other" => Some(None),
+        typed => SHIPPED.iter().find(|(p, _)| *p == typed).map(Some),
+    };
+    let (name, model, key) = match ask(prompt, help, read)? {
+        Some((name, model)) => {
+            let route = crate::profiles::model(model, &Config::default()).ok();
+            let key = route.and_then(|r| r.endpoint.key).unwrap_or_default();
+            (name.to_string(), model.to_string(), key)
+        }
+        None => other(settings)?,
+    };
+    let typed = secret(&format!(
+        "{key} (typing is hidden; Enter keeps a saved one)"
+    ))?;
+    if !typed.is_empty() {
+        save(home, &key, &typed)?;
+    } else if saved(&home.join("keys.toml"))?.1.get(&key).is_none() {
+        // Another endpoint with no key sends none; a shipped one's doctor names the missing key.
+        let providers = settings.get_mut("providers").and_then(|p| p.get_mut(&name));
+        providers
+            .and_then(|p| p.as_table_like_mut())
+            .map(|t| t.remove("key"));
+    }
+    settings["model"] = toml_edit::value(&model);
+    if settings.get("call_model").is_none() {
+        settings["call_model"] = toml_edit::value(&model);
+    }
+    Ok(name)
+}
+
+/// Another endpoint's format, address, model id and window: writes its `[providers]` table,
+/// named after its host's first label, with a key variable named after it, and the model's row
+/// when the window is known. Its name, the model's and the key variable's.
+fn other(settings: &mut DocumentMut) -> Result<(String, String, String), Error> {
+    let prompt = "Its API: chat (OpenAI chat completions), responses (OpenAI Responses) or anthropic (Anthropic Messages) [chat]";
+    let formats = ["chat", "responses", "anthropic"];
+    let read = |typed: &str| match letters(typed).to_lowercase() {
+        typed if typed.is_empty() => Some("chat"),
+        typed => formats.into_iter().find(|f| *f == typed),
+    };
+    let format = ask(prompt, "type chat, responses or anthropic", read)?;
+    let prompt = "Its address, the base URL its requests start with (often ending in /v1)";
+    let help = "type an http:// or https:// address, such as https://gateway.example.com/v1";
+    let read = |typed: &str| {
+        let url = reqwest::Url::parse(typed).ok()?;
+        let host = url
+            .host_str()
+            .filter(|_| url.scheme().starts_with("http"))?;
+        Some((typed.to_owned(), host.to_owned()))
+    };
+    let (url, host) = ask(prompt, help, read)?;
+    let read = |id: &str| Some(id.to_owned()).filter(|id| !id.is_empty());
+    let id = ask(
+        "The model id it serves",
+        "type the id the endpoint knows",
+        read,
+    )?;
+    let prompt = "Its context window in tokens, if you know it [unknown]";
+    let read = |typed: &str| match typed.parse::<i64>() {
+        _ if typed.is_empty() => Some(None),
+        tokens => tokens.ok().filter(|t| *t > 0).map(Some),
+    };
+    let window = ask(prompt, "type a number of tokens, such as 200000", read)?;
+    let name = Some(device_name(&host)).filter(|n| n.starts_with(char::is_alphabetic));
+    let name = name.unwrap_or_else(|| "local".into());
+    let key = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
+    let mut table = toml_edit::Table::new();
+    table["format"] = toml_edit::value(format);
+    table["base_url"] = toml_edit::value(url);
+    table["key"] = toml_edit::value(&key);
+    table["models"] = toml_edit::value(toml_edit::Array::from_iter([id.as_str()]));
+    implicit(settings, "providers")[&name] = toml_edit::Item::Table(table);
+    let model = format!("{name}/{id}");
+    if let Some(window) = window {
+        implicit(settings, "models")[&model]["window"] = toml_edit::value(window);
+    }
+    Ok((name, model, key))
+}
+
+/// Asks `prompt` until `read` takes the answer, saying `help` after each answer it refuses.
+fn ask<T>(prompt: &str, help: &str, read: impl Fn(&str) -> Option<T>) -> Result<T, Error> {
+    loop {
+        let typed = line(prompt)?;
+        match read(&typed) {
+            Some(answer) => return Ok(answer),
+            None => eprintln!("Razor read {typed:?}; {help}, then Enter."),
+        }
+    }
+}
+
+/// The top-level table `name`, made without a header of its own when missing.
+fn implicit<'a>(settings: &'a mut DocumentMut, name: &str) -> &'a mut toml_edit::Item {
+    let item = settings.entry(name).or_insert(toml_edit::table());
+    if let Some(table) = item.as_table_mut() {
+        table.set_implicit(true);
+    }
+    item
+}
+
+/// Names this server where the settings do not, and with `connect` and Tailscale running gives
+/// it an address other machines reach where they set none; says what it wrote and where to
+/// change it.
+async fn reach(settings: &mut DocumentMut, file: &Path, server: &super::Server, connect: bool) {
     let shown = file.display();
-    let parsed = before.parse::<DocumentMut>();
-    let mut settings = parsed.map_err(|e| Error::Invalid(format!("{shown}: {e}")))?;
     let name = device_name(&crate::profiles::machine());
     if settings.get("server").and_then(|s| s.get("name")).is_none()
         && server.name.is_empty()
@@ -159,28 +341,25 @@ async fn reach(file: &Path, server: &super::Server) -> Result<(), Error> {
             "This server is named {name}: other machines pair with it under that name, and new sessions here start with it. To change it, edit name under [server] in {shown}."
         );
     }
-    if settings
-        .get("server")
-        .and_then(|s| s.get("address"))
-        .is_none()
-        && server.address.is_none()
+    if !connect
+        || settings
+            .get("server")
+            .and_then(|s| s.get("address"))
+            .is_some()
+        || server.address.is_some()
     {
-        match address().await {
-            Some(address) => {
-                settings["server"]["address"] = toml_edit::value(&address);
-                eprintln!(
-                    "Other machines on your tailnet reach this server at {address}. To change it, edit address under [server] in {shown}, then run razor restart."
-                );
-            }
-            None => eprintln!(
-                "No Tailscale address is available here, so other machines cannot reach this server yet. To pair two machines, put both on one tailnet (tailscale.com) and run razor setup on each, or set address under [server] in {shown} to an address the other can reach."
-            ),
-        }
+        return;
     }
-    let after = settings.to_string();
-    match after == before {
-        true => Ok(()),
-        false => replace(file, &before, &after),
+    match address().await {
+        Some(address) => {
+            settings["server"]["address"] = toml_edit::value(&address);
+            eprintln!(
+                "Other machines on your tailnet reach this server at {address}. To change it, edit address under [server] in {shown}, then run razor restart."
+            );
+        }
+        None => eprintln!(
+            "No Tailscale address is available here, so other machines cannot reach this server yet. To pair two machines, put both on one tailnet (tailscale.com) and run razor setup on each, or set address under [server] in {shown} to an address the other can reach."
+        ),
     }
 }
 

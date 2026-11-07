@@ -10,8 +10,8 @@ import server
 replies = [Reply((REPLIES / f"{name}.sse").read_bytes()) for name in ("shell-short", "shell-large")]
 # Over the old 2,000-character preview and under SPILL: inline, as Claude Code's own Bash does.
 # It ends with the browser name the shell gives agent-browser: the session's id, so no two agents
-# share one browser.
-medium = "head -c 2560 /dev/zero | tr '\\0' m; printf %s \"$AGENT_BROWSER_SESSION\""
+# share one browser; then the socket of the home's Cua Driver daemon.
+medium = "head -c 2560 /dev/zero | tr '\\0' m; printf %s \"$AGENT_BROWSER_SESSION $CUA_DRIVER_SOCKET\""
 replies += [reply(("toolu_medium", "Bash", {"command": medium})), Reply((REPLIES / "done.sse").read_bytes())]
 with flow(replies) as f:
     result = f.run("--print=json", "Run the two commands, then finish.")
@@ -25,7 +25,8 @@ with flow(replies) as f:
     assert [e["call"] for e in outputs] == [e["call"] for e in calls], outputs
     # The SDK mirrors the trained status-first shape, trimming the trailing newline.
     short, large, medium = outputs
-    assert medium["output"] == "Exit code 0\n" + "m" * 2560 + answer["session"], medium
+    socket = f.home / ".razor/cua-driver.sock"
+    assert medium["output"] == f"Exit code 0\n{'m' * 2560}{answer['session']} {socket}", medium
     assert short["output"] == "Exit code 7\nshell-output", short
     assert "Exit code 7" in short["output"] and short["outcome"] == "error", short
     # A spill is Claude Code's <persisted-output>: the job's output file and the end of it.

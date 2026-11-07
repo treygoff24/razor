@@ -35,6 +35,9 @@ pub(super) async fn hold(
 
 /// Online tailnet Razor servers, bounded in peers, concurrency, reply bytes and total time.
 pub(super) async fn discover(State(app): State<App>) -> Reply {
+    if app.controller.config().await.provider_only {
+        return Err(Refusal(StatusCode::FORBIDDEN, crate::devices::QUIET.into()));
+    }
     let Some(status) = config::setup::tailnet().await else {
         return Ok(Json(
             json!({"servers": [], "notice": "Tailscale is not running here; set server.address on both machines and pair with razor devices add <name> --address <host:port>."}),

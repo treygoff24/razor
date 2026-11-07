@@ -10,9 +10,8 @@ DEEPSEEK, GLM, GEMINI = "deepseek-v4.1-flash-1017", "glm-5.3-flash", "gemini-3.8
 HOSTS = {DEEPSEEK: "deepseek-v4-1-flash-1017", GLM: "glm-5-3-flash", GEMINI: GEMINI}
 # DeepSeek names the empty variant, which is plain and replaces its shipped leader whole; GLM
 # and Gemini name none, so each gets its leader (docs/design/generic.md).
-CONFIG = f'[models."{DEEPSEEK}"]\nbase_url = "{{standin}}"\nvariant = "plain.json"\n'
-CONFIG += f'[models."{GLM}"]\nbase_url = "{{standin}}"\nreplay = "reasoning"\n'
-CONFIG += f'[models."{GEMINI}"]\nbase_url = "{{standin}}"\n'
+CONFIG = '[providers.runinfra]\nbase_url = "{standin}"\n[providers.google]\nbase_url = "{standin}"\n'
+CONFIG += f'[models."{DEEPSEEK}"]\nvariant = "plain.json"\n[models."{GLM}"]\nreplay = "reasoning"\n'
 BUSY = b'{"error": {"message": "reached its limit of 60 concurrent requests"}}'
 USAGE = {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 130,
          "prompt_tokens_details": {"cached_tokens": 60}}
@@ -175,29 +174,33 @@ with flow(replies, model=DEEPSEEK, config=f'effort = "max"\n{CONFIG}', env=keys)
 
 # A new provider uses plain tools, its own id/key/request settings, and the configured window
 # asks for a handover before the host runs out of context. A host without auth needs no key.
-LOCAL, OPEN = "local-provider-46", "unauthenticated-46"
-HOSTS.update({LOCAL: "accounts/fireworks/routers/kimi-k3-fast", OPEN: OPEN})
-config = (f'[rebuild]\nthreshold = 0.5\n[models."{LOCAL}"]\nbase_url = "{{standin}}"\n'
-          f'id = "maker/custom-model"\nspeed_ids.fast = "{HOSTS[LOCAL]}"\nkey = "LOCAL_KEY"\nwindow = 200\n'
+LOCAL, OPEN = "local46/maker/custom-model", "open46/unauthenticated-46"
+HOSTS.update({LOCAL: "accounts/fireworks/routers/kimi-k3-fast", OPEN: "unauthenticated-46"})
+PROVIDERS = '[providers.local46]\nbase_url = "{standin}"\nkey = "LOCAL_KEY"\n[providers.open46]\nbase_url = "{standin}"\nmodels = ["unauthenticated-46"]\n'
+config = (f'[rebuild]\nthreshold = 0.5\n{PROVIDERS}[models."{LOCAL}"]\n'
+          f'speed_ids.fast = "{HOSTS[LOCAL]}"\nwindow = 200\n'
           f'[models."{LOCAL}".request]\nmax_completion_tokens = 64\n'
-          f'[models."{OPEN}"]\nbase_url = "{{standin}}"\n'
           f'[models."{GEMINI}"]\nwindow = 4096\n')
 old = "OVERSIZED_OLD_RESPONSE_46 " * 1024
-with flow([reply(LOCAL, call(0, "local_write", "write", '{"path":"local.txt","content":"kept"}'), match=""),
+with flow([reply(LOCAL, call(0, "local_write", "write", '{"path":"local.txt","content":"kept"}'),
+                       call(1, "key_env", "bash", json.dumps({"command": 'printf "[%s]" "${LOCAL_KEY+present}"'})), match=""),
            reply(LOCAL, call(0, "local_note", "handover", '{"note":"Keep the local request."}'), match=""),
            reply(LOCAL, {"content": "local done"}, finish="stop", match=""),
            reply(OPEN, call(0, "open_note", "handover", '{"note":"Keep the unauthenticated request."}')),
            reply(OPEN, {"content": old}, finish="stop"),
            Reply(b'{"error":{"code":"context_length_exceeded","message":"Maximum context length reached"}}', status=400,
-                 match=f'"model":"{OPEN}"'),
+                 match=f'"model":"{HOSTS[OPEN]}"'),
            reply(OPEN, {"content": "recovered done"}, finish="stop"),
            reply(OPEN, {"content": "fresh done"}, finish="stop")],
           model=LOCAL, config=config, env={"LOCAL_KEY": "flow-local-key"}) as f:
+    (f.home / ".razor/keys.toml").write_text('LOCAL_KEY = "flow-saved-local-key"\n')
     result = f.run("--print=json", "--speed", "fast", "Keep this exact local request.")
     assert result.returncode == 0, (result.stdout, result.stderr)
     answer = json.loads(result.stdout)
     assert answer["message"] == "local done" and (f.cwd / "local.txt").read_text() == "kept", answer
     entries = list(f.record(answer["session"]))
+    output = next(e["output"] for e in entries if e["kind"] == "result" and e["call"] == "key_env")
+    assert json.loads(output)["output"] == "[]", output
     rebuilt = [e for e in entries if e["kind"] == "rebuild"]
     assert len(rebuilt) == 1 and rebuilt[0]["trigger"] == "threshold", rebuilt
     assert "Keep this exact local request." in rebuilt[0]["context"], rebuilt
@@ -230,11 +233,11 @@ with flow([reply(LOCAL, call(0, "local_write", "write", '{"path":"local.txt","co
     sent = (f.requests / "008.body").read_text()
     assert "Continue in the recovered session." in sent and "This old session is full." in sent and old not in sent, sent
     result = f.run("--model", "sonet", "--print", "Typo.")
-    assert result.returncode != 0 and "check the name" in result.stderr and '[models."sonet"]' in result.stderr, result
+    assert result.returncode != 0 and "check the name" in result.stderr and '[providers]' in result.stderr, result
 
 # A second rejection pauses, even when the local host has no advertised window.
 refusal = Reply(b'{"error":{"code":"context_length_exceeded","message":"Maximum context length reached"}}', status=400)
-with flow([refusal, refusal], model=OPEN, config=f'[models."{OPEN}"]\nbase_url = "{{standin}}"\n') as f:
+with flow([refusal, refusal], model=OPEN, config=PROVIDERS) as f:
     result = f.run("--print=json", "This context cannot fit even after rebuilding.")
     answer = json.loads(result.stdout)
     assert result.returncode != 0, answer
@@ -243,3 +246,14 @@ with flow([refusal, refusal], model=OPEN, config=f'[models."{OPEN}"]\nbase_url =
     assert len(rebuilds) == 1 and rebuilds[0]["trigger"] == "overflow", rebuilds
     assert str(len(rebuilds[0]["context"].encode())) + " bytes" in answer["error"], answer
     assert len(list(f.requests.glob("[0-9]*.body"))) == 2, "overflow retried in a loop"
+
+# The image helper is offered only when its ChatGPT sign-in and image generation are available.
+for signed, enabled, only in ((True, True, False), (False, True, False), (True, False, False), (True, True, True)):
+    settings = f'provider_only = {str(only).lower()}\n[profiles.codex]\n' + ('' if enabled else 'image_gen = false\n') + PROVIDERS
+    with flow([reply(OPEN, {"content": "ready"}, finish="stop")], model=OPEN, config=settings) as f:
+        if not signed:
+            (f.home / ".razor/auth.json").unlink()
+        result = f.run("--print=json", "Reply on this provider.")
+        assert result.returncode == 0, result.stderr
+        prompt = json.loads((f.requests / "001.body").read_bytes())["messages"][0]["content"]
+        assert ('model `sol`' in prompt) == (signed and enabled and not only), (signed, enabled, only)

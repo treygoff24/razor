@@ -488,6 +488,8 @@ struct Page {
     #[serde(default)]
     terminal: bool,
     #[serde(default)]
+    follow: bool,
+    #[serde(default)]
     ready: bool,
     /// A session's stream and pages: entries keep their `native`.
     #[serde(default)]
@@ -537,9 +539,9 @@ fn identity(app: &App, config: &config::Config) -> Server {
 async fn server(app: &App) -> Server {
     let config = app.controller.config().await;
     Server {
-        transcribe: !config.transcribe.is_empty(),
-        call: config.live.url.is_some()
-            || (tokio::fs::metadata(app.home.join("key")).await).is_ok_and(|key| key.len() > 0),
+        transcribe: !config.transcribe.is_empty() && !config.provider_only,
+        call: !config.provider_only
+            && (config.live.url.is_some() || std::env::var_os("OPENAI_API_KEY").is_some()),
         shared: voice::owns(app, &config.server.shared),
         video: true,
         suggestions: config.ui.suggestions,

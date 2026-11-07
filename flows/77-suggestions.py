@@ -15,7 +15,7 @@ TEXT = 'Run the Linux build'
 TRAILER = MARK + ' ' + json.dumps({'text': TEXT})
 RAW = 'The change is ready.\n' + TRAILER
 ON = '[ui]\nsuggestions = true\nmotion = false\n'
-CHAT = '[models."glm-5.3-flash"]\nbase_url = "{standin}"\n'
+CHAT = '[providers.runinfra]\nbase_url = "{standin}"\n'
 
 
 def chat(text):

@@ -2,8 +2,8 @@
 use super::{Children, Error, TEXT, branch, git, other, parse, refuse};
 use crate::controller::Controller;
 use crate::protocol::{
-    AgentView, Body, Child, ChildRequest, ChildUpdate, Decision, EntryId, Input, Origin, SessionId,
-    State,
+    AgentView, Body, Child, ChildRequest, ChildUpdate, Decision, Effort, EntryId, Input, Mail,
+    Origin, SessionId, State,
 };
 use crate::record::{ChildSummary, Summary};
 use serde_json::{Value, json};
@@ -20,6 +20,16 @@ impl Children {
         request: ChildRequest,
     ) -> Result<Value, Error> {
         match request {
+            ChildRequest::StartRoot {
+                cwd,
+                model,
+                effort,
+                mail,
+            } => {
+                native(&mail.id.0)?;
+                self.start_root(controller, cwd, model, effort, mail, Some(server))
+                    .await
+            }
             ChildRequest::Update {
                 parent,
                 child,
@@ -79,6 +89,33 @@ impl Children {
                 Ok(json!(outgoing(controller, &session).await?))
             }
         }
+    }
+
+    pub(super) async fn start_root(
+        &self,
+        controller: &Controller,
+        cwd: PathBuf,
+        model: Option<String>,
+        effort: Option<Effort>,
+        mut mail: Mail,
+        server: Option<&str>,
+    ) -> Result<Value, Error> {
+        if mail.text.len() > TEXT {
+            return refuse("A top-level session starts with a note of at most 64 KiB.");
+        }
+        let cwd = fs::canonicalize(cwd)
+            .await
+            .map_err(other("opening the session's folder"))?;
+        let _ = fs::read_dir(&cwd)
+            .await
+            .map_err(other("reading the session's folder"))?;
+        let session = controller
+            .create(cwd, model, (effort, None), None, None, None)
+            .await?;
+        let name = controller.summary(&session).await?.name;
+        mail.to = session.to_string();
+        super::receive(controller, mail, server).await?;
+        Ok(json!({"session": session, "name": name, "address": name}))
     }
 
     async fn start_peer(
@@ -595,6 +632,7 @@ pub(crate) fn child(parent: &SessionId, fact: &ChildSummary) -> AgentView {
         changed_files: Vec::new(),
         calls: Vec::new(),
         doing: None,
+        hour: None,
         calls_made: 0,
         failed: 0,
         asks: Vec::new(),

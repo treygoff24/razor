@@ -82,6 +82,9 @@ pub(super) async fn enroll(
     Json(Name { name, address, key }): Json<Name>,
 ) -> Reply {
     let own = app.address.get().copied();
+    if address.is_some() && app.devices.quiet.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(Refusal(StatusCode::FORBIDDEN, crate::devices::QUIET.into()));
+    }
     if address.is_some() && own.is_none() {
         return Err(bad(
             "This server has no listening address; check server.address, restart Razor, then pair.",

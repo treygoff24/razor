@@ -10,7 +10,7 @@ Run them with `scripts/flows.sh` and flow numbers or names ([Contributing](contr
 
 **Sessions and the command line**
 
-- 01 `razor doctor` in a fresh home: what is missing and the command that fixes it, no key printed, nothing written, exit 1 with nothing to run on and 0 with a sign-in; help, `--help` and refused commands change nothing.
+- 01 `razor doctor` in a fresh home: what is missing and the command that fixes it, no key printed, nothing written, exit 1 with nothing to run on and 0 with a sign-in; help, `--help` and refused commands change nothing; with a display, the server runs the shipped cua-driver as its daemon on the home's socket, with Cua's telemetry and update check off and no key of Razor's.
 - 02 A reply through the real Claude SDK and `--print`, and what the startup list gives the model.
 - 03 A first message with an image: stored, recorded, and sent to the model before the text.
 - 04 Resume by id, continue the newest in a folder, and the three `--print` formats.

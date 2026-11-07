@@ -257,18 +257,11 @@ impl Session {
             .await
             .map_err(other("opening shell jobs"))?;
         let shell = Arc::new(shell);
-        // Razor's own keys stay with Razor: a command or MCP server that printed its environment
-        // would put them in the record (Trey, 2026-10-28, for the web keys).
-        let names = crate::config::setup::names();
-        let keys: Vec<_> = names.chain(crate::claude::KEYS).collect();
-        let env = std::env::vars()
-            .filter(|(name, _)| !keys.contains(&name.as_str()))
-            .collect();
         let plugins = c.inner.plugins.clone();
         let tools = Tools::open(
             dir,
             s.cwd.clone(),
-            env,
+            crate::config::setup::environment(),
             s.started,
             shell.clone(),
             crate::tools::Config {
@@ -282,7 +275,8 @@ impl Session {
             c.inner.children.post.clone(),
         );
         let (config, child) = (&settings.config, s.child.is_some());
-        let profile = config.profile(&c.inner.endpoint, &s.model, tools.actions(), child)?;
+        let home = &c.inner.home;
+        let profile = config.profile(home, &s.model, tools.actions(), child)?;
         // An admitted `/done` survives a crash until answered or withdrawn.
         let mut done = s.job();
         for &entry in &s.unanswered {

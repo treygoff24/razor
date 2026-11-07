@@ -1,7 +1,7 @@
 //! MCP management: one dispatch for every client.
 
 use super::{Error, Settings};
-use crate::protocol::{McpOperation, McpRow, McpScope};
+use crate::protocol::{McpOperation, McpRow, McpScope, McpScope::Project};
 use crate::tools::{Auth, Tools, idle};
 use serde_json::{Value, json};
 
@@ -27,6 +27,15 @@ pub(crate) async fn run(
                     .into_iter()
                     .find(|s| file.is_some() && settings.destination(*s).ok().map(|d| d.0) == file);
                 let signed_in = auth.signed_in(name, config).await;
+                let (state, error) = match settings.config.provider_only && scope == Some(Project) {
+                    true => (
+                        "disabled".into(),
+                        Some(format!(
+                            "provider_only is on, so Razor does not start the MCP servers a project's shared settings bring; to use this one, add it yourself with razor mcp add {name} --scope private."
+                        )),
+                    ),
+                    false => (state, error),
+                };
                 rows.push(McpRow {
                     name: name.clone(),
                     file,

@@ -166,17 +166,15 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
         with Terminal(beta, "--resume", here, columns=160, rows=50) as t:
             t.shown("beta-visible")
             t.send("\x1bOQ")
-            t.shown("AGENTS", "Atlas 2", "Inner56", names[unclaimed], "servers · all 2 answer", "1 resident", timeout=90)
+            t.shown("AGENTS", "ATLAS 2", "INNER56", names[unclaimed], "servers · all 2 answer", "1 RESIDENT", timeout=90)
             assert "Later" not in t.text(), t.text()
-            for columns, gutter in ((49, False), (50, True)):
-                t.resize(50, columns)
-                t.until(lambda t: t.screen.display[0][columns - 1] == "┐" and any(line[15] == "│" for line in t.screen.display[2:20]) == gutter)
-            t.click("▾ Atlas 2")
-            t.until(lambda t: "Inner56" not in t.text() and names[here] not in t.text())
-            t.click("▸ Atlas 2")
-            t.shown("Inner56")
+            t.resize(50, 50)  # The list alone: below 80 columns it takes the whole width.
+            t.click("ATLAS 2")
+            t.until(lambda t: "INNER56" not in t.text() and names[here] not in t.text())
+            t.click("ATLAS 2")
+            t.shown("INNER56")
             t.resize(50, 160)
-            t.until(lambda t: t.screen.display[0][52] == "┐")
+            t.until(lambda t: t.screen.display[0][52] == "╮")
             config = b / "config.toml"
             config.write_text(config.read_text() + '[ui.keys.global]\nstatus = ["Ctrl-Y"]\n')
             t.shown("Ctrl-Y")
@@ -184,7 +182,7 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
             t.shown("── USAGE")
             t.send("\x19")
             t.until(lambda t: "── USAGE" not in t.text())
-            t.click("▸ Residents")
+            t.click("RESIDENTS")
             t.click("▸ servers")
             t.shown("load", "mem", "personal", "○ ember56 ")
             t.click("○ ember56 ")
@@ -213,7 +211,7 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
             steer = next(e for e in f.record(there) if e["kind"] == "input" and e["text"] == "STEER_56")
             assert (steer["from"], steer["device"]) == ("person", "b"), steer
             t.send("/views\r")
-            t.shown("Edited")
+            t.shown("EDITED")
             assert request(a, "GET", "/views")["version"] == 4
             # One arrow from Atlas's first agent to its second moves only the highlight, Escape
             # stops nothing, and Enter opens it.
@@ -227,10 +225,10 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
             records = list(map(json.loads, (b / "sessions" / here / "record.jsonl").read_text().splitlines()))
             assert all(e.get("end") != "stopped" for e in records), records[-3:]
             t.send("\r\x19")
-            t.shown("── USAGE", "Work", "beta-visible")
+            t.shown("── USAGE", "AGENTS · WORK", "beta-visible")
             t.send("/view Other\r")
             t.send("/resume\r")
-            t.shown("AGENTS · Other")
+            t.shown("AGENTS · OTHER")
             t.send("\x1b")
             t.pump(0.5)
             t.send("/view missing\r")
@@ -310,7 +308,7 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
             t.send("\x1b[A" * count)
             for _ in range(count * 2):
                 t.send("\x1b[B")
-                if t.pump(0.15, lambda t: "❯ Earlier" in t.text()):
+                if t.pump(0.15, lambda t: any("❯" in line and "EARLIER" in line for line in t.screen.display)):
                     break
             else:
                 raise AssertionError("Navigation never reached Earlier:\n" + t.text())

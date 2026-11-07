@@ -1,7 +1,7 @@
 //! Paging the record into the transcript: the page the reader reached, read beside the loop,
 //! and the reader's place kept while it folds.
-use super::{Direction, ITEMS, MOUNT, Transcript};
-use crate::protocol::{Body, End, Entry, EntryId, Event};
+use super::{Direction, ITEMS, MOUNT, Transcript, item};
+use crate::protocol::{EntryId, Event};
 use crate::terminal::{App, Error, api, api::Page, error, fail};
 
 impl Transcript {
@@ -40,23 +40,19 @@ impl Transcript {
             return;
         }
         self.retain_older = direction == Direction::Older;
-        self.mounted = (self.mounted() + 256).min(ITEMS);
+        self.mounted = (self.mounted.max(MOUNT) + 256).min(ITEMS);
         self.children_at = None;
         self.dirty = true;
     }
 
-    /// After a page folds: a page of only metadata reads further back; at the newest end the
-    /// window keeps its newest entries again.
+    /// After a page folds: a page of no items reads further back; at the newest end a window the
+    /// reader follows, or did not page back, keeps its newest entries again, and a followed one
+    /// stops reading back.
     pub(in crate::terminal) fn read_past_metadata(&mut self) {
-        let content = |e: &Entry| match &e.body {
-            Body::Input(_) | Body::Text { .. } | Body::Call { .. } | Body::Rebuild { .. } => true,
-            Body::TurnEnd { end, .. } => matches!(end, End::Error(_)),
-            _ => false,
-        };
-        if !self.entries.values().any(content) {
+        if !self.entries.values().any(item) {
             self.wanted = Some(Direction::Older);
-        } else if self.wanted != Some(Direction::Older) && self.newest() {
-            self.retain_older = false;
+        } else if (self.held.is_none() || self.wanted != Some(Direction::Older)) && self.newest() {
+            (self.retain_older, self.wanted) = (false, self.wanted.filter(|_| self.held.is_some()));
         }
     }
 }
@@ -160,8 +156,8 @@ pub(in crate::terminal) fn jump(app: &mut App, session: &crate::protocol::Sessio
     };
     match t.entries.contains_key(&id) {
         true => {
-            let after = t.entries.range(id..).count();
-            t.mounted = t.mounted().max(after).min(ITEMS);
+            let after = t.entries.range(id..).filter(|(_, e)| item(e)).count();
+            t.mounted = t.mounted.max(after).min(ITEMS);
             (t.held, t.dirty) = (Some((id, 0)), true);
         }
         false => t.wanted = Some(Direction::At(id)),

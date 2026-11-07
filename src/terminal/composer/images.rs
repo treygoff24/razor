@@ -6,7 +6,9 @@ use super::super::{
     view::{Action, Hit},
 };
 use super::Composer;
-use crate::protocol::{BODY_BYTES, IMAGE_BASE64, IMAGES_PER_INPUT, SessionId};
+use crate::protocol::{
+    BODY_BYTES, IMAGE_BASE64, IMAGES_PER_INPUT, ImageCopy, ImageOrigin, SessionId,
+};
 use ratatui::{buffer::Buffer, layout::Rect};
 
 pub struct Loaded {
@@ -101,25 +103,24 @@ impl Composer {
     }
 
     /// Keep a local image's origin with the input even when only its pointer could be sent.
-    pub fn image_origins(&self) -> String {
+    pub fn image_origins(&self) -> Vec<ImageOrigin> {
         let machine = crate::profiles::machine();
         self.active_images()
             .filter_map(|image| {
                 let (path, fitted) = image.origin.as_ref()?;
-                let status = if image.data.is_empty() {
-                    "pointer only"
+                let copy = if image.data.is_empty() {
+                    ImageCopy::PointerOnly
                 } else if *fitted {
-                    "scaled from"
+                    ImageCopy::Scaled
                 } else {
                     return None;
                 };
-                Some(format!(
-                    "\n[Image #{}: {} {} on {}; original stays on that device]",
-                    image.number,
-                    status,
-                    serde_json::to_string(path).ok()?,
-                    machine
-                ))
+                Some(ImageOrigin {
+                    number: image.number,
+                    path: path.clone(),
+                    device: machine.clone(),
+                    copy,
+                })
             })
             .collect()
     }

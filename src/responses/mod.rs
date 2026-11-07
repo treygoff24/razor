@@ -1,4 +1,5 @@
-//! The Responses loop over Razor's own ChatGPT sign-in (docs/design/responses.md).
+//! The Responses loop, over Razor's own ChatGPT sign-in or a provider's key, and the chat loop
+//! (docs/design/responses.md, docs/design/generic.md).
 
 mod auth;
 mod chat;
@@ -9,16 +10,12 @@ mod task;
 mod upload;
 
 use crate::{
-    profiles::Endpoint,
-    protocol::{FromBridge, SessionId, Usage, UsageWindow},
+    profiles::{self, Endpoint, Profile, Transport},
+    protocol::{Effort, FromBridge, ModelSettings, SessionId, Speed, Usage, UsageWindow},
 };
 use reqwest::{Client, StatusCode, header::HeaderMap};
-use serde_json::Value;
-use std::{
-    fmt,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use serde_json::{Value, json};
+use std::{fmt, path::PathBuf, time::Duration};
 use tokio::sync::{Mutex, mpsc, watch};
 
 /// The most bytes a request or a response stream may hold.
@@ -29,17 +26,6 @@ const IDLE: Duration = Duration::from_secs(300);
 const BUSY: Duration = Duration::from_secs(60);
 /// A missing local ChatGPT sign-in, shared by readiness checks and a request's refusal.
 pub(crate) const SIGN_IN_MISSING: &str = "ChatGPT is not signed in; run razor login.";
-
-/// A missing public API key, shared by readiness checks and a request's refusal.
-pub(crate) fn key_missing(home: &Path) -> String {
-    let key = home.join("key");
-    format!(
-        "There is no OpenAI API key in '{}'; save a key: ( umask 077; mkdir -p '{}'; ${{EDITOR:-vi}} '{}' ). API billing instead of a ChatGPT plan uses responses.base_url = \"https://api.openai.com/v1\" (docs/models.md#with-an-openai-api-key); run razor restart after changing it.",
-        key.display(),
-        home.display().to_string().replace('\'', "'\\''"),
-        key.display().to_string().replace('\'', "'\\''")
-    )
-}
 
 /// The shared HTTP client; sign-in and refresh share one lock, read credentials per request.
 pub struct Responses {
@@ -62,7 +48,6 @@ struct Response {
 #[derive(Debug)]
 pub enum Error {
     Auth,
-    ApiKey,
     Stopped,
     Incomplete,
     Failed(String),
@@ -72,7 +57,7 @@ pub enum Error {
         status: u16,
         message: String,
     },
-    /// The chat host's key variable, unset or refused.
+    /// A provider's key variable, unset or refused.
     Key(String),
     /// The reply stopped at this finish reason; the same request would stop the same way.
     Cut(String),
@@ -88,15 +73,14 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Auth => f.write_str("ChatGPT sign-in failed; run razor login and enable device code authorization for Codex in ChatGPT Security Settings."),
-            Self::ApiKey => f.write_str("The OpenAI API key could not be used; check the key file in your Razor home (docs/models.md#with-an-openai-api-key), then try again."),
             Self::Stopped => f.write_str("The request was stopped."),
             Self::Incomplete => f.write_str("The model response did not complete; send another input to try again."),
             Self::Failed(message) => write!(f, "The model request failed: {message}."),
             Self::ContextOverflow(message) => write!(f, "The model context is too large; {message}; Razor will rebuild it from the record and retry once."),
             Self::Size => f.write_str("The model request or response exceeds 64 MiB; rebuild with a smaller context."),
             Self::Rejected { status, message } => write!(f, "The model endpoint returned HTTP {status}: {message}."),
-            Self::Key(name) if name.is_empty() => f.write_str("The model host requires a key; name its environment variable in the chat row's key setting."),
-            Self::Key(name) => write!(f, "The model host refused or never got a key; set {name} in the server's environment."),
+            Self::Key(name) if name.is_empty() => f.write_str("The model host requires a key; name its variable in the provider's key setting."),
+            Self::Key(name) => write!(f, "The model host refused {name} or never got it; save the key with razor setup or in keys.toml, then run razor restart."),
             Self::Cut(reason) => write!(f, "The model's reply stopped early ({reason}); send another input to go on."),
             Self::Refused(sentence) => f.write_str(sentence),
             Self::Other { source, context } => write!(f, "Failed {context}: {source}."),
@@ -184,32 +168,36 @@ impl Responses {
         }
     }
 
-    /// One tool-free Terra answer at low effort on this client's sign-in and supplied endpoint;
-    /// `post` owns retries and stream completion, bounded by the caller's deadline.
-    pub(crate) async fn recap(
+    /// One tool-free answer from `profile`'s model to `text` under its prompt, at low effort and
+    /// built as every turn's request is, its provider's request fields included: a recap, or
+    /// doctor's test request. `post` owns retries and stream completion, bounded by the caller's
+    /// deadline.
+    pub(crate) async fn answer(
         &self,
-        base: &str,
+        profile: &Profile,
         session: &SessionId,
-        prompt: &str,
-        evidence: &str,
+        text: &str,
     ) -> Result<String, Error> {
-        let body = serde_json::json!({
-            "model": crate::profiles::id("terra".into()), "reasoning": {"effort": "low"}, "store": false, "stream": true,
-            "input": [
-                {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": prompt}]},
-                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": evidence}]},
-            ],
-        });
-        let (url, body) = (base.into(), body.to_string().into_bytes());
-        let endpoint = Endpoint {
-            url,
-            ..Default::default()
+        let mut conversation = profiles::Conversation::new(profile, Vec::new());
+        let asked = json!([{"type": "input_text", "text": text}]);
+        conversation.send(json!({"type": "message", "role": "user", "content": asked}));
+        let low = ModelSettings {
+            effort: Effort::Low,
+            speed: Speed::Standard,
         };
-        let response = self.post(&endpoint, body, session, false, None, |_| {});
+        let body = conversation.body(profile, low, session, &self.home).await;
+        let response = self.post(&profile.endpoint, body, session, false, None, |_| {});
         let items = response.await?.items;
-        let texts = items.iter().filter(|i| i["type"] == "message");
-        let texts = texts.flat_map(|i| i["content"].as_array().into_iter().flatten());
-        Ok(texts.filter_map(|c| c["text"].as_str()).collect())
+        // A Responses message holds parts; a chat message, its text.
+        let said = items
+            .iter()
+            .filter(|i| i["type"] == "message" || i["type"].is_null());
+        Ok(said
+            .flat_map(|i| match &i["content"] {
+                Value::Array(parts) => parts.iter().filter_map(|c| c["text"].as_str()).collect(),
+                text => text.as_str().into_iter().collect::<Vec<_>>(),
+            })
+            .collect())
     }
 
     /// One request, retried here and nowhere else: four times for a failed send, a server error
@@ -217,9 +205,9 @@ impl Responses {
     /// host's `Retry-After`, else the backoff, while the request's waits stay within `BUSY`; the
     /// response's usage says what was waited, and a refusal that outlasts it says so. On the
     /// sign-in a 429 is a plan limit and fails at once. A 401 refreshes the sign-in once.
-    /// `turn_state` is the routing header to resend within the turn. With `key`, a chat request:
-    /// that variable's value is the bearer, read for each attempt, and a 401 or 403 is `Key`. No
-    /// error or reply it returns holds the bearer.
+    /// `turn_state` is the routing header to resend within the turn. With a provider's `key`, that
+    /// variable's value is the bearer, read for each attempt, and a 401 or 403 is `Key`. No error
+    /// or reply it returns holds the bearer.
     async fn post(
         &self,
         endpoint: &Endpoint,
@@ -231,19 +219,17 @@ impl Responses {
     ) -> Result<Response, Error> {
         let body = axum::body::Bytes::from(body);
         let (base, key) = (endpoint.url.as_str(), endpoint.key.as_deref());
-        let public = endpoint.public();
-        let path = key.map_or("responses", |_| "chat/completions");
+        let chat = endpoint.transport == Transport::Chat;
+        let path = if chat {
+            "chat/completions"
+        } else {
+            "responses"
+        };
         let url = format!("{}/{path}", base.trim_end_matches('/'));
-        let mut tokens =
-            match key {
-                Some(_) => None,
-                None => Some(self.credentials(public, None).await.map_err(
-                    |error| match error {
-                        Error::Auth if public => Error::ApiKey,
-                        error => error,
-                    },
-                )?),
-            };
+        let mut tokens = match key {
+            Some(_) => None,
+            None => Some(self.credentials(None).await?),
+        };
         let (mut refreshed, mut sends, mut streams, mut waited) = (false, 0, 0, Duration::ZERO);
         loop {
             let bearer = match (key, &tokens) {
@@ -300,8 +286,8 @@ impl Responses {
                 Ok(r) if key.is_some() && matches!(r.status().as_u16(), 401 | 403) => {
                     return Err(Error::Key(key.unwrap_or_default().into()));
                 }
-                Ok(r) if r.status() == StatusCode::UNAUTHORIZED && !public && !refreshed => {
-                    tokens = Some(self.credentials(false, Some(&bearer)).await?);
+                Ok(r) if r.status() == StatusCode::UNAUTHORIZED && !refreshed => {
+                    tokens = Some(self.credentials(Some(&bearer)).await?);
                     refreshed = true;
                     continue;
                 }
@@ -318,9 +304,6 @@ impl Responses {
             let status = response.status();
             if !status.is_success() {
                 let mut error = rejected(status, response).await.without(&bearer);
-                if public && matches!(error, Error::Auth) {
-                    error = Error::ApiKey;
-                }
                 if let Error::Rejected { message, .. } = &mut error
                     && !waited.is_zero()
                 {
@@ -336,9 +319,9 @@ impl Responses {
                 .or(turn_state);
             let windows = windows(headers);
             let tier = header(headers, "x-gemini-service-tier").map(str::to_owned);
-            let read = match key {
-                Some(_) => chat::read(response, &say).await,
-                None => stream::read(response, &say).await,
+            let read = match chat {
+                true => chat::read(response, &say).await,
+                false => stream::read(response, &say).await,
             };
             match read {
                 Ok(mut done) => {

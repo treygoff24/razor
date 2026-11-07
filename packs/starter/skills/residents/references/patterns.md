@@ -1,6 +1,6 @@
 # Worked resident patterns
 
-Choose one pattern, then replace its role, sources and times with the agreed job. Each TOML block is a complete resident entry for the person's settings; the folder and its files must exist first. The Markdown and JSON filenames are conventions you create, not additional Razor settings. All times use the server's local time. For settings mechanics, use `razor-settings`; for every resident field, read the installed `always-on-agents.md`.
+Choose one pattern, then replace its role, sources and times with the agreed job. Each TOML block is a complete resident entry for the person's settings; the folder and its files must exist first. The Markdown and JSON filenames are conventions you create, not additional Razor settings. All times use the server's local time. For settings mechanics, use `razor`; for every resident field, read the installed `always-on-agents.md`.
 
 ## Life chief of staff
 
@@ -63,7 +63,7 @@ Use a schedule when a missed check should catch up once after downtime; choose a
 
 ## Nightly upkeep
 
-Use this for sorting new material, producing digests and tidying generated work. Separate originals, generated files and proposed changes in the folder instructions. Start with a preview: list intended moves or removals and produce the digest. Add permission for a narrow recurring operation only after its results match the person's intent. Existing delete guards may refuse a deletion; use `razor-settings` and `security.md` to understand them rather than weakening safety to make a routine pass.
+Use this for sorting new material, producing digests and tidying generated work. Separate originals, generated files and proposed changes in the folder instructions. Start with a preview: list intended moves or removals and produce the digest. Add permission for a narrow recurring operation only after its results match the person's intent. Existing delete guards may refuse a deletion; use `razor` and `security.md` to understand them rather than weakening safety to make a routine pass.
 
 ```toml
 [residents.curator]

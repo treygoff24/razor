@@ -36,7 +36,7 @@ rm ~/.local/bin/razor
 rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/razor"
 ```
 
-That folder holds every installed version, its agent-browser, agent-desktop, ripgrep and jq, the private Node the installer downloaded if yours was missing, and on macOS Razor.app. On macOS, also take back any permissions you gave Razor with `tccutil reset All com.treygoff.razor.server`.
+That folder holds every installed version, its agent-browser, Cua Driver, ripgrep and jq, the private Node the installer downloaded if yours was missing, and on macOS Razor.app. On macOS, also take back any permissions you gave Razor with `tccutil reset All com.treygoff.razor.server`.
 
 ## 3. Remove your data
 
@@ -62,4 +62,4 @@ These belong to other programs that Razor ran for you; remove them only if nothi
 | --- | --- | --- |
 | Claude Code | Your Claude sign-in, shared with Claude Code itself if you use it | `~/.claude` and `~/.claude.json`, and the login keychain on macOS |
 | agent-browser | Its settings and saved browser state, and the Chrome that `razor setup` downloaded | `~/.agent-browser`; `agent-browser doctor` shows where Chrome is |
-| agent-desktop | The accessibility snapshots agents took, which can hold what was on screen | `~/.agent-desktop` |
+| Cua Driver | Settings an agent changed through it, if any | `~/.cua-driver` |

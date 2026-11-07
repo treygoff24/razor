@@ -18,7 +18,6 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
@@ -38,9 +37,8 @@ const LINE: usize = 4 << 10;
 /// A pause that ends a speaker's line; quiet before the latest step is said, and after it before
 /// the one reminder that the agent is still on it; quiet that ends a call with no turn running.
 const PAUSE: Duration = Duration::from_secs(2);
-const STEP: Duration = Duration::from_secs(7);
-const AGAIN: Duration = Duration::from_secs(20);
-const IDLE: Duration = Duration::from_secs(180);
+const STEP: Duration = Duration::from_secs(60);
+const IDLE: Duration = Duration::from_secs(900);
 /// The voice's time to say the cap's sentence, and either socket's time to take a message.
 const GRACE: Duration = Duration::from_secs(5);
 /// GPT-Live's time to start a call, or to close one with its final usage.
@@ -99,16 +97,18 @@ async fn start(
 ) -> Result<(Call, Value), (CallReason, String)> {
     let failed = |e: controller::Error| (CallReason::Error, e.to_string());
     let s = app.controller.summary(id).await.map_err(failed)?;
-    let config = app.controller.config().await.live;
+    let config = app.controller.config().await;
+    if config.provider_only {
+        let sentence = "provider_only is on, so Razor makes no live calls; continue by message.";
+        return Err((CallReason::Error, sentence.into()));
+    }
+    let config = config.live;
     let url = config.url.as_deref().unwrap_or(URL);
     let mut request = url
         .into_client_request()
         .map_err(|_| refused(CallReason::Error))?;
-    let mut key = String::new();
-    if let Ok(file) = tokio::fs::File::open(app.home.join("key")).await {
-        let _ = file.take(4 << 10).read_to_string(&mut key).await;
-    }
-    let key = Some(key.trim()).filter(|key| !key.is_empty());
+    let key = std::env::var("OPENAI_API_KEY").ok();
+    let key = key.as_deref().map(str::trim).filter(|key| !key.is_empty());
     match key.and_then(|key| format!("Bearer {key}").parse().ok()) {
         Some(bearer) => drop(request.headers_mut().insert(AUTHORIZATION, bearer)),
         None if config.url.is_none() => return Err(refused(CallReason::Key)),
@@ -121,7 +121,11 @@ async fn start(
     if settings.call_used_today >= settings.call_daily_dollars {
         return Err(refused(CallReason::Cap));
     }
-    let lines = app.controller.attach(id, s.last, 0).await.map_err(failed)?;
+    let lines = app
+        .controller
+        .attach(id, s.last, Some(0))
+        .await
+        .map_err(failed)?;
     let input = seed(app, id, &s).await.map_err(failed)?;
     let prompt =
         (WORDS.prompt.replace("{agent}", &s.name)).replace("{names}", &config.names.join(", "));
@@ -280,7 +284,7 @@ struct Call {
     /// When someone last spoke, the voice was given words, or a turn ended.
     quiet: Instant,
     /// While the agent works, its latest described step: said after STEP of quiet, once a call,
-    /// and after AGAIN more, or AGAIN when it was said before, the voice says it is still on it.
+    /// after STEP more, the voice says once that it is still on it.
     step: Option<String>,
     /// The steps the voice has said are still running.
     said: HashSet<String>,
@@ -581,7 +585,7 @@ impl Call {
     }
 
     /// The next moment a clock runs out: a pause ending a line, the latest step's turn to be said,
-    /// three quiet minutes with no turn running, or the ending's next step.
+    /// fifteen quiet minutes with no turn running, or the ending's next step.
     fn deadline(&self) -> Instant {
         let clocks = [
             self.utterance.as_ref().map(|line| line.0 + PAUSE),
@@ -633,12 +637,10 @@ impl Call {
         }
     }
 
-    /// When the latest step is next said, never while the voice is held: STEP after the quiet
-    /// began, or AGAIN once it was said.
+    /// When the latest step is next said, never while the voice is held: STEP after quiet began.
     fn due(&self) -> Option<Instant> {
-        let step = self.step.as_deref().filter(|_| self.held.is_none())?;
-        let again = self.said.contains(step);
-        Some(self.quiet + if again { AGAIN } else { STEP })
+        self.step.as_ref().filter(|_| self.held.is_none())?;
+        Some(self.quiet + STEP)
     }
 
     fn talking(&self) -> bool {
@@ -718,9 +720,9 @@ fn refused(reason: CallReason) -> (CallReason, String) {
 fn sentence(reason: CallReason) -> &'static str {
     match reason {
         CallReason::Ended | CallReason::Canceled => "The call ended.",
-        CallReason::Idle => "The call ended after three quiet minutes.",
+        CallReason::Idle => "The call ended after fifteen quiet minutes.",
         CallReason::Cap => "The daily call limit is reached; continue by message.",
-        CallReason::Key => "Calls need a valid OpenAI API key in this server's key file.",
+        CallReason::Key => "Calls need a valid OPENAI_API_KEY; save it in this server's keys.toml.",
         CallReason::Lost => "The connection to the voice was lost; the agent's work goes on.",
         CallReason::Error => "The call could not go on; see the server log, then call again.",
     }

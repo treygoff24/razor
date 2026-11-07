@@ -17,8 +17,10 @@ use toml::{Table, Value};
 const STARTER: &str = "packs/starter/config.toml";
 
 /// Keys only the person's file and the pack may set.
-const MACHINE: [&str; 25] = [
+const MACHINE: [&str; 27] = [
     "models",
+    "providers",
+    "provider_only",
     "remote",
     "call_model",
     "call_effort",
@@ -284,7 +286,7 @@ impl Settings {
                 sources.extend(names);
             }
         }
-        self.invalid = match Config::parse(values.clone()) {
+        self.invalid = match Config::parse(values.clone()).and_then(Config::check) {
             Ok(mut config) => {
                 config.pack = self
                     .pack

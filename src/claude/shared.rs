@@ -70,8 +70,10 @@ impl SharedBridge {
             let at = kept.iter().position(|(id, ..)| *id == session);
             at.and_then(|at| kept.remove(at))
         };
+        let endpoint = profile.borrow().endpoint.clone();
         let signed = match kept.filter(|(.., closed)| resumed && closed.elapsed() < KEEP) {
             Some((_, signed, _)) => signed,
+            None if endpoint.key.is_some() => (super::provider(&endpoint, &self.1)?, Value::Null),
             // Outside the lock: an account pick may take a second, and every line waits on it.
             None => env(&claude.sign_in, &self.1, session.as_str()).await?,
         };

@@ -37,13 +37,10 @@ pub(super) fn routes() -> Router<App> {
         .route("/v1/sessions/{id}/seen", put(seen))
 }
 
-/// Readiness reflects the configured Responses endpoint, applied at the next server start.
+/// Every model the settings name, each with what its route allows.
 async fn models(State(app): State<App>, Query(q): Query<Page>) -> Reply<crate::protocol::Models> {
     let config = app.controller.config().await;
-    let mut models = profiles::models();
-    models.extend(config.models.keys().cloned());
-    models.sort();
-    models.dedup();
+    let models = profiles::models(&config);
     let (mut windows, mut efforts) = (BTreeMap::new(), BTreeMap::new());
     let mut unavailable = BTreeMap::new();
     let mut speeds = BTreeMap::new();
@@ -56,7 +53,11 @@ async fn models(State(app): State<App>, Query(q): Query<Page>) -> Reply<crate::p
     for name in &models {
         let (window, _) = profiles::limits(name, &config, None);
         windows.extend(window.map(|window| (name.clone(), window)));
-        efforts.insert(name.clone(), profiles::model(name).efforts().to_vec());
+        let route = profiles::model(name, &config);
+        efforts.insert(
+            name.clone(),
+            route.map_or(Vec::new(), |m| m.efforts().to_vec()),
+        );
         let speed = |s| profiles::speed_choice(name, s, &config);
         speeds.insert(name.clone(), Speed::ALL.into_iter().map(speed).collect());
         if q.ready
@@ -170,7 +171,7 @@ async fn input(
     if c.from.is_none() && landed(&app, &id, &c.text).await? {
         return Ok(Json(json!({ "signed_in": true })));
     }
-    let n = c.images.len() + c.files.len();
+    let n = (c.images.len() + c.files.len()).max(c.image_origins.len());
     if n > IMAGES_PER_INPUT {
         return Err(bad(format!(
             "An input holds at most {IMAGES_PER_INPUT} pictures and files, not {n}."
@@ -202,6 +203,7 @@ async fn input(
         from,
         device,
         text,
+        image_origins: c.image_origins,
         model: c.model.map(profiles::id),
         effort: c.effort,
         speed: c.speed,
@@ -295,8 +297,7 @@ async fn answer(
     Ok(Json(json!({ "entry": entry })))
 }
 
-/// The stream holds its device's mark on the session while it is open, which the push sender
-/// reads.
+/// A reading stream holds its device's mark on the session while it is open, for pushes.
 async fn events(
     State(app): State<App>,
     Extension(gone): Extension<Gone>,
@@ -305,8 +306,11 @@ async fn events(
     Query(q): Query<Page>,
 ) -> Result<Response, Refusal> {
     let after = EntryId(q.after.unwrap_or(0));
-    let lines = app.controller.attach(&id, after, q.terminal.into()).await?;
-    let open = app.devices.stream(device, &id);
+    let lines = app
+        .controller
+        .attach(&id, after, (!q.follow).then_some(q.terminal.into()))
+        .await?;
+    let open = (!q.follow).then(|| app.devices.stream(device, &id));
     let lines = received(lines).map(move |line| {
         let _held = &open;
         sent(line, q.native)

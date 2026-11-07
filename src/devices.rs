@@ -9,7 +9,7 @@ use std::{
     fmt,
     io::ErrorKind,
     path::{Path as FilePath, PathBuf},
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, Weak, atomic::AtomicBool, atomic::Ordering::Relaxed},
     time::Duration,
 };
 use tokio::{
@@ -22,6 +22,8 @@ pub const KEY: &str = "device.key";
 pub(crate) const HOP: &str = "x-razor-forwarded";
 pub(crate) type Gone = watch::Receiver<()>;
 const MOST: usize = 64;
+/// Why pairing is refused while `provider_only` is on.
+pub(crate) const QUIET: &str = "provider_only is on, so Razor neither finds nor reaches other Razor servers; set provider_only = false in your settings to pair.";
 
 /// The keys this server accepts. Each device's open streams hold a receiver of that device's
 /// channel; removing the device drops the sender, which ends exactly those streams.
@@ -31,6 +33,9 @@ pub(crate) struct Devices {
     child: reqwest::Client,
     mail: reqwest::Client,
     local: String,
+    /// `provider_only` as the controller last read it: while set no pairing is direct, so nothing
+    /// reaches a paired server.
+    pub(crate) quiet: AtomicBool,
     /// Never dropped: the local key's streams end only with the server.
     forever: watch::Sender<()>,
     enrolled: RwLock<Vec<(Device, watch::Sender<()>)>>,
@@ -80,6 +85,7 @@ impl Devices {
             // Mail also connects afresh, with its five-second connection deadline.
             mail: client(5, 0)?,
             local,
+            quiet: AtomicBool::new(false),
             forever: watch::channel(()).0,
             enrolled: RwLock::new(enrolled),
             streams: Mutex::default(),
@@ -92,7 +98,7 @@ impl Devices {
         let enrolled = self.enrolled.read().await;
         enrolled
             .iter()
-            .filter(|(d, _)| d.address.is_some() && d.key.is_some())
+            .filter(|(d, _)| d.address.is_some() && d.key.is_some() && !self.quiet.load(Relaxed))
             .map(|(d, gone)| (d.clone(), gone.subscribe()))
             .collect()
     }
@@ -344,14 +350,14 @@ impl Devices {
     ) -> Result<Value, Error> {
         let device = self.peer(server).await.ok_or_else(|| {
             Error::Refused(format!(
-                "{server} is not paired; pair it before starting a child."
+                "{server} is not paired; pair it before starting a session."
             ))
         })?;
         let response = request(&self.child, &device, Method::POST, "/v1/children").timeout(Duration::from_secs(30))
         .json(operation).send().await.map_err(|e| Error::Refused(if e.is_connect() {
-            format!("Could not connect to {server}; the child operation was not sent.")
+            format!("Could not connect to {server}; the operation was not sent.")
         } else {
-            format!("{server} did not acknowledge the child operation; it may have run. Inspect its session before trying again.")
+            format!("{server} did not acknowledge the operation; it may have run. Check that server's agents list before trying again.")
         }))?;
         let status = response.status();
         let bytes = axum::body::to_bytes(
@@ -410,6 +416,7 @@ impl Devices {
         enrolled
             .iter()
             .find(|(d, _)| d.name == server && d.address.is_some() && d.key.is_some())
+            .filter(|_| !self.quiet.load(Relaxed))
             .map(|(d, _)| d.clone())
     }
 

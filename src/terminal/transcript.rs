@@ -14,9 +14,26 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Color, text::Line};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-/// Entries kept across every transcript, and the window mounted first and widened by paging.
+/// Entries kept across every transcript, and the items mounted first and widened by paging.
 pub(super) const ITEMS: usize = 2000;
 pub(super) const MOUNT: usize = 240;
+
+/// Whether an entry is an item the reader sees: an input, a reply, a call, a rebuild or a failed
+/// turn end. The window counts items; entries between them, a meeting's lines, ride along.
+fn item(e: &Entry) -> bool {
+    match &e.body {
+        Body::Input(_) | Body::Text { .. } | Body::Call { .. } | Body::Rebuild { .. } => true,
+        Body::TurnEnd { end, .. } => matches!(end, End::Error(_)),
+        _ => false,
+    }
+}
+
+// How many of `entries`, newest first, hold their newest `n` items: up to the next item.
+fn holding<'a>(entries: impl ExactSizeIterator<Item = &'a Entry>, n: usize) -> usize {
+    let len = entries.len();
+    let mut items = entries.enumerate().filter(|(_, e)| item(e));
+    items.nth(n).map_or(len, |(i, _)| i)
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Action {
@@ -365,8 +382,9 @@ impl Transcript {
         let same = self.pin.take().is_some_and(|(pinned, _)| pinned == id);
         self.pin = (!same).then_some((id, text));
     }
+    /// How many of the newest entries are mounted: those holding the newest `mounted` items.
     pub(super) fn mounted(&self) -> usize {
-        self.mounted.max(MOUNT)
+        holding(self.entries.values().rev(), self.mounted.max(MOUNT))
     }
     pub(super) fn page_up(&mut self, rows: usize) {
         if self.opened.is_some() {
@@ -379,7 +397,7 @@ impl Transcript {
         let top = self.top().unwrap_or(bottom).min(bottom);
         self.held = self.entry_at(top.saturating_sub(rows.min(isize::MAX as usize) as isize));
         if self.mounted() < self.entries.len() {
-            self.mounted = (self.mounted() + 80).min(self.entries.len()).min(ITEMS);
+            self.mounted = (self.mounted.max(MOUNT) + 80).min(ITEMS);
             self.children_at = None;
             self.dirty = true;
         }

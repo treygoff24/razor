@@ -113,6 +113,12 @@ pub(crate) struct Ask {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub(crate) enum ChildRequest {
+    StartRoot {
+        cwd: PathBuf,
+        model: Option<String>,
+        effort: Option<crate::protocol::Effort>,
+        mail: Mail,
+    },
     Start {
         session: SessionId,
         child: Child,

@@ -7,7 +7,8 @@ import time
 import zlib
 
 from driver import flow
-from responses import PLAIN, message, response
+from mcp import PNG
+from responses import PLAIN, call, message, response
 import server
 from terminal import Terminal
 
@@ -38,6 +39,8 @@ with flow([response([message("FIT_READY_82")]), response([message("PHOTO_READY_8
         print(f"large attachment ready in {time.monotonic() - started:.3f}s", flush=True)
         t.send("\r")
         t.shown("FIT_READY_82", timeout=90)
+        person = next(e for e in f.record(session) if e["kind"] == "input" and e["from"] == "person")
+        assert person["text"] == "[Image #1] inspect" and str(image) not in t.text(), (person, t.text())
         width, height = 4000, 3000
         photo_noise = hashlib.shake_256(b"twelve-megapixels").digest(width * height * 3).translate(
             bytes(n & 31 for n in range(256)))
@@ -115,3 +118,18 @@ with flow([response([message("FIT_READY_82")]), response([message("PHOTO_READY_8
     image_urls = [part["image_url"] for part in parts if part.get("type") == "input_image"]
     assert base64.b64decode(image_urls[-1].split(",", 1)[1]) == fallback, "original fallback was not sent"
     assert not any(str(fallback_path) in part.get("text", "") for part in parts), "whole original got an origin label"
+
+# An origin belongs to the model's input, including a fresh context; the person's words stay clean.
+with flow([response([call("handover", json.dumps({"note": "Continue inspecting the image."}), "image_note")]),
+           response([message("REBUILT_82")])], model="sol", config=PLAIN) as f:
+    server.start(f)
+    session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    origin = {"number": 1, "path": "/sending-device/original82.png", "device": "phone82", "copy": "scaled"}
+    server.post(f, f"/sessions/{session}/input", {"text": "Inspect this picture.", "images": [PNG], "image_origins": [origin]})
+    entries = server.until(f, session, lambda es: es[-1]["kind"] == "turn_end")
+    person = next(e for e in entries if e["kind"] == "input" and e["from"] == "person")
+    assert person["text"] == "Inspect this picture." and person["image_origins"] == [origin], person
+    assert any(e["kind"] == "rebuild" for e in entries), entries
+    for index in (1, 2):
+        sent = json.loads((f.requests / f"{index:03}.body").read_bytes())
+        assert origin["path"] in json.dumps(sent["input"]), f"image origin missing in request {index}"

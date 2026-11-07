@@ -12,7 +12,8 @@ mod updates;
 pub use deliveries::Deliveries;
 pub(crate) use install::permissions;
 pub use install::{
-    TEARDOWN_TIMEOUT, check_service, install, installed, server_lock, server_running, start, stop,
+    DESKTOP_SOCKET, TEARDOWN_TIMEOUT, check_service, desktop, install, installed, server_lock,
+    server_running, start, stop,
 };
 pub(crate) use list::{Listed, homes};
 pub(crate) use updates::release_ready;
@@ -262,6 +263,7 @@ impl Residents {
         loop {
             let config = self.config().await;
             if config.skill_updates
+                && !config.provider_only
                 && attempted.is_none_or(|at| at.elapsed() >= Duration::from_secs(86_400))
             {
                 attempted = Some(tokio::time::Instant::now());
@@ -277,6 +279,7 @@ impl Residents {
                 ));
             }
             if config.release_updates
+                && !config.provider_only
                 && release_attempted.is_none_or(|at| at.elapsed() >= Duration::from_secs(86_400))
                 && updates::installation().await.is_some()
             {

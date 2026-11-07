@@ -134,8 +134,9 @@ pub(crate) struct Summary {
     pub(crate) headline: String,
     pub(crate) headline_at: Option<Millis>,
     pub(crate) changed_files: Vec<PathBuf>,
-    /// Tool calls over the whole record, including unresolved calls.
+    /// Tool calls over the whole record, including unresolved calls, and in its last hour.
     pub(crate) calls_made: u32,
+    pub(crate) hour: Option<crate::protocol::Hour>,
     /// Finished reports since upkeep: 2 is due, 3 has already been reminded.
     pub(crate) upkeep: u8,
     upkeep_writes: Vec<CallId>,
@@ -232,6 +233,7 @@ impl Summary {
             headline_at: None,
             changed_files: Vec::new(),
             calls_made: 0,
+            hour: None,
             upkeep: 0,
             upkeep_writes: Vec::new(),
             failed: 0,
@@ -428,6 +430,9 @@ impl Summary {
             }
             Body::Call { call, name, input } => {
                 self.calls_made += 1;
+                let mut hour = self.hour.unwrap_or_default().at(entry.at);
+                hour.calls[11] = hour.calls[11].saturating_add(1);
+                self.hour = Some(hour);
                 let doing = (name.clone(), target(input), entry.at);
                 self.unresolved.push((call.clone(), entry.id, doing));
                 if matches!(action(name), "task" | "memory") && input["action"] == "write" {

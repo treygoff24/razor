@@ -42,7 +42,6 @@ struct Inner {
     mcp_auth: Auth,
     mcp_revision: AtomicU64,
     address: Option<String>,
-    endpoint: String,
     responses: Arc<Responses>,
     bridge: crate::claude::SharedBridge,
     children: children::Children,
@@ -101,7 +100,6 @@ impl Controller {
         let controller = Controller {
             inner: Arc::new(Inner {
                 address: config.server.address.clone(),
-                endpoint: config.responses.base_url.clone(),
                 children: children::Children::open(home.clone()),
                 devices: Arc::new(
                     crate::devices::Devices::open(&home)
@@ -126,6 +124,8 @@ impl Controller {
                 space: Notify::new(),
             }),
         };
+        let quiet = &controller.inner.devices.quiet;
+        quiet.store(config.provider_only, std::sync::atomic::Ordering::Relaxed);
         controller.inner.children.post.start(&controller);
         for session in record::live(&controller.inner.home).await? {
             let _ = controller.tell(&session, |s| Box::pin(s.restart())).await;
@@ -270,12 +270,14 @@ impl Controller {
         &self,
         session: &SessionId,
         after: EntryId,
-        terminal: i32,
+        terminal: Option<i32>,
     ) -> Result<mpsc::Receiver<Arc<str>>, Error> {
         let mut next = Ok(self.attachment(session, after).await?);
         let (tx, rx) = mpsc::channel(64);
         let (controller, session) = (self.clone(), session.clone());
-        lock(&self.inner.status).open(&session, terminal, None);
+        if let Some(terminal) = terminal {
+            lock(&self.inner.status).open(&session, terminal, None);
+        }
         tokio::spawn(async move {
             'attach: while let Ok((attached @ Live::Attached { last, .. }, mut replay, mut lines)) =
                 next
@@ -300,7 +302,9 @@ impl Controller {
                 }
                 next = controller.attachment(&session, cursor).await;
             }
-            lock(&controller.inner.status).open(&session, -terminal, None);
+            if let Some(terminal) = terminal {
+                lock(&controller.inner.status).open(&session, -terminal, None);
+            }
         });
         Ok(rx)
     }
@@ -345,12 +349,11 @@ impl Controller {
         self.inner
             .summaries
             .configure(config.residents.keys().cloned());
+        let quiet = &self.inner.devices.quiet;
+        quiet.store(config.provider_only, std::sync::atomic::Ordering::Relaxed);
         let mut changed = Vec::new();
         if config.server.address != self.inner.address {
             changed.push("server.address");
-        }
-        if config.responses.base_url != self.inner.endpoint {
-            changed.push("responses.base_url");
         }
         let notice = if !settings.errors.is_empty() {
             Some(settings.errors.join(" "))
@@ -594,6 +597,7 @@ impl Status {
             changed_files: s.changed_files.clone(),
             calls: s.unresolved.iter().map(|(_, at, _)| *at).collect(),
             doing: s.unresolved.last().map(|(.., doing)| doing.clone()),
+            hour: s.hour,
             calls_made: s.calls_made,
             failed: s.failed,
             asks: s.questions.clone(),

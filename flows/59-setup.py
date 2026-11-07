@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import time
 import tomllib
-from driver import BINARY, Reply, flow
+from driver import AUTH, BINARY, Reply, flow
 from model import reply
 from standin import serve
 
@@ -64,7 +64,7 @@ with flow([reply(None, "mcp__razor__search", {"query": "setup saved key"}), repl
     tailscale = f.home / "tailscale"
     tailscale.write_text("#!/bin/sh\necho '{\"BackendState\":\"Running\",\"Self\":{\"TailscaleIPs\":[\"127.0.0.1\"]},\"Peer\":{}}'\n")
     tailscale.chmod(0o755)
-    terminal(f, ["setup"], [("Use Claude, ChatGPT or both", "chatgpt"), *ending])
+    terminal(f, ["setup"], [("Use Claude, ChatGPT, both, or an API key", "chatgpt"), ("other machines", "y"), *ending])
     settings = tomllib.loads(person.read_text())
     server = settings.pop("server")
     assert not saved.exists() and not you.exists() and settings == before, "setup changed unrelated settings"
@@ -82,7 +82,7 @@ with flow([reply(None, "mcp__razor__search", {"query": "setup saved key"}), repl
     kept = saved.read_bytes()
     terminal(f, ["keys"], [(p, "") for p, _ in keys])
     assert saved.read_bytes() == kept and saved.stat().st_mode & 0o777 == 0o600, "Enter did not keep the saved key"
-    terminal(f, ["setup"], [("Use Claude, ChatGPT or both", ""), *ending])
+    terminal(f, ["setup"], [("Use Claude, ChatGPT, both, or an API key", ""), ("other machines", ""), *ending])
     assert [p.read_bytes() for p in (saved, person)] == [kept, before], "rerunning setup overwrote saved files"
     # A newly spawned serve must read keys.toml itself. No key is in the client's environment.
     with serve([Reply(b'{"results":[{"title":"Found","url":"https://example.invalid","text":"saved key works"}]}')],
@@ -104,9 +104,42 @@ with flow([reply(None, "mcp__razor__search", {"query": "setup saved key"}), repl
     shutil.copy2(BINARY, bundle / "razor")
     calls = f.home / "claude-calls"
     for option in ([], ["--console"]):
-        terminal(f, ["setup", *option], [("Use Claude, ChatGPT or both", ""), *ending], bundle / "razor")
+        terminal(f, ["setup", *option], [("Use Claude, ChatGPT, both, or an API key", ""), ("other machines", ""), *ending], bundle / "razor")
         logins = [l for l in (calls.read_text() if calls.exists() else "").splitlines() if l.startswith("auth login")]
         assert logins == (["auth login --console"] if option else []), (option, logins)
     saved.write_text('EXA_API_KEY = "flow-nul-prefix\\u0000flow-nul-suffix"\n')
     refused = f.run("doctor")
     assert refused.returncode != 0 and "flow-nul-" not in refused.stdout + refused.stderr, "NUL key was accepted or printed"
+
+# A gateway-only home can finish setup and doctor without Claude or ChatGPT credentials.
+chat = b'data: {"choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+with flow([Reply(chat), Reply(b'{"error":{"message":"bad key"}}', status=401)]) as f:
+    (f.home / ".razor/auth.json").unlink()
+    f.env.pop("ANTHROPIC_API_KEY")
+    browser = f.home / "agent-browser"
+    browser.write_text('#!/bin/sh\n[ "$1" != install ] || touch "$HOME/browser-installed"\n')
+    browser.chmod(0o755)
+    f.env["PATH"] = f"{f.home}:{f.env['PATH']}"
+    config = f.home / ".razor/config.toml"
+    url = tomllib.loads(config.read_text())["responses"]["base_url"]
+    secret = "flow-gateway-hidden"
+    screen = terminal(f, ["setup"], [("Use Claude, ChatGPT, both, or an API key", "key"),
+        ("Whose key", "other"), ("Its API", "chat"), ("Its address", url), ("The model id", "gateway59"),
+        ("Its context window", ""), ("LOCAL_API_KEY", secret), ("Contact nothing but", "y"), *ending])
+    settings = tomllib.loads(config.read_text())
+    assert settings["provider_only"] and settings["model"] == "local/gateway59", settings
+    keys = f.home / ".razor/keys.toml"
+    assert tomllib.loads(keys.read_text())["LOCAL_API_KEY"] == secret and keys.stat().st_mode & 0o777 == 0o600
+    assert secret.encode() not in screen and b"Connect to your Razor servers" not in screen, screen
+    assert not (f.home / "browser-installed").exists(), "provider_only installed a browser"
+    sent = json.loads((f.requests / "001.body").read_bytes())
+    meta = json.loads((f.requests / "001.json").read_text())
+    assert sent["model"] == "gateway59" and meta["headers"]["authorization"] == "Bearer " + secret, (sent, meta)
+    result = f.run("doctor")
+    assert result.returncode == 1 and secret not in result.stdout + result.stderr, result
+    (f.home / ".razor/auth.json").write_text(json.dumps(AUTH))
+    f.env["ANTHROPIC_API_KEY"] = "flow-native-key"
+    for model in ("sol", "opus"):
+        refused = f.run("--model", model, "--print", "Use this sign-in.")
+        assert refused.returncode != 0 and "provider_only" in refused.stderr, refused
+    assert len(list(f.requests.glob("[0-9]*.body"))) == 2, "a refused native route contacted its host"

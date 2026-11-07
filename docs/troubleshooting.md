@@ -14,6 +14,7 @@ FIRECRAWL_API_KEY: missing. For optional web search, run razor keys.
 PARALLEL_API_KEY: missing. For optional web search, run razor keys.
 ELEVENLABS_API_KEY: missing. For optional voice, run razor keys.
 Browser: found (agent-browser executable; Chrome launch untested).
+Desktop: found (cua-driver daemon answering; operation untested).
 Server: running.
 Service: installed.
 Razor can run on Claude.
@@ -25,7 +26,7 @@ Two places hold more detail. The server writes its errors to `~/.razor/server.lo
 
 ## Restarting the server
 
-Some changes apply only when the server starts: new keys in `keys.toml`, `server.address` and `responses.base_url`. Restart this home's server with:
+Some changes apply only when the server starts: new keys in `keys.toml`, and `server.address`. Restart this home's server with:
 
 ```sh
 razor restart
@@ -57,13 +58,13 @@ export PATH="$HOME/.local/bin:$PATH"
 
 **`The Claude bridge at … has no node_modules; run npm ci there.`** A build from source is missing the packages of its bridge, the small Node program Claude sessions run through. Run `npm ci` in the `bridge` folder of your checkout, or install with `scripts/install.sh --link`.
 
-**`Run razor setup in a terminal.`** Setup, and `razor keys`, ask their questions in a terminal. For a script, sign in with `razor login` for ChatGPT, and if you use only ChatGPT put `model = "sol"` in `~/.razor/config.toml`; for Claude, sign in with Claude Code itself if you have it, or export `ANTHROPIC_API_KEY` where the server starts. `razor install` sets up the background service without asking, and `~/.local/share/razor/current/agent-browser install` downloads the Chrome the browser drives. Then run `razor doctor`. Optional keys can go straight into `~/.razor/keys.toml` ([its format](configuration.md#keys)).
+**`Run razor setup in a terminal.`** Setup, and `razor keys`, ask their questions in a terminal. For a script, sign in with `razor login` for ChatGPT, and if you use only ChatGPT put `model = "sol"` in `~/.razor/config.toml`; for Claude, sign in with Claude Code itself if you have it, or put `ANTHROPIC_API_KEY` in `~/.razor/keys.toml`; for any other provider's key, put its variable there and name its model in `model` ([Providers](models.md#providers)). `razor install` sets up the background service without asking, and `~/.local/share/razor/current/agent-browser install` downloads the Chrome the browser drives. Then run `razor doctor`. Optional keys can go straight into `~/.razor/keys.toml` ([its format](configuration.md#keys)).
 
 **`Release checksum mismatch; download again from the release URL.`** or **`Node checksum mismatch; download again from nodejs.org.`** A download was cut short or changed on the way, and the installer stopped before installing anything. Run the one-line installer again; each run downloads afresh. An error starting `curl:` instead, such as `curl: (22) The requested URL returned error: 404`, means the download itself failed: check your connection and the address in the command.
 
 ## Signing in
 
-**`Razor can run on neither Claude nor GPT yet`** Do what the `Claude:` or GPT credential line above it says, such as `razor setup` for Claude (`razor setup --console` for an Anthropic Console account), `razor login` for ChatGPT, or installing Node, then run `razor doctor` again. Doctor shows `ChatGPT sign-in:` for the default `responses.base_url`, or `OpenAI API key:` for the public API endpoint.
+**`Razor cannot run on its default model, …, yet`** Do what the `Model:` line above it says: on Claude's or ChatGPT's sign-in, what its `Claude:` or `ChatGPT sign-in:` line says, such as `razor setup` for Claude (`razor setup --console` for an Anthropic Console account), `razor login` for ChatGPT, or installing Node; on a provider, save its key, or fix the address, format or model id it names under `[providers]`. Then run `razor doctor` again. To use another model, run `razor setup` or set `model` in your settings.
 
 **`ChatGPT is not signed in; run razor login.`** Run `razor login`, open the link it prints on any device, and enter the code it shows.
 
@@ -71,13 +72,15 @@ export PATH="$HOME/.local/bin:$PATH"
 
 **`The Claude bridge needs Node 22.18 or later on PATH (…); this install has no private Node; install Node, then run razor doctor.`** Claude sessions run through a small Node program. The installer downloads a private copy of Node only when it finds no Node 22.18 or later on your `PATH`; when it found yours, Razor keeps using the `node` on the `PATH` of whatever starts the server, and the line shows that `PATH`. Put Node 22.18 or later on it, run `razor install` again if the background service needs the new `PATH`, then `razor restart`.
 
-**`… is not set in the server's environment.`** or **`The model host refused or never got a key; set … in the server's environment.`** A model on a chat endpoint needs a key variable the server does not have, or the host refused the key it got. The first sentence is the model picker's reason for not offering the model; the second ends a turn on it, such as one from `razor --print --model gemini-3.8-flash`. Export it where the server starts, or add it to the service ([Models and sign-in](models.md#other-model-families)), then run `razor restart`.
+**`… is not set; save it with razor setup or in keys.toml, then run razor restart.`** or **`The model host refused … or never got it; …`** A provider's model needs a key variable the server does not have, or the host refused the key it got. The first sentence is the model picker's reason for not offering the model; the second ends a turn on it, such as one from `razor --print --model gemini-3.8-flash`. Save the key in `~/.razor/keys.toml` ([Keys](models.md#keys)), or export it where the server starts, then run `razor restart`.
+
+**`provider_only is on, so Razor …`** The setting that keeps Razor to your model providers refused something; the sentence says what. Use a model on a provider under `[providers]`, or turn the setting off with `razor config set provider_only false` ([Security](security.md#contacting-only-your-model-provider)).
 
 ## The server and settings
 
 **`Settings: invalid. <file> does not parse: …`** from `razor doctor`. A settings file has a mistake, named with the file and the problem; the server will not start until it loads, so doctor exits 1. Fix that file and run `razor doctor` again.
 
-**`… keys.toml may set only EXA_API_KEY, FIRECRAWL_API_KEY, PARALLEL_API_KEY, ELEVENLABS_API_KEY, as nonempty strings.`** `keys.toml` holds a name it may not, or an empty value, and neither the server nor doctor starts until it is fixed. A model's key, such as `GEMINI_API_KEY`, goes in the server's environment instead ([Models and sign-in](models.md#other-model-families)).
+**`… keys.toml holds lines NAME = "key", each name letters, digits and _, each key a nonempty string.`** `keys.toml` holds a line that is not a variable's name and its key, and neither the server nor doctor starts until it is fixed ([Keys](configuration.md#keys)).
 
 **`razor serve exited (exit status: 1) before answering; see …/server.log; last line: "…"`** The server a command started stopped at once, and the quoted line from `~/.razor/server.log` says why. The usual reason is a settings file that does not parse, named with the problem: fix the file and run the command again.
 
@@ -118,6 +121,8 @@ For an installed copy, the script is `~/.local/share/razor/current/scripts/speec
 **No desktop notifications.** On macOS, allow notifications for Script Editor in System Settings, under Notifications. On Linux, the starter pack (the default settings Razor ships) uses `notify-send`; on a machine with no desktop there is nowhere to show them, so send them to your phone with ntfy ([Configuration](configuration.md#notifications)).
 
 **`Browser: missing or unresponsive. Reinstall the agent-browser executable, then run agent-browser install.`** from `razor doctor`. The agent-browser program beside Razor, `~/.local/share/razor/current/agent-browser`, is missing or does not run. When it is missing, Razor uses the `agent-browser` on your `PATH`, so `npm install --global agent-browser`, then `agent-browser install` to download its Chrome, brings it back ([Browser, voice and search](browser-voice-search.md#the-browser)).
+
+**`Desktop: not running.`** from `razor doctor`. Agents operate desktop apps through Cua Driver's background program, which the server runs only on a Mac where Razor has Accessibility, or on Linux when the server was started with a display (`DISPLAY` set); on a headless server this line is expected. On a Mac, let doctor request the permissions, turn Razor on in System Settings, then run `razor restart`. If it stopped on its own, `~/.razor/server.log` holds its last words and the line `Desktop control is off: …`; fix what they name, then run `razor restart` ([Browser, voice and search](browser-voice-search.md#desktop-apps)).
 
 **The browser will not start (Linux).** Chrome lacks system libraries. Run `~/.local/share/razor/current/agent-browser install --with-deps`, which uses `sudo`. `~/.local/share/razor/current/agent-browser doctor --offline` says what else is wrong, with a test launch.
 

@@ -634,10 +634,12 @@ impl App {
     }
 
     // The drawn screen's next change, paced; while anything works, the clocks' seconds, of the wall
-    // and of the focused turn; a draft save and the notice's end; else the minute.
+    // and of the focused turn, unless the overview covers them; a draft save and the notice's
+    // end; else the minute.
     fn wake(&self, last_draw: Instant, drawable: bool) -> Instant {
         let now = now();
-        let working = self.agents.values().any(|a| a.state == State::Working);
+        let working =
+            !agents::covers(self, now) && self.agents.values().any(|a| a.state == State::Working);
         let seconds = [Some(0), self.busy_at].map(|since| {
             since
                 .filter(|_| working)

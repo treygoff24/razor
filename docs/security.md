@@ -4,7 +4,7 @@ Razor's agents run commands as you, with your files, your network and your crede
 
 ## What the server exposes
 
-By default the server listens only on a Unix socket in its home, `~/.razor/server.sock`, and every request must carry a key: the local key in `~/.razor/device.key`, readable only by you, or the key of a device or server you enrolled with `razor devices add`. `GET /v1/mcp/callback` is exempt, where the browser returns from an MCP server's sign-in and cannot carry a key; it finishes only a sign-in the server is waiting on, matched by that sign-in's secret `state` value. Two pairing routes also need no key: `GET /v1/pair` returns only the configured server name, and `POST /v1/pair` accepts at most 1 KiB containing a sender address and key. The sender IP must match the claimed address. These requests are untrusted and kept only in memory, newest sixteen for ten minutes. A request grants no access. When you explicitly add that address, Razor uses a held key only after the protected `GET /v1/device` on that server identifies the key as the enrollment for this server's bound address. A key belonging to a phone or a different server does not qualify. Every other operation requires a key. Before setup, nothing listens on the network; setup fills an unset address when Tailscale is running.
+By default the server listens only on a Unix socket in its home, `~/.razor/server.sock`, and every request must carry a key: the local key in `~/.razor/device.key`, readable only by you, or the key of a device or server you enrolled with `razor devices add`. `GET /v1/mcp/callback` is exempt, where the browser returns from an MCP server's sign-in and cannot carry a key; it finishes only a sign-in the server is waiting on, matched by that sign-in's secret `state` value. Two pairing routes also need no key: `GET /v1/pair` returns only the configured server name, and `POST /v1/pair` accepts at most 1 KiB containing a sender address and key. The sender IP must match the claimed address. These requests are untrusted and kept only in memory, newest sixteen for ten minutes. A request grants no access. When you explicitly add that address, Razor uses a held key only after the protected `GET /v1/device` on that server identifies the key as the enrollment for this server's bound address. A key belonging to a phone or a different server does not qualify. Every other operation requires a key. Before setup, nothing listens on the network; setup gives the server an unset address only when you say yes to connecting your other machines and Tailscale is running.
 
 `[server] address` adds a TCP listener for paired servers, the Razor servers on your other machines that you connect to this one ([More machines](machines.md)), and for other devices. It speaks plain HTTP: requests, replies and the bearer keys they carry are not encrypted by Razor. That is why remote use needs a private network such as Tailscale, which encrypts the traffic and limits who can reach the port at all. Bind to the machine's Tailscale address, never to `0.0.0.0` or a public address.
 
@@ -14,19 +14,18 @@ A device key grants everything the local terminal can do, and a paired server's 
 
 | What | Where |
 | --- | --- |
-| Web and voice keys from `razor keys` | `~/.razor/keys.toml`, mode 0600 |
+| API keys you save with Razor: providers' from setup, web and voice from `razor keys` | `~/.razor/keys.toml`, mode 0600 |
 | ChatGPT sign-in | `~/.razor/auth.json`, mode 0600 |
-| OpenAI API key, for GPT at `api.openai.com` and the phone client's voice calls | `~/.razor/key`, a file you create; make it mode 0600 |
 | Claude sign-in | Claude Code's own store: `~/.claude`, or the login keychain on macOS |
 | MCP servers' sign-in tokens | `~/.razor/mcp-auth.json`, mode 0600 |
 | The local key, enrolled devices and paired servers | `~/.razor/device.key` and `~/.razor/devices.json`, mode 0600 |
-| Other models' keys | The server's environment, under the names their `[models]` rows give |
+| Keys you export instead | The server's environment, under the names their providers give |
 
-No setting needs a key's value: a model row names the variable that holds its key, and an MCP server's headers and client secret are `{ env = … }` or `{ file = … }`. The one exception is an MCP program's `env` table, which is passed to the program as written, so a value put there sits in the file. `razor doctor` says which sign-ins and web keys are present and never prints one.
+No setting needs a key's value: a provider names the variable that holds its key, and an MCP server's headers and client secret are `{ env = … }` or `{ file = … }`. The one exception is an MCP program's `env` table, which is passed to the program as written, so a value put there sits in the file. `razor doctor` says which sign-ins and web keys are present and never prints one.
 
 ## What agents can run
 
-An agent's shell is bash, as your user, in the session's folder. It starts from the server's environment minus the web and voice keys and Claude's sign-in variables (`EXA_API_KEY`, `PARALLEL_API_KEY`, `FIRECRAWL_API_KEY`, `ELEVENLABS_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`), so a command that prints its environment does not put them in the record. MCP servers and script tools start the same way. That is protection against accidents, not against an agent that sets out to read a file: anything your user can read, an agent can read, `keys.toml` included. Keys you export for other models, such as `GEMINI_API_KEY`, stay in agents' environments.
+An agent's shell is bash, as your user, in the session's folder. It starts from the server's environment minus the web and voice keys, every name `keys.toml` lists and Claude's sign-in variables (`EXA_API_KEY`, `PARALLEL_API_KEY`, `FIRECRAWL_API_KEY`, `ELEVENLABS_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`), so a command that prints its environment does not put them in the record. MCP servers and script tools start the same way. That is protection against accidents, not against an agent that sets out to read a file: anything your user can read, an agent can read, `keys.toml` included. Keys you export for other models and do not list in `keys.toml`, such as `GEMINI_API_KEY`, stay in agents' environments.
 
 Razor refuses two kinds of command, by checking the command's text before it runs:
 
@@ -37,13 +36,26 @@ Razor refuses two kinds of command, by checking the command's text before it run
 
 Both are best effort. The check sees through `sudo`, `env`, `nohup`, `timeout` and similar wrappers, but a program an agent runs can still kill or delete whatever you could, a command can be written in ways the check does not see, and script tools' commands are not checked. Plugins can refuse more under their own rules ([Configuration](configuration.md#plugins)).
 
+## Contacting only your model provider
+
+`provider_only = true` in your own file ([Configuration](configuration.md#providers)), which setup's "Contact nothing but your model provider?" sets, is for a work machine whose only model access is, say, a company's AI gateway: Razor itself then reaches only the providers named under `[providers]` in your settings, and refuses the rest with a sentence naming the setting.
+
+- A session runs only on a model of a provider with a `[providers]` table; Claude's and ChatGPT's own sign-ins never count. A default model on no such provider is a settings error, which `razor doctor` and the server's start report.
+- Razor neither looks for other Razor servers nor pairs with them, and does not connect to servers it is already paired with; setup does not ask about connecting your other machines.
+- No release or skill updates are downloaded unless you run `razor update` yourself, and setup does not download the browser.
+- Razor's own web tools (`search`, `fetch`, `answer`), Claude Code's WebFetch, which fetches pages from this machine, the speech and transcription programs, the phone's live calls and the video watcher are off. A model's own web search, which runs inside its provider, stays.
+- MCP servers you add yourself, in your own file or a project's private `.razor/config.local.toml`, still start; those a project's shared `.razor/config.toml` brings do not, and `razor mcp list` says how to add one yourself.
+- Claude Code, on a provider's Anthropic-format endpoint, is asked to send nothing to Anthropic beyond that endpoint.
+
+It covers what Razor does by itself. What you configured yourself stays on, and where it reaches is yours to judge: MCP servers you added, the `notify` and `ask` programs, `[push]` to Apple's push service, a project's `[tasks] remote`, the Post watch when Post is installed, plugins and script tools, and the commands agents run, since a shell command can reach anything this machine can and only a firewall governs that. Razor's Cua Driver program for desktop apps stays on too, contacting nothing on its own: Razor runs it, and doctor's check of it, with `CUA_DRIVER_RS_TELEMETRY_ENABLED=false` and `CUA_DRIVER_RS_UPDATE_CHECK=false`, which turn off its usage reporting and its update check, and agents' shells get the same two settings.
+
 ## Screen and control on macOS
 
-The shipped agent-desktop program can read and operate desktop apps through accessibility and take screenshots. Turning on Razor under Accessibility (Device Control and Data Access on macOS 27) and Screen & System Audio Recording lets every agent on that Mac, in every Razor home, see the screen and control the computer: read any window, type, click and answer dialogs as you. macOS gives the permission to Razor.app, the program the background service starts first, not to one agent or one home, and `razor install` keeps Razor.app at one path so that the permission can outlast updates. Leave both off unless you want agents to do that. `razor doctor` says whether the running server has them and, in a terminal, offers to ask macOS for them, which only puts Razor in both lists; nothing is on until you turn it on, and turning Razor off in System Settings takes them back.
+The shipped Cua Driver program (`cua-driver`) can read and operate desktop apps through accessibility and take screenshots; the server runs its background program as its own child, so it acts with Razor's permissions, and only once Razor has Accessibility. Turning on Razor under Accessibility (Device Control and Data Access on macOS 27) and Screen & System Audio Recording lets every agent on that Mac, in every Razor home, see the screen and control the computer: read any window, type, click and answer dialogs as you. macOS gives the permission to Razor.app, the program the background service starts first, not to one agent or one home, and `razor install` keeps Razor.app at one path so that the permission can outlast updates. Leave both off unless you want agents to do that. `razor doctor` says whether the running server has them and, in a terminal, offers to ask macOS for them, which only puts Razor in both lists; nothing is on until you turn it on, and turning Razor off in System Settings takes them back.
 
 ## Opening an untrusted repository
 
-Opening a session in a repository starts the MCP servers its settings name, without asking, so only open sessions in repositories you trust, as you would only run their build scripts if you trusted them. A repository's Razor settings are `.razor/config.toml` and `.razor/config.local.toml` at its root.
+Opening a session in a repository starts the MCP servers its settings name, without asking (with `provider_only` on, not those of its shared `.razor/config.toml`), so only open sessions in repositories you trust, as you would only run their build scripts if you trusted them. A repository's Razor settings are `.razor/config.toml` and `.razor/config.local.toml` at its root.
 
 What a repository can do when you open a session in it:
 

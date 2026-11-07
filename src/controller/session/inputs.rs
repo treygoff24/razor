@@ -59,7 +59,11 @@ impl Session {
             Origin::Person | Origin::Program { .. } => 1 << 20,
             _ => 64 << 10,
         };
-        if input.text.len() > max {
+        let origins = input.image_origins.iter().fold(0usize, |n, origin| {
+            n.saturating_add(origin.path.len())
+                .saturating_add(origin.device.len())
+        });
+        if input.text.len().saturating_add(origins) > max {
             return invalid(&format!(
                 "This input is larger than {max} bytes; shorten it."
             ));

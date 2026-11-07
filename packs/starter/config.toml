@@ -63,11 +63,14 @@ answer = ["exa", "parallel"]
 # max = 20
 # grace = "3m"
 
-# Another model, any server that speaks OpenAI-compatible chat, here one on this machine. Start
-# a session on it with `razor --model local`. `window` is its context size in tokens.
-# [models.local]
+# Another provider, here a server on this machine that speaks OpenAI-compatible chat, with no key.
+# Start a session on its model with `razor --model local/the-model-the-server-loaded`. `window`
+# is the model's context size in tokens. A gateway with a key also names `key`, the variable
+# that holds it in keys.toml, and `format` when it speaks "responses" or "anthropic".
+# [providers.local]
 # base_url = "http://127.0.0.1:1234/v1"
-# id = "the-model-the-server-loaded"
+# models = ["the-model-the-server-loaded"]
+# [models."local/the-model-the-server-loaded"]
 # window = 32768
 
 # An MCP server's tools for every session; `razor mcp add` writes these for you.

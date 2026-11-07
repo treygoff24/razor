@@ -1,6 +1,7 @@
 //! `razor install`: the one service that runs `razor serve` and restarts it after a failure.
 
 use super::{Error, TEXT, other};
+use crate::config::{setup, shipped};
 use std::ffi::CStr;
 use std::fs::{File, TryLockError};
 use std::io::{Read, Write};
@@ -333,8 +334,8 @@ async fn app(root: &Path) -> Result<Option<String>, Error> {
 /// Razor.app's. With `ask`, the server's home, it first asks macOS for both, which puts Razor in
 /// both lists in System Settings and opens macOS's prompts; only the service's own server asks,
 /// None from any other, since macOS charges a request to the program launchd started, which
-/// elsewhere is the person's terminal. The first call loads ApplicationServices, under 1 MiB
-/// kept, so it is made only when a person wants to know.
+/// elsewhere is the person's terminal. The first call, `desktop`'s at the server's start, loads
+/// ApplicationServices, under 1 MiB kept.
 pub(crate) async fn permissions(ask: Option<&Path>) -> Option<[bool; 2]> {
     if ask.is_some_and(|home| std::env::var("XPC_SERVICE_NAME").ok() != Some(service_file(home).1))
     {
@@ -380,6 +381,53 @@ pub(crate) async fn permissions(ask: Option<&Path>) -> Option<[bool; 2]> {
         ])
     };
     tokio::task::spawn_blocking(asked).await.ok().flatten()
+}
+
+/// The socket in a home on which `desktop` runs Cua Driver's daemon; serve names it to agents'
+/// shells as CUA_DRIVER_SOCKET.
+pub const DESKTOP_SOCKET: &str = "cua-driver.sock";
+
+/// Runs the Cua Driver Razor ships as a daemon, which agents' `cua-driver` calls need, as this
+/// server's direct child on `home`'s own socket, so that on macOS it acts with Razor's
+/// permissions (docs/design/starter.md); only where it can work: on macOS with Accessibility on,
+/// on Linux with an X display. It starts again after an exit, except one within a minute of its
+/// start, which ends it with the exit in the server's log. It ends with the server, which holds
+/// the pipe on its standard input.
+pub async fn desktop(home: PathBuf) {
+    let usable = match permissions(None).await {
+        Some([control, _]) => control,
+        None => std::env::var_os("DISPLAY").is_some(),
+    };
+    let program = tokio::task::spawn_blocking(|| shipped("cua-driver"));
+    let (true, Ok(Some(program))) = (usable, program.await) else {
+        return;
+    };
+    let (socket, pid) = (home.join(DESKTOP_SOCKET), home.join("cua-driver.pid"));
+    loop {
+        // One an earlier daemon left: this server holds server.lock, so none answers on it, and
+        // the daemon refuses to start beside one.
+        let _ = fs::remove_file(&socket).await;
+        let mut command = Command::new(&program);
+        command.args(["serve", "--embedded", "--parent-liveness-stdio", "--socket"]);
+        command.arg(&socket).arg("--pid-file").arg(&pid);
+        command.env_clear().envs(setup::environment());
+        command.stdin(Stdio::piped()).stdout(Stdio::null());
+        let started = std::time::Instant::now();
+        let mut child = match command.kill_on_drop(true).spawn() {
+            Ok(child) => child,
+            Err(e) => return eprintln!("Desktop control is off: cua-driver did not start: {e}."),
+        };
+        // Held until the daemon exits: `wait` would close it, which stops the daemon.
+        let _pipe = child.stdin.take();
+        let exit = child.wait().await;
+        let exit = exit.map_or_else(|e| e.to_string(), |status| status.to_string());
+        if started.elapsed() < Duration::from_secs(60) {
+            return eprintln!(
+                "Desktop control is off: Cua Driver's daemon exited ({exit}) within a minute of starting; fix what it printed above, then run razor restart."
+            );
+        }
+        eprintln!("Cua Driver's daemon exited ({exit}); starting it again.");
+    }
 }
 
 async fn write(file: &Path, text: &str) -> Result<(), Error> {

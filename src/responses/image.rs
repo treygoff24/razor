@@ -90,7 +90,7 @@ impl Responses {
             }
         };
         let url = format!("{}/{route}", base.trim_end_matches('/'));
-        let mut tokens = self.credentials(false, None).await?;
+        let mut tokens = self.credentials(None).await?;
         for retry in [true, false] {
             let mut post = (self.client.post(&url).bearer_auth(&tokens.access_token))
                 .header("session_id", session.as_str())
@@ -106,7 +106,7 @@ impl Responses {
                 .map_err(other("sending an image request"))?;
             let status = response.status();
             if status == StatusCode::UNAUTHORIZED && retry {
-                tokens = self.credentials(false, Some(&tokens.access_token)).await?;
+                tokens = self.credentials(Some(&tokens.access_token)).await?;
                 continue;
             }
             if !status.is_success() {

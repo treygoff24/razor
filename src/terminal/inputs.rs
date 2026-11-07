@@ -28,10 +28,7 @@ pub fn send(app: &mut App) {
     let Some(id) = app.focus.clone() else {
         return create(app);
     };
-    let (text, images) = (
-        app.composer.text.clone() + &app.composer.image_origins(),
-        app.composer.images_for_send(),
-    );
+    let (text, images) = (app.composer.text.clone(), app.composer.images_for_send());
     let (skill, text) = match completion::skill(app, &text) {
         Some((name, words)) => (Some(name), words),
         None => (None, text),
@@ -39,6 +36,7 @@ pub fn send(app: &mut App) {
     let from = initial.and_then(|i| i.from.clone());
     let input = ClientInput {
         text,
+        image_origins: app.composer.image_origins(),
         images,
         model,
         effort,

@@ -51,35 +51,30 @@ with flow(replies, model="sol", config=config) as f:
     with wall_clock() as (_, env, _), Terminal(replace(f, env={**f.env, **env}), "--resume", a, rows=20) as t:
         t.shown("transcript-a74")
         t.send(LEFT)
-        t.shown("AGENTS", "transcript-a74")
+        t.shown("AGENTS ·", "transcript-a74")
         t.send(LEFT)  # The composer kept the keys; frozen time cannot finish an accidental fold.
         t.shown("PROJECT74", "work74", "a74", "b74")
 
         def selected(name):
-            t.until(lambda _: "AGENTS" not in t.text() and
-                    any("❯" in line and f" {name} " in line for line in t.screen.display))
+            t.until(lambda _: "AGENTS ·" not in t.text() and any(f"▶ {name} " in line for line in t.screen.display))
 
         selected("a74")
 
-        def rows():
-            return [next(y for y, line in enumerate(t.screen.display) if f" {n} " in line)
-                    for n in ("work74", "b74", "a74")]
+        def framed(ages=True):
+            """Each agent's age inside its tile, and every body row closed by its group's frame."""
+            lines = t.screen.display
+            assert not ages or all(any(re.search(rf" {n} .*?\d+[smh] +[▌│]", line) for line in lines)
+                                   for n in ("work74", "b74", "a74")), t.text()
+            assert all(not line.strip() or line.rstrip()[-1] in "│╮╯╴" for line in lines[5:-1]), t.text()
 
-        def ages_inside():
-            for y in rows():
-                line = t.screen.display[y]
-                assert re.search(r"\d+[smh] $", line), repr(line)
-                if "❯" in line:
-                    assert t.screen.buffer[y][t.columns - 2].bg == t.screen.buffer[y][1].bg, line
-
-        ages_inside()
-        for height, gaps in ((13, [3, 2]), (10, [2, 1]), (9, [1, 1]), (13, [3, 2])):
+        framed()
+        for height in (13, 10, 9):
             t.resize(height, 120)
-            t.until(lambda _: t.screen.display[-1].strip() and
-                    all(f" {n} " in t.text() for n in ("work74", "b74", "a74")) and
-                    [right - left for left, right in zip(rows(), rows()[1:])] == gaps)
-            ages_inside()
-        t.resize(7, 120)
+            t.until(lambda _: all(f" {n} " in t.text() for n in ("work74", "b74", "a74")))
+            assert any(" work74 " in line and " b74 " in line and " a74 " in line for line in t.screen.display), t.text()
+            framed()
+        # Too short for its group at 40 columns, the overview scrolls to keep the selection in sight.
+        t.resize(8, 40)
         t.until(lambda _: " a74 " in t.text() and " work74 " not in t.text())
         t.send(UP * 2)
         t.until(lambda _: " work74 " in t.text() and " a74 " not in t.text())
@@ -89,25 +84,25 @@ with flow(replies, model="sol", config=config) as f:
         selected("b74")
         for key in (RIGHT, " ", "\r"):
             t.send(" ")
-            t.until(lambda _: "❯ PROJECT74" in t.text() and " work74 " not in t.text())
+            t.until(lambda _: "❯─ 1  PROJECT74" in t.text() and " work74 " not in t.text())
             t.send(key)
             selected("work74")
             t.send(DOWN)
             selected("b74")
         t.send(RIGHT)  # Open b, although a was addressed before the overview.
-        t.shown("AGENTS", "transcript-b74")
+        t.shown("AGENTS ·", "transcript-b74")
         t.send("draft74")
         t.shown("draft74")
         t.send("\x01" + RIGHT + "X")  # Select all, collapse to its end, then append.
-        t.shown("draft74X", "AGENTS")
+        t.shown("draft74X", "AGENTS ·")
         t.send(RIGHT)
         t.until(lambda _: "AGENTS" not in t.text() and "draft74X" in t.text())
         t.send("\x15" + LEFT)
-        t.shown("AGENTS", "transcript-b74")
+        t.shown("AGENTS ·", "transcript-b74")
         t.send(LEFT)
         selected("b74")
         t.send("\x1b")
-        t.shown("AGENTS", "transcript-b74")
+        t.shown("AGENTS ·", "transcript-b74")
         t.click("‹")
         t.until(lambda _: "AGENTS" not in t.text() and "transcript-b74" in t.text())
         t.send("\x1bOR")
@@ -122,15 +117,13 @@ with flow(replies, model="sol", config=config) as f:
         t.pump(0.1)
         t.resize(20, 79)
         t.shown("PROJECT74", "b74")
-        ages_inside()
+        framed()
         t.resize(20, 40)
         t.pump(2)
-        ages_inside()
-        agent_rows = rows()
-        t.resize(20, 20)
+        framed()
+        t.resize(20, 20)  # Narrower than the smallest tile's group: the tiles narrow to fit.
         t.pump(2)
-        for y in agent_rows:
-            assert re.search(r"\d+[smh] $", t.screen.display[y]), repr(t.screen.display[y])
+        framed(ages=False)
         t.send("\x1bOR")
         t.shown("transcript-b74")
         t.resize(20, 120)

@@ -26,6 +26,7 @@ const MAKING_REPLY: &str = "This reply's audio is being made; try again.";
 const HEARING: &str = "This voice note is still being transcribed.";
 const SILENT: &str = "The reply's audio could not be kept; see the server log.";
 const NONE: &str = "This server has no transcriber; set `transcribe`.";
+const ONLY: &str = "provider_only is on, so Razor runs no speech or transcription program.";
 const FULL: &str = "Four voice notes and replies are being processed; send it again in a moment.";
 /// The files being made or heard now: at most four, each once.
 static MAKING: Mutex<BTreeSet<(SessionId, String)>> = Mutex::new(BTreeSet::new());
@@ -45,7 +46,7 @@ pub(super) async fn speech(
     let Said::Text { text } = said.body else {
         return Err(bad("Only a reply's text can be read aloud."));
     };
-    let mut command = program(&app.controller.config().await.speech)?;
+    let mut command = program(&app, false).await?;
     let summary = app.controller.summary(&id).await?;
     let env = voice::ask(&app, None)
         .await
@@ -107,7 +108,7 @@ pub(super) async fn spoken(
     if text.contains(['\r', '\n']) {
         return Err(bad("A voice note must fit on one line; write instead."));
     }
-    let mut command = program(&app.controller.config().await.speech)?;
+    let mut command = program(&app, false).await?;
     command.arg(speaker(&summary));
     let family = family(&summary);
     let kept = format!("speech/{}.mp3", entry.0);
@@ -176,11 +177,7 @@ pub(super) async fn admit(app: &App, id: &SessionId, mut input: Input) -> Result
     if voice.levels.len() > 64 {
         return Err(bad("A voice note's waveform holds at most 64 levels."));
     }
-    let command = app.controller.config().await.transcribe;
-    if command.is_empty() {
-        return Err(unavailable(NONE));
-    }
-    let command = program(&command)?;
+    let command = program(app, true).await?;
     let limit = LIMIT + Duration::from_millis(voice.duration_ms.min(10_800_000));
     // Claimed by the file itself, so no other spelling of its path is a second note.
     let path = voice.file.to_string_lossy();
@@ -220,10 +217,22 @@ fn family(summary: &crate::record::Summary) -> &'static str {
     crate::protocol::FAMILIES[crate::protocol::family(speaker(summary))]
 }
 
-/// Configured programs run in their own process group; an empty speech command refuses.
-pub(super) fn program(command: &[String]) -> Result<Command, Refusal> {
+/// The configured `speech` program, or with `transcribe` the transcriber, in a process group of
+/// its own; none configured, or `provider_only`, refuses.
+pub(super) async fn program(app: &App, transcribe: bool) -> Result<Command, Refusal> {
+    let config = app.controller.config().await;
+    let (command, none) = match transcribe {
+        true => (config.transcribe, NONE),
+        false => (
+            config.speech,
+            "No speech program is configured in `speech`.",
+        ),
+    };
+    if config.provider_only {
+        return Err(unavailable(ONLY));
+    }
     let Some((name, args)) = command.split_first() else {
-        return Err(unavailable("No speech program is configured in `speech`."));
+        return Err(unavailable(none));
     };
     let mut command = Command::new(name);
     command.process_group(0).args(args);

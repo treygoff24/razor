@@ -144,9 +144,9 @@ Docs: ~/.local/share/razor/current/docs/README.md in a standard install, or http
 
 const COMMANDS: &[&str] = &[
     "help                       show this help",
-    "setup [--console]          choose providers, offer a service and sign in\n  --console bills Claude through Anthropic Console",
+    "setup [--console]          choose Claude, ChatGPT or an API key, offer a service and sign in\n  --console bills Claude through Anthropic Console",
     "keys                       save optional web-search and voice keys privately",
-    "doctor                     report prerequisites and commands to fix problems",
+    "doctor                     check prerequisites and the default model, with fixes",
     "login                      sign in to ChatGPT",
     "install                    run the server in the background at login",
     "serve                      run the server in this terminal",
@@ -247,6 +247,23 @@ fn main() -> ExitCode {
     {
         eprintln!("{e} Repair the named keys.toml, then run razor keys.");
         return ExitCode::FAILURE;
+    }
+    // Every cua-driver Razor runs, serve's daemon, agents' calls and doctor's probe, reaches this
+    // home's daemon (residents::desktop) and sends neither Cua's telemetry nor an update check
+    // (docs/security.md).
+    if let Some(home) = &home {
+        let cua = [
+            ("CUA_DRIVER_EMBEDDED", "1"),
+            ("CUA_DRIVER_RS_TELEMETRY_ENABLED", "false"),
+            ("CUA_DRIVER_RS_UPDATE_CHECK", "false"),
+        ];
+        // SAFETY: no other threads exist before the runtime starts.
+        unsafe {
+            std::env::set_var("CUA_DRIVER_SOCKET", home.join(residents::DESKTOP_SOCKET));
+            for (name, value) in cua {
+                std::env::set_var(name, value)
+            }
+        }
     }
     let serving = first == Some("serve");
     let mut runtime = if serving {
@@ -411,6 +428,7 @@ async fn serve(home: PathBuf) -> Result<ExitCode, Error> {
         .map_err(|e| failed(&e))?;
     let address = controller.config().await.server.address;
     let residents = Residents::open(controller.clone());
+    tokio::spawn(residents::desktop(home.clone()));
     let deliveries = controller.deliveries();
     let shutdown = async move {
         terminate.recv().await;
@@ -425,22 +443,17 @@ async fn serve(home: PathBuf) -> Result<ExitCode, Error> {
 }
 
 /// `razor doctor`: one line for each thing Razor runs on, found or missing with what to do, a
-/// line for settings that do not load, and never a credential's value. It
-/// starts no server; Claude Code may create its own config directory during the sign-in check.
-/// It exits 0 when the settings load and Claude or GPT can run.
+/// line for settings that do not load, and never a credential's value. It starts no server;
+/// Claude Code may create its own config directory during the sign-in check. It exits 0 when the
+/// settings load and the default model can run, which on a provider takes a test request.
 async fn doctor(home: PathBuf) -> Result<ExitCode, Error> {
     use razor_harness::{api::ready, config::Config, tools::web};
     let config = Config::load(&home).await;
     let sign_in = config.as_ref().map_or(&[][..], |c| &c.claude.sign_in);
     let checks = ready::credentials(&home, Some(sign_in), None).await;
-    let credential = config
-        .as_ref()
-        .map_or("ChatGPT sign-in", ready::gpt_credential);
-    let mut lines = checks.clone();
-    lines.retain(|name, _| *name == "Claude" || *name == credential);
     let fix = "For optional web search, run razor keys.";
     let keys = web::keys().map(|(name, set)| (name, (!set).then(|| fix.to_string())));
-    for (name, why) in lines.into_iter().chain(keys).chain([(
+    for (name, why) in checks.clone().into_iter().chain(keys).chain([(
         "ELEVENLABS_API_KEY",
         std::env::var_os("ELEVENLABS_API_KEY")
             .is_none()
@@ -489,26 +502,34 @@ async fn doctor(home: PathBuf) -> Result<ExitCode, Error> {
             }
         }
     }
-    for (name, program, fix) in [
+    let socket = home.join(residents::DESKTOP_SOCKET).into_os_string();
+    for (name, program, args, found, fix) in [
         (
             "Browser",
             "agent-browser",
-            "Reinstall agent-browser, then run agent-browser install.",
+            ["--version".into()].to_vec(),
+            "executable",
+            "missing or unresponsive. Reinstall agent-browser, then run agent-browser install.",
         ),
-        ("Desktop", "agent-desktop", "Reinstall agent-desktop."),
+        (
+            "Desktop",
+            "cua-driver",
+            ["--socket".into(), socket, "status".into()].to_vec(),
+            "daemon answering",
+            "not running. The server runs cua-driver on a Mac where Razor has Accessibility, or on Linux with a display; server.log says why one stopped. Run razor restart.",
+        ),
     ] {
-        let executable = setup::tool(program);
-        let probe = tokio::process::Command::new(executable)
-            .arg("--version")
+        let probe = tokio::process::Command::new(setup::tool(program))
+            .args(args)
             .kill_on_drop(true)
             .output();
         if tokio::time::timeout(Duration::from_secs(2), probe)
             .await
             .is_ok_and(|r| r.is_ok_and(|o| o.status.success()))
         {
-            println!("{name}: found ({program} executable; operation untested).");
+            println!("{name}: found ({program} {found}; operation untested).");
         } else {
-            println!("{name}: missing or unresponsive. {fix}");
+            println!("{name}: {fix}");
         }
     }
     let client = reqwest::Client::builder()
@@ -533,17 +554,17 @@ async fn doctor(home: PathBuf) -> Result<ExitCode, Error> {
     }
     let fix = "Razor cannot start until its settings load; edit the file the Settings line names, then run razor doctor.";
     let config = config.map_err(|_| Failed(fix.into()))?;
-    let none = format!(
-        "Razor can run on neither Claude nor GPT yet; fix the Claude or {credential} line above."
-    );
-    let gpt = ready::unready(&checks, &config, "gpt-6.1-sol").is_none();
-    let routes = match (checks.get("Claude").is_some_and(Option::is_none), gpt) {
-        (true, true) => "Claude and GPT",
-        (true, false) => "Claude",
-        (false, true) => "GPT",
-        (false, false) => return Err(Failed(none)),
-    };
-    println!("Razor can run on {routes}.");
+    let (said, runs) = ready::default(&home, &config, &checks).await;
+    println!("Model: {said}");
+    match runs {
+        true => println!("Razor can run on {}.", config.model),
+        false => {
+            return Err(Failed(format!(
+                "Razor cannot run on its default model, {}, yet; fix the Model line above, or choose another model with razor setup.",
+                config.model
+            )));
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -751,6 +772,13 @@ async fn connection(home: &Path) -> Result<api::Connection, Error> {
     let unreadable =
         "The working directory could not be read; start Razor in an existing directory.";
     let launched = || std::env::current_dir().map_err(|_| Failed(unreadable.into()));
+    if remote
+        .as_ref()
+        .is_some_and(|c| c.provider_only && c.remote.is_some())
+    {
+        let why = "provider_only is on, so Razor sends nothing to the [remote] server; remove [remote] or set provider_only = false.";
+        return Err(Failed(why.into()));
+    }
     let remote = remote.and_then(|c| c.remote);
     let is_remote = remote.is_some();
     let (http, base, key, cwd) = match remote {

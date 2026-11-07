@@ -102,6 +102,29 @@ with flow([claude.reply(text="first skill received")]) as f:
         t.shown("▸ /added-later", timeout=5)
 
 
+# A meeting's lines draw nothing and never take the window or the cache: past more of them than the
+# cache holds, an attach reads back to the screenful of reply above them and, following, draws the
+# next reply live under it.
+with flow([claude.reply(text=" ".join(f"B{i:03}" for i in range(800)) + " before-meeting-26"), claude.reply(text="after-meeting-26")]) as f:
+    server.start(f)
+    session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    server.post(f, f"/sessions/{session}/input", {"text": "hello"})
+    last = server.until(f, session, lambda es: es[-1]["kind"] == "turn_end")[-1]
+    server.stop(f)
+    lines = [{"event": "started"}, *[{"event": "line", "who": "room", "text": "said", "start_ms": 0, "end_ms": 0}] * 2200,
+             {"event": "ended", "reason": "ended"}]
+    with (f.home / ".razor/sessions" / session / "record.jsonl").open("a") as record:
+        record.writelines(json.dumps({"id": last["id"] + i, "at": last["at"] + i, "kind": "voice_call", "call": "m26",
+                                      "source": "meeting", **line}) + "\n" for i, line in enumerate(lines, 1))
+    with Terminal(f, "--resume", session) as t:
+        t.shown("before-meeting-26")
+        server.post(f, f"/sessions/{session}/input", {"text": "again"})
+        # The play mark comes to the newest finished reply's cap once its text and turn end fold, never
+        # to the streamed words.
+        t.until(lambda t: any("▶" in cap and "after-meeting-26" in words for cap, words in zip(t.screen.display, t.screen.display[1:])))
+        t.shown("after-meeting-26", "before-meeting-26")
+
+
 ROOT, CHILD = "TERMINAL_RENDER_ROOT", "You are oak,"
 replies = [agent(ROOT, "start", name="oak", brief="Read the brief and reply."),
            message(ROOT, "question", text="Which review should ship?", options=["careful", "quick"]),
@@ -129,12 +152,12 @@ with flow(replies, config=local + '[server]\nname="box"\nrealm="work"\n') as f:
     f.base()
     server.start(f)
     with Terminal(f, "--agents") as t:
-        t.shown("┌─ AGENTS", "Message the agent")
+        t.shown("AGENTS ·", "Message the agent")
         assert not server.agents(f), "opening --agents created a session"
         # It asks for presses and drags, never bare pointer motion, which some terminals send every pixel of.
         assert b"\x1b[?1002h" in t.output and b"\x1b[?1003h" not in t.output, t.output[:400]
         # > widens the list by four columns, and the home keeps the width for the next start.
-        edge = lambda t: t.screen.display[0].index("┐") + 1
+        edge = lambda t: t.screen.display[0].find("╮") + 1
         t.until(lambda t: edge(t) == 40)  # a third of the screen, once it has slid in
         wide = 44
         t.send("\x1b[D>")
@@ -153,7 +176,7 @@ with flow(replies, config=local + '[server]\nname="box"\nrealm="work"\n') as f:
             return made
         made = [root("p26", "ROOT_P26"), root("q26", "ROOT_Q26"), root("v26", "ROOT_V26", f.home), root("w26", "ROOT_W26", f.home)]
         # The prefix keys read the list's order, which can trail the cards' ○.
-        settled = lambda t: -1 < (x := t.text()).find("p26") < x.find("IDLE") < min(x.find(f"○ {n}26") for n in "qvw")
+        settled = lambda t: -1 < (x := "\n".join(l[:wide] for l in t.screen.display)).find("p26") < x.find("IDLE") < min(x.find(f" {n}26 ") for n in "qvw")
         t.until(settled)
         conversation = lambda: "\n".join(line[wide:] for line in t.screen.display)
         t.click("○ q26")
@@ -311,9 +334,9 @@ with flow(replies, config=local + '[server]\nname="box"\nrealm="work"\n') as f:
     with Terminal(f, status=True) as t:
         t.until(lambda t: t.screen.title == f.cwd.name)
         t.send("\x1b[D")
-        t.shown("┌─ AGENTS")
+        t.shown("AGENTS ·")
         t.send("\x1bOQ")
-        t.until(lambda t: "┌─ AGENTS" not in t.text())
+        t.until(lambda t: "AGENTS ·" not in t.text())
         t.send("TITLE_ROOT\r")
         t.shown("title-turn-visible")
         # A list nested in a tight item starts its own row, indented under its item's words.
@@ -325,9 +348,9 @@ with flow(replies, config=local + '[server]\nname="box"\nrealm="work"\n') as f:
         t.until(lambda t: t.screen.title == f.cwd.name)
         t.until(lambda t: t.records()[""]["state"] == "idle")
     with Terminal(replace(f, cwd=f.home), "--agents") as t:
-        t.shown("┌─ AGENTS")
+        t.shown("AGENTS ·")
         t.until(lambda t: edge(t) == wide)  # the kept width, read at start
-        t.until(lambda t: any("title-turn-visible" in line[t.screen.display[0].index("┐") + 1:] for line in t.screen.display))
+        t.until(lambda t: any("title-turn-visible" in line[t.screen.display[0].find("╮") + 1:] for line in t.screen.display))
     # Reopened from another folder, a long session still names its own folder.
     (f.cwd / "elsewhere").mkdir()
     long = server.post(f, "/sessions", {"cwd": str(f.cwd / "elsewhere")})["session"]
@@ -574,7 +597,7 @@ with flow(replies) as f:
         server.until(f, fir, lambda es: any(e.get("event") == "ended" for e in es))
 
 # The agents list: settled and stopped children leave; finished children with branch work past
-# the newest three fold into a line under their own parent, each child takes one line, ← and ▸ fold
+# the newest three fold into a line under their own parent, each child takes one line, ← and Space fold
 # a parent, the bar follows the addressed agent, Ctrl-T opens the pane beside it, Esc stops the
 # addressed agent at any width, which stays addressed, and another session's ask takes its digit.
 kids, grand = [f"kid{n}" for n in (1, 3, 4, 5, 6)], [f"g{n}" for n in range(4)]
@@ -598,20 +621,19 @@ with flow(replies, config='[ui.keys.goto]\nsearch = ["s"]\n[ui.keys.prefix]\n"at
     with Terminal(f, "--resume", other, columns=160) as t:
         t.send("\x1bOQ")
         kid = lambda t: [line[:52] for line in t.screen.display if re.search(r" kid\d ", line[:52])]
-        kids = lambda t: len(kid(t)) == 3 and all("✓ done" in line for line in kid(t)) and "kid1" not in t.text()
+        kids = lambda t: len(kid(t)) == 3 and all("waiting for merge" in line for line in kid(t)) and "kid1" not in t.text()
         # Slid fully open; kid1's stopped child leaves the list too.
-        t.until(lambda t: "▸ 2 " in t.text() and t.screen.display[0][52] == "┐" and kids(t) and "▸ Earlier" not in t.text() and "1 agent" in t.text())
-        assert t.screen.display[0].startswith("┌─ AGENTS") and t.screen.display[-1].startswith("└"), t.text()
-        t.click("▸ 2 ")
-        t.until(lambda t: len(kid(t)) == 5 and "▸ 1 finished" in t.text())
+        t.until(lambda t: "✓ 2 done" in t.text() and t.screen.display[0][52] == "╮" and kids(t) and "EARLIER" not in t.text() and "1 AGENT" in t.text())
+        assert t.screen.display[0].startswith("╭─ RAZOR") and " move " in t.screen.display[-1][:52], t.text()
+        t.click("✓ 2 done")
+        t.until(lambda t: len(kid(t)) == 5)
         y = next(y for y, line in enumerate(t.screen.display) if " cwd " in line[:52])
         t.send(f"\x1b[<0;6;{y + 1}M\x1b[<0;6;{y + 1}m")
         t.shown("Enter queues it · Esc stops it", "kids-headline", "cwd · main")
-        assert t.screen.buffer[y][1].data == "▌" and t.screen.buffer[y][30].bg == "123440", "the addressed row is unmarked"
+        assert t.screen.buffer[y][2].data == "▌" and t.screen.buffer[y][30].bg == "3fd9f2", "the addressed row is unmarked"
         t.send("`h ")  # the prefix and h give the list the keys; Left now opens the overview
         t.until(lambda t: not kid(t))
-        x = t.screen.display[y].index("▸") + 1  # the folded parent's own mark, not the header's
-        t.send(f"\x1b[<0;{x};{y + 1}M\x1b[<0;{x};{y + 1}m")
+        t.send(" ")  # Space unfolds it again
         t.until(lambda t: len(kid(t)) == 5)
         t.send("\x14")
         t.shown(" STATUS ")
@@ -620,7 +642,7 @@ with flow(replies, config='[ui.keys.goto]\nsearch = ["s"]\n[ui.keys.prefix]\n"at
         t.send("\x1b")
         server.until(f, root, lambda es: es[-1].get("end") == "done" and any(e.get("end") == "stopped" for e in es))  # kid2's report wakes it
         t.resize(40, 160)
-        t.until(lambda t: any(line[1] == "▌" and " cwd " in line[:52] for line in t.screen.display))
+        t.until(lambda t: any(line[2] == "▌" and " cwd " in line[:52] for line in t.screen.display))
         server.post(f, f"/sessions/{other}/input", {"text": "ASK26"})
         t.shown("Choose 26")
         t.pump(0.7)  # past the 600 ms a new question refuses digits for

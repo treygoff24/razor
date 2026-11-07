@@ -1,0 +1,9 @@
+# Tools, MCP, plugins and skills
+
+Read `configuration.md` under MCP servers, Script tools, Plugins and The system prompt and skills. For plugin contracts read `design/extensions.md`; for API and scripting use `scripting.md`.
+
+For MCP, `razor mcp list` shows configuration; `razor mcp add <name> --scope global|project|private --config '<JSON>'` adds one. Choose the requested scope: absent `--scope`, edits normally go to the project's private file. `razor mcp remove|enable|disable <name> --scope <scope>` changes it; `razor mcp reconnect|sign-in|sign-out <name>` manages a connection. `razor mcp import <file>` previews only; `/mcp import <file>` in the terminal confirms an import. OAuth can finish with `razor mcp complete '<redirect address>'`. Inspect `/mcp` for connection and tools, and keep secrets out of config and command arguments; use the documented environment or file references.
+
+A script tool is `[tools.<name>]`: its command receives input JSON on stdin and returns its result on stdout. Its input schema is an object; set `read_only` only when true. Plugins can observe or refuse events and add tools; inspect their authority before enabling one.
+
+Skills are folders containing `SKILL.md`; a new personal skill goes at `~/.agents/skills/<name>/SKILL.md`. Lookup order is Razor-home overrides, the pack, project folders, the person's home folders, then configured `skills` folders; the first name wins. The first four appear in new conversations' opening list, up to 100. Use the documented folders and frontmatter; verify discovery in a new conversation. Automatic updates can replace vendor-installed skills or advance a clean checkout: put a tailored copy under a different name. `skill_updates = false` disables future updates and restores shipped pack skills in lookup. With `provider_only`, updates do not run.

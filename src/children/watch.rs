@@ -45,7 +45,7 @@ impl Children {
         let key = crate::profiles::video(&config.children.watcher, &config).and_then(|e| e.key);
         let keyed =
             key.is_some_and(|k| k.is_empty() || std::env::var_os(k).is_some_and(|v| !v.is_empty()));
-        if crate::profiles::video(model, &config).is_some() || !keyed {
+        if crate::profiles::video(model, &config).is_some() || !keyed || config.provider_only {
             return controller.admit(session, input).await;
         }
         let held = self.watching.lock().await;

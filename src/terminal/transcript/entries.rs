@@ -44,10 +44,12 @@ impl Transcript {
         if let Some(marks) = &mut self.marks {
             marks.saw(&entry);
         }
-        // Live entries keep the cursor current without splicing a gap into an older window.
+        // Live entries keep the cursor current without splicing a gap into an older window or
+        // pushing out the history a reader holds; a view reading back as it follows keeps them.
         let last = self.entries.last_key_value().map(|(id, _)| *id);
         let gap = last.is_some_and(|last| last < consumed && entry.id.0 > last.0.saturating_add(1));
-        if gap || self.retain_older && last.is_some_and(|last| entry.id > last) {
+        let held = self.retain_older && self.held.is_some();
+        if gap || held && last.is_some_and(|last| entry.id > last) {
             self.dirty = true;
             return true;
         }
@@ -97,9 +99,9 @@ impl Transcript {
         while self.jobs.len() > ITEMS {
             self.jobs.pop_first();
         }
-        // A held view keeps its mounted first entry as entries append below it.
-        if self.held.is_some() && last.is_none_or(|last| entry.id > last) {
-            self.mounted = (self.mounted() + 1).min(ITEMS);
+        // A held view keeps its mounted first entry as items append below it.
+        if self.held.is_some() && last.is_none_or(|last| entry.id > last) && item(&entry) {
+            self.mounted = (self.mounted.max(MOUNT) + 1).min(ITEMS);
         }
         if !words.is_empty() {
             self.unsaved.insert(entry.id, words);
@@ -131,12 +133,18 @@ impl Transcript {
         })
     }
 
-    /// Drops the entry farthest from the window being read.
+    /// Drops the entry farthest from the window being read. A call's or meeting's lines go first,
+    /// though never the newest entry: nothing here reads them, and only they arrive in runs long
+    /// enough to push out what is drawn.
     pub(in crate::terminal) fn evict(&mut self) {
-        let old = match self.retain_older {
-            true => self.entries.pop_last(),
-            false => self.entries.pop_first(),
+        let (first, last) = (self.first(), self.entries.keys().next_back().copied());
+        let mut lines = (self.entries.range(..last.unwrap_or_default()))
+            .filter_map(|(id, e)| matches!(e.body, Body::VoiceCall { .. }).then_some(*id));
+        let id = match self.retain_older {
+            true => lines.next_back().or(last),
+            false => lines.next().or(first),
         };
+        let old = id.and_then(|id| self.entries.remove_entry(&id));
         let Some((id, old)) = old else { return };
         self.sizes.remove(&id);
         self.unsaved.remove(&id);

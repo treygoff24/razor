@@ -9,6 +9,7 @@ import asyncio
 import base64
 import json
 import threading
+import time
 import uuid
 
 from websockets.asyncio.server import serve as listen
@@ -83,6 +84,9 @@ def serve(script=None, capture=None, *, port=0, refuse=None):
                     await asyncio.sleep(pace)
                 usage[0] = event.get("usage", usage[0])
                 if event:
+                    if capture:
+                        with (capture / "events.jsonl").open("a") as events:
+                            events.write(json.dumps({**event, "_at": time.monotonic()}) + "\n")
                     await ws.send(json.dumps(event))
 
         player = None
@@ -93,7 +97,7 @@ def serve(script=None, capture=None, *, port=0, refuse=None):
                 if "audio" in command:
                     command["audio"] = len(base64.b64decode(command["audio"]))
                 with (capture / "commands.jsonl").open("a") as commands:
-                    commands.write(json.dumps(command) + "\n")
+                    commands.write(json.dumps({**command, "_at": time.monotonic()}) + "\n")
             async with arrived:
                 seen[kind] = seen.get(kind, 0) + 1
                 arrived.notify_all()
@@ -136,7 +140,7 @@ def serve(script=None, capture=None, *, port=0, refuse=None):
         thread.join(10)
 
 
-async def phone(f, session, act=None, *, streaming=False):
+async def phone(f, session, act=None, *, streaming=False, timeout=60):
     """The phone's half of a call, through the real API; retain frames through socket close.
     `act` can react to each frame; `streaming` sends PCM until Razor closes the socket."""
     home = f.home / ".razor"
@@ -151,7 +155,7 @@ async def phone(f, session, act=None, *, streaming=False):
                 await asyncio.sleep(.02)
         sending = asyncio.create_task(stream()) if streaming else None
         try:
-            async with asyncio.timeout(60):
+            async with asyncio.timeout(timeout):
                 async for raw in ws:
                     event = {"audio": raw} if isinstance(raw, bytes) else json.loads(raw)
                     seen.append(event)

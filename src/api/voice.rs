@@ -190,7 +190,7 @@ pub(super) async fn ask(app: &App, reserve: Option<Reserve>) -> Result<Granted, 
 }
 pub(super) async fn voices(State(app): State<App>) -> Reply {
     owner(&app).await?;
-    let mut command = speech::program(&app.controller.config().await.speech)?;
+    let mut command = speech::program(&app, false).await?;
     command.arg("--voices");
     let bytes = speech::run(
         command,

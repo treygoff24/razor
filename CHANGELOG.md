@@ -2,6 +2,36 @@
 
 What changed in each Razor release. [Configuration](docs/configuration.md) and the other pages in [docs](docs/README.md) describe each feature in full.
 
+## 0.2.1 (6 November 2026)
+
+### New
+
+- Models behind any API key. A `[providers.<name>]` table says where a provider's models are reached (`format`, `base_url`, `key`, `models`), and its models are named `<name>/<id>`. Keys go in `~/.razor/keys.toml`, which only you can read, and agents' shells never see them. `razor setup` offers an API key beside the Claude and ChatGPT sign-ins, so a fresh install no longer needs a subscription, and `razor doctor` sends your default model one short test request ([Providers](docs/configuration.md#providers)).
+- `provider_only = true` keeps Razor itself to the providers you named: no sign-ins, pairing, automatic updates, Razor's own web and voice services, or MCP servers a project's files bring. MCP servers you add yourself stay, and so does `razor update` when you type it ([Security](docs/security.md#contacting-only-your-model-provider)).
+- A top-level agent can start a new top-level session for you, on this machine or on a paired server, with the model and effort it chooses.
+- Image generation is on by default with a ChatGPT sign-in, and agents on other models are told to hand image work to a GPT helper. `[profiles.codex] image_gen = false` turns it off.
+- The `razor` starter skill, replacing `razor-settings`: agents use it to change Razor's settings for you, add API keys and providers, add MCP servers, tools and skills, pair machines and phones, and diagnose and fix Razor itself.
+- A new agents overview: agents that need you come first, each working agent gets a tile showing what it is doing now, and helpers sit under their parent. The agents list beside the transcript is redrawn to match.
+- Scripts and apps can follow a session's events with `follow=true` without counting as you looking at it, so a dashboard watching every agent does not silence finished-turn notifications ([Scripting](docs/scripting.md)).
+
+### Changed
+
+- **Moving from 0.2.0 with your own model rows or an OpenAI key file.** A `[models."…"]` row no longer holds `base_url`, `key` or `id`: put them in a `[providers.<name>]` table as `base_url`, `key` and `models`, and name the model `<name>/<id>`. `~/.razor/key` is no longer read: put that key in `~/.razor/keys.toml` as `OPENAI_API_KEY = "…"` (`chmod 600` the file) and use the model `openai/<id>`. A settings file with an old row is refused and the server will not start until you move it; the refusal and `razor doctor` say what to change. Run `razor doctor` after updating.
+- Background commands and `monitor` jobs no longer stop after 30 minutes or two hours: they run until they finish or are stopped, unless the agent sets a timeout. A foreground command that outlives its wait keeps running in the background.
+- Catch-up summaries are written by the session's own model, through its own sign-in or provider, instead of always through Claude.
+- Live calls are quieter. The voice speaks at a relaxed pace and passes on news that matters rather than every step. When the line goes quiet it says the agent is still working after a minute, not after 7 seconds, and an idle call ends after 15 minutes instead of 3.
+- In the agents list, Space folds and unfolds a parent's helpers; the clickable fold mark is gone.
+- Agents operate desktop apps with Cua Driver instead of agent-desktop. Razor ships Cua Driver 0.40.6 and runs its background program for agents on a Mac where Razor has Accessibility, or on Linux when the server has a display; it stops with the server. Razor turns off Cua Driver's usage reporting and update check. Cua Driver tries to work without taking over your screen but does not always manage it, so agents are told to say so before a desktop task. On a Mac, Cua Driver keeps the display awake until ten minutes after an agent's last desktop call, because it cannot work while the Mac is locked. The starter skill `cua-driver` replaces `agent-desktop`, and `razor doctor`'s Desktop line says whether the background program answers ([Browser, voice and search](docs/browser-voice-search.md#desktop-apps)).
+- Every release ships the latest stable agent-browser and the newest Cua Driver release published before it, though every Cua Driver release is marked a prerelease; this one has agent-browser 0.41.2 and Cua Driver 0.40.6.
+- A server waiting for the answer to its own question no longer counts as you looking at the session.
+
+### Fixed
+
+- A session with a long call or meeting recording no longer shows a blank transcript with only "earlier items" until you scroll up, and a followed transcript keeps drawing new replies past the meeting's lines.
+- Dragging the agents list's edge works again where a row used to cover it.
+- Attached images no longer show their file path in brackets in your view of the conversation.
+- The new-agent chooser finds every project and names it by its folder.
+
 ## 0.2.0 (6 November 2026)
 
 ### New

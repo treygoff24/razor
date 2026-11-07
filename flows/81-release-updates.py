@@ -213,6 +213,8 @@ with flow([], model='gpt-6.1-sol') as f, releases(f) as (publish, requests):
         publish('0.1.0')
         older = run(f, command, 'update')
         assert older.returncode == 0 and (root / 'current').readlink() == Path('0.2.0'), older
+        # The person's own update runs under provider_only, which stops only Razor's own reach.
+        (f.home / '.razor/config.toml').write_text('release_updates = false\nprovider_only = true\nmodel = "p81/m"\n[providers.p81]\nbase_url = "http://127.0.0.1:9"\nmodels = ["m"]\n')
         # Installer reruns select a cached newer folder without a second archive request.
         (root / 'current').unlink()
         (root / 'current').symlink_to('0.1.0')

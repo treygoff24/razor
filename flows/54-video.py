@@ -36,10 +36,9 @@ def files(url, name, state, match, **extra):
 
 
 replies = []
-config = (f'{PLAIN}[models."{GEMINI}"]\nbase_url = "{{standin}}/v1beta/openai"\n'
-          '[models.gemini-two]\nbase_url = "{standin}/v1beta/openai"\nid = "gemini-3.8-flash"\n'
+config = (f'{PLAIN}[providers.google]\nbase_url = "{{standin}}/v1beta/openai"\n'
           # A parent whose every request goes to a closed port, so it sends the stand-in nothing.
-          '[models.mute]\nbase_url = "http://127.0.0.1:9/v1"\nkey = "GEMINI_API_KEY"\n')
+          '[providers.mute]\nbase_url = "http://127.0.0.1:9/v1"\nkey = "GEMINI_API_KEY"\n')
 with flow(replies, model="sol", config=config, env={"GEMINI_API_KEY": "flow-gemini-key"}) as f:
     url = f.env["ANTHROPIC_BASE_URL"]
     server.start(f)
@@ -161,7 +160,7 @@ with flow(replies, model="sol", config=config, env={"GEMINI_API_KEY": "flow-gemi
         server.post(f, f"/sessions/{watcher}/input", {"text": f"Question {n}?"})
         turns(watcher, n + 1)
     replies += [files(url, "two", "ACTIVE", "flow video two"), chat("On the other model", "Still see it.")]
-    server.post(f, f"/sessions/{watcher}/input", {"text": "On the other model now.", "model": "gemini-two"})
+    server.post(f, f"/sessions/{watcher}/input", {"text": "On the other model now.", "model": "google/gemini-3.8-flash"})
     entries = turns(watcher, 6)
     assert [e["trigger"] for e in entries if e["kind"] == "rebuild"] == ["change"], entries
     rebuilt = [b for b, _ in spooled("gemini") if "On the other model" in json.dumps(b)][0]["messages"][-1]
@@ -185,7 +184,7 @@ with flow(replies, model="sol", config=config, env={"GEMINI_API_KEY": "flow-gemi
     # 6. Two different videos at once take two names, and neither start fails.
     replies += [files(url, "p1", "ACTIVE", "flow video p1"), files(url, "p2", "ACTIVE", "flow video p2"),
                 chat("pair one", "Seen one."), chat("pair two", "Seen two.")]
-    mute = server.post(f, "/sessions", {"cwd": str(f.cwd), "model": "mute"})["session"]
+    mute = server.post(f, "/sessions", {"cwd": str(f.cwd), "model": "mute/mute"})["session"]
     sends = [{"text": f"pair {w}", "video": {"file": upload(mute, b"flow video " + v), "duration_ms": 1000}}
              for w, v in (("one", b"p1"), ("two", b"p2"))]
     threads = [threading.Thread(target=server.post, args=(f, f"/sessions/{mute}/input", s)) for s in sends]

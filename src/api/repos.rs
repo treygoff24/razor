@@ -5,7 +5,7 @@ use axum::extract::{Json, Query, State};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -70,18 +70,17 @@ fn scan(known: BTreeMap<PathBuf, SystemTime>, under: Option<PathBuf>) -> Result<
         *parents.entry(path.to_owned()).or_default() += 1;
     }
     let most = parents.into_iter().max_by_key(|(_, n)| *n).map(|(p, _)| p);
-    // Only a named folder that cannot be read refuses; an unreadable inferred one is skipped.
-    let named = under.is_some();
-    let mut queue: Vec<_> = most.into_iter().map(|p| (p, 0, 2, false)).collect();
+    // Nearest folders first, so a home's deep corners never crowd out its projects; once the
+    // budget is spent, folders already queued are still checked, just not opened further. Only a
+    // named folder that cannot be read refuses; an unreadable inferred one is skipped.
+    let mut queue: VecDeque<_> = under.map(|p| (p, 0, 2, true)).into_iter().collect();
+    queue.extend(most.map(|p| (p, 0, 2, false)));
     if let Some(home) = std::env::var_os("HOME") {
-        queue.push((PathBuf::from(home), 0, 3, false));
-    }
-    if let Some(under) = under {
-        queue.push((under, 0, 2, named));
+        queue.push_back((PathBuf::from(home), 0, 3, false));
     }
     let (mut examined, mut truncated) = (0, false);
     let mut seen = BTreeMap::new();
-    'folders: while let Some((path, depth, limit, named)) = queue.pop() {
+    while let Some((path, depth, limit, named)) = queue.pop_front() {
         if !visible(&path) {
             continue;
         }
@@ -93,6 +92,14 @@ fn scan(known: BTreeMap<PathBuf, SystemTime>, under: Option<PathBuf>) -> Result<
             continue;
         }
         seen.insert(path.clone(), remaining);
+        if std::fs::symlink_metadata(path.join(".git")).is_ok() {
+            repos
+                .entry(path.clone())
+                .or_insert_with(|| row(&path, None));
+        }
+        if depth >= limit || examined == EXAMINED {
+            continue;
+        }
         let entries = match std::fs::read_dir(&path) {
             Ok(entries) => entries,
             Err(e) if depth == 0 && named => {
@@ -103,22 +110,14 @@ fn scan(known: BTreeMap<PathBuf, SystemTime>, under: Option<PathBuf>) -> Result<
             }
             Err(_) => continue,
         };
-        if std::fs::symlink_metadata(path.join(".git")).is_ok() {
-            repos
-                .entry(path.clone())
-                .or_insert_with(|| row(&path, None));
-        }
-        if depth >= limit {
-            continue;
-        }
         for entry in entries.flatten() {
             if examined == EXAMINED {
                 truncated = true;
-                break 'folders;
+                break;
             }
             examined += 1;
             if visible(&entry.path()) && entry.file_type().is_ok_and(|t| t.is_dir()) {
-                queue.push((entry.path(), depth + 1, limit, false));
+                queue.push_back((entry.path(), depth + 1, limit, false));
             }
         }
     }
@@ -127,22 +126,24 @@ fn scan(known: BTreeMap<PathBuf, SystemTime>, under: Option<PathBuf>) -> Result<
     Ok(json!({"repos": repos, "truncated": truncated}))
 }
 
+/// Not hidden, not a tool's folder, and not the scratch folder itself, which is no project.
 fn visible(path: &std::path::Path) -> bool {
-    path.components().all(|part| {
-        let name = part.as_os_str().to_string_lossy();
-        !name.starts_with('.')
-            && !matches!(
-                name.as_ref(),
-                "node_modules"
-                    | "venv"
-                    | "__pycache__"
-                    | "pyenv"
-                    | "nodenv"
-                    | "nvm"
-                    | "plenv"
-                    | "rbenv"
-                    | "asdf"
-                    | "mise"
-            )
-    })
+    !matches!(path.to_str(), Some("/tmp" | "/private/tmp"))
+        && path.components().all(|part| {
+            let name = part.as_os_str().to_string_lossy();
+            !name.starts_with('.')
+                && !matches!(
+                    name.as_ref(),
+                    "node_modules"
+                        | "venv"
+                        | "__pycache__"
+                        | "pyenv"
+                        | "nodenv"
+                        | "nvm"
+                        | "plenv"
+                        | "rbenv"
+                        | "asdf"
+                        | "mise"
+                )
+        })
 }

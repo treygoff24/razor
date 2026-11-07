@@ -45,7 +45,7 @@ case that proceeds.
 
 ## Credit-rules module
 
-A helper started with the `agent` tool sees only its brief, so append this to any brief that writes code, tests, or gates:
+A helper started with the `agent` tool receives its startup files and brief, but not your conversation. Append this to any brief that writes code, tests, or gates:
 
 ```text
 CREDIT RULES (binding):

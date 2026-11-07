@@ -35,11 +35,8 @@ pub(super) fn input(name: &str, value: &Value) -> Option<Result<(String, Value),
         "Bash" | "bash" => {
             let timeout = value["timeout"].as_u64();
             let (wait, deadline) = match value["run_in_background"] == true {
-                true => (0, timeout.unwrap_or(1_800_000).min(7_200_000)),
-                false => {
-                    let wait = timeout.unwrap_or(120_000).min(600_000);
-                    (wait, wait + 1_800_000)
-                }
+                true => (0, timeout),
+                false => (timeout.unwrap_or(120_000).min(600_000), None),
             };
             let mapped = json!({"command": value["command"], "wait_ms": wait, "pty": false, "deadline_ms": deadline});
             Ok(("bash".into(), mapped))
@@ -48,10 +45,7 @@ pub(super) fn input(name: &str, value: &Value) -> Option<Result<(String, Value),
             if !value["command"].is_string() {
                 return Some(Err(Error::Invalid("monitor needs a shell command.".into())));
             }
-            let deadline = value["timeout_ms"]
-                .as_u64()
-                .unwrap_or(300_000)
-                .clamp(1, 1_800_000);
+            let deadline = value["timeout_ms"].as_u64();
             Ok((
                 "bash".into(),
                 json!({"command": value["command"], "wait_ms": 0, "deadline_ms": deadline}),

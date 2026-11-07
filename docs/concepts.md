@@ -118,7 +118,7 @@ More tools appear as you set them up:
 
 - `search`, `fetch` and `answer` for the web, while a provider key is set ([Browser, voice and search](browser-voice-search.md#web-search-page-reading-and-answers));
 - a real browser, through the `agent-browser` command in the shell ([Browser, voice and search](browser-voice-search.md#the-browser));
-- desktop apps, through the `agent-desktop` command, on a machine with a desktop that allows it ([Browser, voice and search](browser-voice-search.md#desktop-apps));
+- desktop apps, through the `cua-driver` command, on a machine with a desktop that allows it ([Browser, voice and search](browser-voice-search.md#desktop-apps));
 - MCP servers' tools; when a server has many, agents find them with `mcp_search` instead of seeing them all at the start ([Configuration](configuration.md#mcp-servers));
 - your own scripts as tools, and tools that JavaScript plugins add ([Configuration](configuration.md#script-tools)).
 
@@ -152,13 +152,14 @@ The words you meet in Razor's screens, settings and these pages. Words used only
 - **pack**: a folder of default settings, prompt files and skills that sits beneath your own settings; Razor ships one, the starter pack, which a new install uses.
 - **pair**: to connect two machines' Razor servers, each holding a key for the other, so each shows and reaches the other's sessions (`razor devices add --address`).
 - **plugin**: a program or JavaScript file named in the settings that sees **events** (a prompt, an input, a tool call, a rebuild) and may observe, change or refuse them. A **hook** is a plugin written as a program.
+- **provider**: where a group of models is reached on an API key: the API it speaks, its address and the variable holding its key, kept in `keys.toml`; a session names its models `<provider>/<id>` ([Models and sign-in](models.md#providers)).
 - **rebuild**: making a fresh context from the record (your latest requests word for word, the continuation note, what happened since) when the context fills, on `/handover`, after a restart, or at a resident's night.
 - **record**: a session's append-only log on disk. Each **entry** in it has an id and can be recalled whole.
 - **resident**: an agent that runs as part of the server, called an always-on agent in these pages, with a persona, memory, a schedule and an identity record; it has a home session and threads.
 - **resident project**: a folder in a resident's `projects` folder, shown by the name in its `.razor/name`; threads can start in one, and renaming it never moves the folder.
 - **run**: one heartbeat, schedule or night of a resident, followed until the turn that answers it ends.
 - **service**: the background program `razor install` registers with systemd or launchd: the same server `razor serve` runs, started when you log in.
-- **session**: one conversation with one model, with its own record; it has an id and can be reopened. A **top-level** session is one a person started, not a child.
+- **session**: one conversation with one model, with its own record; it has an id and can be reopened. A **top-level** session is one a person started, or one started for the person by a top-level agent; it is not a child.
 - **settle**: the parent's decision on a finished child's work: merge it, discard it, or record that it was merged by hand.
 - **skill**: a folder of written instructions, a `SKILL.md` and anything beside it, that an agent loads by name.
 - **state**: one of four per agent: needs you, working, done, stuck.

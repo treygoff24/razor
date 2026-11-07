@@ -112,7 +112,7 @@ impl Session {
             None => (None, None),
         };
         if !success
-            && profiles::model(&self.model).transport == Transport::Claude
+            && self.profile.endpoint.transport == Transport::Claude
             && reason.as_deref() == Some("authentication_failed")
         {
             self.conversation = None;

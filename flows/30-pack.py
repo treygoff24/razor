@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory() as scratch:
         assert output["outcome"] == "success" and body in output["output"], output
         first = next(r.read_text() for r in sorted(f.requests.glob("*.body")) if ask in r.read_text())
         assert "- greet: Greets the flow in one line." in first, "the pack's skill was not listed"
-        assert "- razor-settings:" not in first, "the named pack kept the starter skills"
+        assert "- razor:" not in first, "the named pack kept the starter skills"
         assert "- plan: Plans the flow." in first, "the project's skill was not listed"
         assert "- notes: Keeps notes." in first and "Plans at home" not in first, "the home skills were not listed after the project's"
         assert "\\n- lore" not in first and "Tells old stories" not in first, "the opening listed a library skill"
@@ -239,11 +239,11 @@ with flow([], config='[mcp.gh]\ncommand="echo"\n[mcp.gh.env]\nGITHUB_TOKEN="fixt
     pack.mkdir()
     (pack / "plain.json").write_text('{}')
     (target.parent / "plain.json").write_text('{}')
-    (pack / "config.toml").write_text('[models.custom]\nbase_url="http://127.0.0.1:1"\nvariant="plain.json"\n')
+    (pack / "config.toml").write_text('[providers.custom]\nbase_url="http://127.0.0.1:1"\n[models."custom/custom"]\nvariant="plain.json"\n')
     target.write_text(f'pack={json.dumps(str(pack))}\n')
-    result = f.run("config", "set", "models.custom.window", "12345")
+    result = f.run("config", "set", 'models."custom/custom".window', "12345")
     check("variant retains file spelling", result.returncode == 0 and
-          tomllib.loads(person.read_text())["models"]["custom"]["variant"] == "plain.json")
+          tomllib.loads(person.read_text())["models"]["custom/custom"]["variant"] == "plain.json")
     if not person.is_symlink():
         person.unlink()
         person.symlink_to(target)

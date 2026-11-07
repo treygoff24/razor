@@ -104,11 +104,9 @@ pub(crate) struct Conversation {
 
 /// A chat profile's settings for its conversation.
 fn chat(profile: &Profile) -> Option<(Replay, Effort, Map<String, Value>)> {
-    let Transport::Chat(row) = profile.transport else {
-        return None;
-    };
     let endpoint = &profile.endpoint;
-    Some((endpoint.replay, row.top, endpoint.request.clone()))
+    (endpoint.transport == Transport::Chat)
+        .then(|| (endpoint.replay, endpoint.top, endpoint.request.clone()))
 }
 
 /// A declaration's name in either wire's shape.
@@ -436,7 +434,7 @@ impl Conversation {
         // The envelope is a nonempty object; its items are written after its last field.
         body.pop();
         let tier = match (speed, &self.chat) {
-            (Speed::Fast, None) => Some(if profile.endpoint.public() {
+            (Speed::Fast, None) => Some(if profile.endpoint.key.is_some() {
                 "fast"
             } else {
                 "priority"
@@ -564,7 +562,7 @@ impl Conversation {
         }
         let body = Body {
             model,
-            tools: (!self.lite).then_some(&self.prefix["tools"]),
+            tools: Some(&self.prefix["tools"]).filter(|t| !self.lite && t != &&json!([])),
             tool_choice: "auto",
             parallel_tool_calls: !self.lite,
             reasoning,
@@ -587,6 +585,7 @@ impl Conversation {
         #[derive(Serialize)]
         struct Body<'a> {
             model: &'a str,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
             tools: Vec<&'a Value>,
             reasoning_effort: Effort,
             stream: bool,

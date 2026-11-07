@@ -116,6 +116,7 @@ class Conversation {
   usagePending = false;
   usageFile: string | null;
   account: string | null;
+  key: string; // A provider's key, which its errors may quote back; never sent on in them.
 
   constructor(options: Open) {
     const { session, open, cwd, model, effort, resume, prompt, tools } = options;
@@ -124,6 +125,7 @@ class Conversation {
     this.open = open;
     this.usageFile = options.usage_file;
     this.account = options.account;
+    this.key = options.env?.ANTHROPIC_API_KEY ?? '';
     this.additions = options.additions.filter((t): t is Tool => !isBuiltin(t));
     const builtins = tools.filter(isBuiltin);
     const server = createSdkMcpServer({ name: 'razor' });
@@ -222,8 +224,9 @@ class Conversation {
   }
   enqueue(step: () => Promise<unknown>) {
     this.queue = this.queue.then(() => this.closed ? undefined : step())
-      .catch((e) => console.error(`razor bridge: session ${this.session}: ${e instanceof Error ? e.message : e}`));
+      .catch((e) => console.error(`razor bridge: session ${this.session}: ${this.bare(e instanceof Error ? e.message : String(e))}`));
   }
+  bare(text: string) { return this.key ? text.replaceAll(this.key, '[key removed]') : text; }
   async add(tools: Tool[]) {
     if (tools.every((tool) => JSON.stringify(this.served.get(tool.name)) === JSON.stringify({ ...tool, _meta: { ...tool._meta, 'anthropic/alwaysLoad': true } }))) return;
     this.serve(tools);
@@ -279,7 +282,7 @@ class Conversation {
     } catch (e) { error = e instanceof Error ? e.message : String(e); }
     if (!this.closed) {
       this.close();
-      await this.send({ type: 'closed', error: error ?? null }, true);
+      await this.send({ type: 'closed', error: error === undefined ? null : this.bare(error) }, true);
     }
   }
   measure(name: string, utilization: unknown, reset: unknown, status?: string, reason?: string) {
@@ -393,7 +396,7 @@ class Conversation {
         // turn: the conversation closed, which the controller rebuilds when it was resumed.
         if (!this.announced) {
           this.close();
-          return this.send({ type: 'closed', error: m.subtype === 'success' ? null : m.errors.join(' ') }, true);
+          return this.send({ type: 'closed', error: m.subtype === 'success' ? null : this.bare(m.errors.join(' ')) }, true);
         }
         void this.usage();
         const u = m.usage, c = this.carried;
@@ -416,7 +419,7 @@ class Conversation {
         // Escape after the batch yielded finds the CLI's turn ended cleanly: it is still stopped.
         const sent = this.send({ type: 'turn_end', success: m.subtype === 'success' && !m.is_error && !yielded, reason: yielded ? 'stopped' : m.subtype === 'success' && m.is_error && (m.api_error_status === 401 || m.api_error_status === 403) ? 'authentication_failed' : m.terminal_reason ?? null,
           // The CLI's advice for a missing sign-in names its own /login, which Razor does not have.
-          message: (m.subtype === 'success' ? m.result : m.errors.join(' ')).replace(/Not logged in[^\n]*\/login/, 'Claude is not signed in; run razor setup'), usage,
+          message: (m.subtype !== 'success' ? this.bare(m.errors.join(' ')) : m.is_error ? this.bare(m.result) : m.result).replace(/Not logged in[^\n]*\/login/, 'Claude is not signed in; run razor setup'), usage,
           window: Math.max(0, ...Object.values(m.modelUsage).map((usage) => usage.contextWindow)), took: this.started });
         this.took = null;
         // What arrived too late for a batch opens the CLI's next turn, as the controller expects,

@@ -40,7 +40,7 @@ Create it only when every answer is concrete. The person's explicit request sati
 
 [./references/reward-hacking-catalog.md](./references/reward-hacking-catalog.md) lists the known ways agents fake progress or pile on process: weakening the check that judges their own work, passing off a mock as live proof, building process to police process, and others. Its codes (RH-1, SM-10, PL-1, and so on) are shorthand for agent-to-agent reviews and notes. In a reply to the person, describe the problem in plain words.
 
-A helper sees only its brief, so it does not inherit this skill. For a brief that asks for code, tests or gates, add the credit rules and the acceptance shape in [./references/enforcement.md](./references/enforcement.md). Re-execute cited commands at the current revision and inspect test and gate diffs; a report is a claim, not evidence.
+A helper receives its startup files and brief, not this skill unless included. For a brief that asks for code, tests or gates, add the credit rules and the acceptance shape in [./references/enforcement.md](./references/enforcement.md). Re-execute cited commands at the current revision and inspect test and gate diffs; a report is a claim, not evidence.
 
 To audit a window of work, or when a pass feels too easy, follow [./references/audit-mode.md](./references/audit-mode.md).
 

@@ -215,7 +215,7 @@ from claude import reply as claude_reply
 from responses import call, response
 for model, mode in (("opus", ""), ("sol", PLAIN), ("sol", ""), ("gemini-3.8-flash", "chat")):
     if mode == "chat":
-        mode = '[models."gemini-3.8-flash"]\nbase_url="{standin}"\n'
+        mode = '[providers.google]\nbase_url="{standin}"\n'
         def chat(delta, finish):
             frames = [{"choices": [{"index": 0, "delta": delta}]},
                       {"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]}]

@@ -10,34 +10,72 @@ use std::borrow::Cow;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-pub(super) const GLASS: Color = rgb(0x05080b);
-pub(super) const BEZEL: Color = rgb(0x1d2227);
-pub(super) const BEZEL_HI: Color = rgb(0x2b3238);
-pub(super) const RECESS: Color = rgb(0x0b1015);
-pub(super) const DATA: Color = rgb(0xdfe6ea);
-pub(super) const WHITE: Color = rgb(0xeef2f4);
-pub(super) const GRAY: Color = rgb(0x7d8993);
-pub(super) const GRAY_DIM: Color = rgb(0x434d56);
-pub(super) const CYAN: Color = rgb(0x3fd9f2);
-pub(super) const GREEN: Color = rgb(0x3ee56d);
-pub(super) const MAGENTA: Color = rgb(0xff5bdc);
-pub(super) const AMBER: Color = rgb(0xffb319);
-pub(super) const RED: Color = rgb(0xff3d32);
-pub(super) const VIOLET: Color = rgb(0xcd8bff);
-pub(super) const AGENT_BG: Color = rgb(0x1a1130);
-pub(super) const YOU_BG: Color = rgb(0x123440);
-pub(super) const CYAN_BG: Color = rgb(0x05202a);
-pub(super) const RED_BG: Color = rgb(0x2a0b09);
-pub(super) const AMBER_BG: Color = rgb(0x2a1e05);
-pub(super) const CHIP: Color = rgb(0x1d4a58);
-/// Lamplight: the one colour skills own.
-pub(super) const LAMP: Color = rgb(0xecd48c);
-pub(super) const BUTTON: Color = rgb(0x0c3a48);
-pub(super) const STRIP: Color = rgb(0x16202a);
-pub(super) const VIOLET_DIM: Color = rgb(0x704d9a);
-/// The agent's violet lit toward white: a live thought's spinner and newest letters.
-pub(super) const VIOLET_HI: Color = rgb(0xe6b9ff);
-pub(super) const ADDED_BG: Color = rgb(0x07240f);
+/// Declares each theme colour's constant with the name `[brand] colours` and DESIGN.md give it,
+/// and `THEME`, every name with its colour: the one source of the terminal's colours. Anything
+/// else drawn is a blend of these (`mix`).
+macro_rules! theme {
+    ($($colour:ident $name:literal $hex:literal,)*) => {
+        $(pub(super) const $colour: Color = rgb($hex);)*
+        pub(super) const THEME: &[(&str, Color)] = &[$(($name, $colour)),*];
+    };
+}
+theme! {
+    GLASS "glass" 0x05080b,
+    BEZEL "bezel" 0x1d2227,
+    BEZEL_HI "bezelHi" 0x2b3238,
+    RECESS "recess" 0x0b1015,
+    STRIP "strip" 0x16202a,
+    DATA "data" 0xdfe6ea,
+    WHITE "white" 0xeef2f4,
+    GRAY "gray" 0x7d8993,
+    GRAY_DIM "grayDim" 0x434d56,
+    CYAN "cyan" 0x3fd9f2,
+    GREEN "green" 0x3ee56d,
+    MAGENTA "magenta" 0xff5bdc,
+    AMBER "amber" 0xffb319,
+    RED "red" 0xff3d32,
+    VIOLET "violet" 0xcd8bff,
+    VIOLET_DIM "violetDim" 0x704d9a,
+    // The agent's violet lit toward white: a live thought's spinner and newest letters.
+    VIOLET_HI "violetHi" 0xe6b9ff,
+    // Lamplight: the one colour skills own.
+    LAMP "lamp" 0xecd48c,
+    AGENT_BG "agentBg" 0x1a1130,
+    YOU_BG "youBg" 0x123440,
+    CYAN_BG "cyanBg" 0x05202a,
+    RED_BG "redBg" 0x2a0b09,
+    AMBER_BG "amberBg" 0x2a1e05,
+    ADDED_BG "addedBg" 0x07240f,
+    CHIP "chip" 0x1d4a58,
+    BUTTON "button" 0x0c3a48,
+    // The eight colours a person can give a saved group.
+    SLATE "group-slate" 0x828f9c,
+    STEEL "group-steel" 0x7194a1,
+    INDIGO "group-indigo" 0x8487b3,
+    PLUM "group-plum" 0xa384a6,
+    ROSE "group-rose" 0xb4858f,
+    CLAY "group-clay" 0xb58f75,
+    SAND "group-sand" 0xb0a478,
+    MOSS "group-moss" 0x88a07c,
+    // Each group colour as the instrument panel draws its frame, tabs and bars.
+    PANEL_SLATE "panel-slate" 0x88a4c1,
+    PANEL_STEEL "panel-steel" 0x65b2ce,
+    PANEL_INDIGO "panel-indigo" 0x868dee,
+    PANEL_PLUM "panel-plum" 0xc581cc,
+    PANEL_ROSE "panel-rose" 0xec859b,
+    PANEL_CLAY "panel-clay" 0xd9a37f,
+    PANEL_SAND "panel-sand" 0xd0bf82,
+    PANEL_MOSS "panel-moss" 0x9bbd8b,
+    // The instrument panel of the agents overview and list.
+    PANEL "panel" 0x070916,
+    PANEL_INK "panelInk" 0x2b3366,
+    // Gray light enough to read on every tile and row ground of the panel.
+    PANEL_GRAY "panelGray" 0x9fa8b0,
+    CHIP_INK "chipInk" 0x05060f,
+    CLOCK "clock" 0x5ef0ff,
+    CLOCK_BG "clockBg" 0x112a44,
+    ASK_WORDS "askWords" 0xc9b48a,
+}
 
 pub(super) const fn rgb(n: u32) -> Color {
     Color::Rgb((n >> 16) as u8, (n >> 8) as u8, n as u8)
@@ -99,8 +137,9 @@ pub(super) fn put(b: &mut Buffer, x: u16, y: u16, s: &str, max: u16, style: Styl
 }
 
 pub(super) fn fill(b: &mut Buffer, r: Rect, style: Style) {
-    for y in r.y..r.bottom().min(b.area.bottom()) {
-        for x in r.x..r.right().min(b.area.right()) {
+    let r = r.intersection(b.area);
+    for y in r.y..r.bottom() {
+        for x in r.x..r.right() {
             b[(x, y)].reset();
             b[(x, y)].set_style(style);
         }

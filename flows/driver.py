@@ -121,6 +121,10 @@ def flow(replies: list[Reply], *, model: str = "opus", config: str = "",
     cwd.mkdir()
     name = Path(sys.argv[0]).stem
     previous = signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
+    # The server outlives the CLI that starts it, so a stopper in its own session holds the one
+    # end of a pipe and stops the server unless this flow says it already has: a flow killed
+    # outright, as a stopped job's group is a second after TERM, leaves nothing running.
+    stopper = subprocess.Popen([sys.executable, __file__, home], stdin=subprocess.PIPE, start_new_session=True)
     try:
         with serve(replies, scratch / "requests") as url:
             (home / ".razor/config.toml").write_text(
@@ -134,6 +138,7 @@ def flow(replies: list[Reply], *, model: str = "opus", config: str = "",
                     "PATH": f"{quiet}:{(env or {}).get('PATH', os.environ['PATH'])}"})
             finally:
                 left = _stop(home)
+                stopper.communicate(b"stopped")
             assert not left, f"processes outlived the server: {sorted(left.items())}"
     except Exception as error:
         # The first frame is this generator's; a failure of its own has no other.
@@ -147,3 +152,7 @@ def flow(replies: list[Reply], *, model: str = "opus", config: str = "",
         signal.signal(signal.SIGTERM, previous)
     shutil.rmtree(scratch)
     print(f"PASS {name}", flush=True)
+
+
+if __name__ == "__main__" and not sys.stdin.buffer.read():
+    _stop(Path(sys.argv[1]))

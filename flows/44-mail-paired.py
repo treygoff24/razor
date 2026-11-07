@@ -34,7 +34,7 @@ with flow(replies, config=keys + '[server]\naddress = "127.0.0.1:0"') as f:
     for name in ("config.toml", "auth.json"):
         shutil.copy(f.home / ".razor" / name, other / name)
     config = (other / "config.toml").read_text().replace("[server]", '[server]\nlabel = "far44"')
-    (other / "config.toml").write_text(config + '[models.opv44]\nbase_url = "http://127.0.0.1:1"\n')
+    (other / "config.toml").write_text(config + '[providers.opv44]\nbase_url = "http://127.0.0.1:1"\nmodels = ["opv44"]\n')
     alpha = replace(f, cwd=f.cwd / "alpha44")
     beta = replace(f, cwd=f.cwd / "beta44", env={**f.env, "RAZOR_HOME": str(other)})
     alpha.cwd.mkdir(), beta.cwd.mkdir()
@@ -138,7 +138,7 @@ with flow(replies, config=keys + '[server]\naddress = "127.0.0.1:0"') as f:
     # A git folder can hold projects; a hidden manager is not one, and the same origin reached
     # over SSH and HTTPS is one chooser row with both servers.
     ventures = f.home / "Ventures"
-    one, two, hidden = ventures / "raffle", ventures / "group" / "grapple", f.home / ".pyenv"
+    one, two, hidden = ventures / "picker-shared", ventures / "group" / "picker-shared", f.home / ".pyenv"
     for folder in (ventures, one, two, hidden):
         folder.mkdir(parents=True, exist_ok=True)
         replace(f, cwd=folder).git("init", "-q")

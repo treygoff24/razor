@@ -3,7 +3,9 @@
 //! pane, and `overview` draws the same layout over the whole screen.
 mod groups;
 mod overview;
+mod panel;
 mod sections;
+mod tiles;
 use super::view::{self, Action, Hit, Question};
 use super::{App, keys, status, text::*};
 use crate::protocol::views::{Layout, SectionKind, ViewsStatus};
@@ -11,8 +13,9 @@ use crate::protocol::{SessionId, now};
 use crossterm::event::{KeyCode as K, KeyEvent};
 pub(super) use groups::edit;
 pub(super) use overview::{covers, draw as overlay};
+pub(super) use panel::{Tone, count, foot, named, on, over, shut, tone, top};
 use ratatui::{buffer::Buffer, layout::Rect};
-pub(super) use sections::{GUTTER, addressed, gutter, mark, rows, section_rows};
+pub(super) use sections::{addressed, agent_rows, framed, rows};
 use std::collections::BTreeSet;
 /// Disposable selection, folding and layouts; layouts are bounded to 8 MiB by the server.
 #[derive(Default)]
@@ -172,6 +175,7 @@ pub(super) fn key(app: &mut App, k: KeyEvent) {
             app.list.selected = action.as_ref().and_then(|a| into(app, a)).or(action);
         }
         K::Char('<' | '>') => widen(app, k.code == K::Char('>')),
+        K::Char(c @ '1'..='9') => numbered(app, c as usize - '1' as usize),
         K::Char('n') => match aimed(app) {
             Some(home) => thread(app, &home),
             None => app.say(NOT_RESIDENT),
@@ -195,6 +199,19 @@ pub(super) fn key(app: &mut App, k: KeyEvent) {
         },
         _ => {}
     }
+}
+/// Selects the `n`th top-level group's first agent, or the group while it is folded or the
+/// overview is shown, which moves an open group's selection to its first tile.
+fn numbered(app: &mut App, n: usize) {
+    let Some(tree) = overview::groups(app).get(n).copied() else {
+        return;
+    };
+    let first = panel::rows(tree).find(|r| r.depth == 0);
+    let first = first.map(|r| Action::Agent(r.session.clone()));
+    let open = !app.list.toggled.contains(&tree[0].id) && app.list.overview.is_none();
+    let section = Action::Section(tree[0].id.clone());
+    app.list.selected = first.filter(|_| open).or(Some(section));
+    app.list.reveal = true;
 }
 /// Widens or narrows the list by four columns, kept for the next start.
 pub(super) fn widen(app: &mut App, wider: bool) {
@@ -457,27 +474,18 @@ pub(super) fn frame(
     cursor.flatten().filter(|_| !app.list.keys)
 }
 
-// The list in its frame, its drag edge when wide, and its rows from the scroll, which reveals a
-// moved selection; the rows' actions are the arrows' stops, and the bottom edge names the
-// addressed row while it is scrolled away.
+// The list on the panel's ground: its header, its drag edge when wide, its rows from the scroll,
+// which reveals a moved selection, and its keys on the last row, or the addressed row named while
+// it is scrolled away. The rows' actions are the arrows' stops.
 fn draw(app: &mut App, b: &mut Buffer, list: Rect, wide: bool, now: u64, hits: &mut Vec<Hit>) {
-    let title = format!("AGENTS · {}", app.list.view.as_deref().unwrap_or("…"));
-    let edge = if app.list.dragging { WHITE } else { CYAN };
-    let inner = super::panel::frame_colour(b, list, &title, edge);
-    // At the top right, ‹ closes the list and ⤢ opens the overview, each with its key.
-    let mut x = list.right().saturating_sub(2);
-    let marks = [("⤢", "global.overview"), ("‹", "list.open")];
-    for ((mark, key), action) in marks.into_iter().zip([Action::Overview, Action::Close]) {
-        let words = format!(" {mark} {} ", super::bindings::hint(app, key));
-        let w = width(&words) as u16;
-        x = x.saturating_sub(w);
-        put(b, x, list.y, &words, w, style(GRAY, GLASS));
-        hits.push((Rect::new(x, list.y, w, 1), action));
-    }
-    if wide {
-        let column = Rect::new(list.right() - 1, inner.y, 1, inner.height);
-        hits.push((column, Action::Edge));
-    }
+    fill(b, list, style(DATA, PANEL));
+    header(app, b, list, now, hits);
+    let inner = Rect::new(
+        list.x,
+        list.y + 4,
+        list.width,
+        list.height.saturating_sub(5),
+    );
     let rows = rows(app, inner.width, now);
     // A parent's own fold is no stop of its own: Space on its row folds it.
     let own = |r: &status::Row, a: &Action| matches!((&r.1, a), (Some(Action::Agent(id)), Action::Section(s)) if s == id.as_str());
@@ -504,32 +512,100 @@ fn draw(app: &mut App, b: &mut Buffer, list: Rect, wide: bool, now: u64, hits: &
     }
     let scroll = app.list.scroll.min(rows.len().saturating_sub(height));
     // The bottom edge names the addressed row while it is scrolled away.
-    let here = rows.iter().position(|row| row.0.style.bg == Some(YOU_BG));
+    let here = rows.iter().position(|row| sections::here(&row.0));
     let name = app.focus.as_ref().and_then(|id| app.agents.get(id));
     let name = name.map_or("", |a| a.name.as_str());
+    let keys = "<list.up> <list.down> move  <list.accept> open  <list.fold> fold  \
+        <list.group_1>-<list.group_9> group  <list.left> overview";
     let (words, ink) = match here {
-        Some(at) if at < scroll => (format!(" ▲ talking to {name} "), bold(CYAN, GLASS)),
-        Some(at) if at >= scroll + height => (format!(" ▼ talking to {name} "), bold(CYAN, GLASS)),
-        _ => (String::new(), style(GRAY, GLASS)),
+        Some(at) if at < scroll => (format!(" ▲ talking to {name}"), bold(CYAN, PANEL)),
+        Some(at) if at >= scroll + height => (format!(" ▼ talking to {name}"), bold(CYAN, PANEL)),
+        _ => (
+            format!(" {}", super::bindings::text(app, keys)),
+            style(GRAY, PANEL),
+        ),
     };
-    put(b, inner.x, inner.bottom(), &words, inner.width, ink);
+    let words = clip(&words, list.width as usize);
+    put(b, list.x, inner.bottom(), &words, list.width, ink);
     app.list.scroll = scroll;
     for (y, status::Row(words, action, fold)) in
         (inner.y..inner.bottom()).zip(rows.into_iter().skip(scroll))
     {
         let r = Rect::new(inner.x, y, inner.width, 1);
-        if words.style.bg == Some(YOU_BG) {
-            fill(
-                b,
-                Rect::new(list.x + 1, y, list.width - 2, 1),
-                style(WHITE, YOU_BG),
-            );
-            put(b, list.x + 1, y, "▌", 1, style(CYAN, YOU_BG));
-        }
-        line(b, r, y, &words, style(WHITE, GLASS));
+        line(b, r, y, &words, style(WHITE, PANEL));
         let fold = fold
             .into_iter()
             .map(|(x, a)| (Rect::new(r.x + x, y, 2, 1), a));
         hits.extend(action.map(|a| (r, a)).into_iter().chain(fold));
+    }
+    // The drag edge, over the rows' right column, takes the click.
+    if wide {
+        let column = Rect::new(list.right() - 1, inner.y, 1, inner.height);
+        hits.push((column, Action::Edge));
+    }
+    // Rows drawn on the glass, the servers line's, take the panel's ground.
+    for at in inner.positions() {
+        if b[at].bg == GLASS {
+            b[at].bg = PANEL;
+        }
+    }
+}
+
+// The list's header, four rows framed in the panel's ink: the tabs, ‹ and ⤢ with their keys at
+// the right of its top edge; the Fine clock, the date, the seconds, the needs-you tag, the census
+// and its bar, the tag's words and the bar dropped where the width runs out.
+fn header(app: &App, b: &mut Buffer, list: Rect, now: u64, hits: &mut Vec<Hit>) {
+    let (y, right) = (list.y, list.right().saturating_sub(1));
+    let view = app.list.view.as_deref().unwrap_or("…").to_uppercase();
+    let agents = format!(" AGENTS · {view} ");
+    tiles::frame(
+        b,
+        Rect { height: 4, ..list },
+        (PANEL_INK, PANEL),
+        true,
+        None,
+    );
+    let tabs = [
+        (" RAZOR ", CHIP_INK, CYAN),
+        (agents.as_str(), CYAN, CLOCK_BG),
+    ];
+    panel::write(b, list.x + 2, y, &panel::tabs(&tabs, PANEL));
+    // At the top right, ‹ closes the list and ⤢ opens the overview, each with its key.
+    let mut x = right.saturating_sub(1);
+    let marks = [("⤢", "global.overview"), ("‹", "list.open")];
+    for ((mark, key), action) in marks.into_iter().zip([Action::Overview, Action::Close]) {
+        let words = format!(" {mark} {} ", super::bindings::hint(app, key));
+        x = x.saturating_sub(width(&words) as u16);
+        let words = on(words, mix(PANEL_INK, WHITE, 0.35), PANEL, false);
+        let end = panel::write(b, x, y, &[words]);
+        hits.push((Rect::new(x, y, end - x, 1), action));
+    }
+    let x = panel::clock(app, b, list.x + 3, y + 1, now) + 1;
+    let day = zoned(now, app.zone.as_ref()).map(|t| t.strftime("%a %d %b").to_string());
+    let day = day.unwrap_or_default().to_uppercase();
+    let roots = overview::groups(app).into_iter().flat_map(panel::rows);
+    let roots = roots.filter(|r| r.depth == 0);
+    let census = panel::census(roots.filter_map(|r| app.agents.get(&r.session)));
+    let needs = census[0] + census[1];
+    let tags = [format!(" ◆ {needs} NEED YOU "), format!(" ◆ {needs} ")];
+    let room = right.saturating_sub(x + 3 + width(&day) as u16) as usize;
+    let tag = tags
+        .into_iter()
+        .find(|t| width(t) <= room)
+        .filter(|_| needs > 0);
+    let tag = on(tag.unwrap_or_default(), CHIP_INK, AMBER, true);
+    let at = right.saturating_sub(1 + width(&tag.content) as u16);
+    panel::write(b, at, y + 1, &[tag]);
+    let day = on(clip(&day, room + 2), WHITE, PANEL, true);
+    panel::write(b, x + 1, y + 1, &[day]);
+    let seconds = panel::seconds(app, now).unwrap_or_default();
+    panel::write(b, x + 1, y + 2, &[on(seconds, MAGENTA, PANEL, true)]);
+    let counts = panel::counts(census, PANEL);
+    if x + 4 + (panel::wide(&counts) as u16) < right {
+        let x = panel::write(b, x + 4, y + 2, &counts) + 1;
+        let cells = right.saturating_sub(x + 1) as usize;
+        if cells > 6 {
+            panel::write(b, x, y + 2, &panel::bar(census, cells, PANEL));
+        }
     }
 }

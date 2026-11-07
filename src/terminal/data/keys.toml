@@ -31,6 +31,15 @@
 "wider" = [">"]
 "narrower" = ["<"]
 "open" = ["F2"]
+"group_1" = ["1"]
+"group_2" = ["2"]
+"group_3" = ["3"]
+"group_4" = ["4"]
+"group_5" = ["5"]
+"group_6" = ["6"]
+"group_7" = ["7"]
+"group_8" = ["8"]
+"group_9" = ["9"]
 
 [keys.prefix]
 "next_project" = ["j"]
@@ -294,6 +303,15 @@
 "list.right" = "Unfold or move into a heading; in the overview, open the selected agent or unfold the selected group"
 "list.accept" = "Open the selected agent or toggle the selected heading"
 "list.fold" = "Fold or unfold the selected heading; in the overview, the selected agent's group"
+"list.group_1" = "Select the first agent of top-level group 1, or that group while it is folded"
+"list.group_2" = "Select the first agent of top-level group 2, or that group while it is folded"
+"list.group_3" = "Select the first agent of top-level group 3, or that group while it is folded"
+"list.group_4" = "Select the first agent of top-level group 4, or that group while it is folded"
+"list.group_5" = "Select the first agent of top-level group 5, or that group while it is folded"
+"list.group_6" = "Select the first agent of top-level group 6, or that group while it is folded"
+"list.group_7" = "Select the first agent of top-level group 7, or that group while it is folded"
+"list.group_8" = "Select the first agent of top-level group 8, or that group while it is folded"
+"list.group_9" = "Select the first agent of top-level group 9, or that group while it is folded"
 "list.thread" = "Start a fresh thread with the selected resident"
 "list.wider" = "Widen the agents list"
 "list.narrower" = "Narrow the agents list"

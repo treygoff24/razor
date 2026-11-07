@@ -3,8 +3,8 @@ use crate::config;
 use crate::controller::Controller;
 use crate::protocol::Speed;
 use crate::protocol::{
-    Body, Child, ChildEvent, ChildRequest, ChildUpdate, Decision, Effort, EntryId, Input, MailKind,
-    Origin, ReportStatus, SessionId, Video,
+    Body, Child, ChildEvent, ChildRequest, ChildUpdate, Decision, Effort, EntryId, Input, Mail,
+    MailKind, Origin, ReportStatus, SessionId, Video,
 };
 use crate::record::Summary;
 use serde::Deserialize;
@@ -25,6 +25,13 @@ const RESEARCHER: &str = include_str!("text/researcher.md");
 #[serde(tag = "action", rename_all = "snake_case")]
 pub(super) enum Agent {
     Start(Start),
+    StartTop {
+        cwd: PathBuf,
+        server: Option<String>,
+        model: Option<String>,
+        effort: Option<Effort>,
+        brief: String,
+    },
     Continue {
         child: String,
         brief: String,
@@ -147,6 +154,49 @@ impl Children {
         action: Agent,
     ) -> Result<(Value, Option<(SessionId, Input)>), Error> {
         let output = match action {
+            Agent::StartTop {
+                cwd,
+                server,
+                model,
+                effort,
+                brief,
+            } => {
+                let caller_summary = controller.summary(caller).await?;
+                if caller_summary.child.is_some() {
+                    return refuse("Only a top-level agent can start a top-level session.");
+                }
+                let mail = Mail {
+                    to: String::new(),
+                    id: (caller.clone(), at),
+                    kind: MailKind::Note,
+                    from: if caller_summary.name.is_empty() {
+                        caller.to_string()
+                    } else {
+                        caller_summary.name.clone()
+                    },
+                    project: super::project(&caller_summary),
+                    text: brief,
+                };
+                let cwd = caller_summary.cwd.join(cwd);
+                let model = model.map(crate::profiles::id);
+                if let Some(server) = server {
+                    let request = ChildRequest::StartRoot {
+                        cwd,
+                        model,
+                        effort,
+                        mail,
+                    };
+                    let mut result = controller.devices().child(&server, &request).await?;
+                    let name = result["name"].as_str().unwrap_or_default();
+                    result["address"] = json!(format!("{name}@{server}"));
+                    let session = result["session"].as_str().unwrap_or_default();
+                    result["session"] = json!(format!("{session}@{server}"));
+                    Ok(result)
+                } else {
+                    self.start_root(controller, cwd, model, effort, mail, None)
+                        .await
+                }
+            }
             Agent::Start(start) => {
                 let (task, name) = (start.task, start.name.clone());
                 let mut started = self.start(controller, caller, at, start).await?;

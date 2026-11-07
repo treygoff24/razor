@@ -39,8 +39,8 @@ script = [
     {"type": "session.output_transcript.delta", "delta": "Okay, pausing.", "start_ms": 1500, "end_ms": 2000},
     {"delay": 3, "type": "session.input_transcript.delta", "delta": " ", "start_ms": 4000, "end_ms": 4100},
     # A correction lifts it and reaches the working agent at its pause; GPT-Live's late hand-off of
-    # it adds nothing. Seven quiet seconds later the voice says the agent's step is still running,
-    # and twenty more later, once, that it is still on it.
+    # it adds nothing. After a quiet minute the voice says the agent's step is still running,
+    # and after another, once, that it is still on it.
     {"delay": 3, "type": "session.input_transcript.delta", "delta": "Also check the logs.", "start_ms": 5000, "end_ms": 5500},
     {"delay": 3, "type": "session.delegation.created", "offset_ms": 5600, "delegation": {"id": "d2", "target": "client"}},
     # "Wait" holds the voice again while the reply comes; "go on" lifts it and the reply comes silently.
@@ -52,7 +52,7 @@ script = [
      "start_ms": 8000, "end_ms": 9000},
     {"type": "session.output_transcript.delta", "delta": "passed.", "start_ms": 7000, "end_ms": 8000},
 ]
-slow = response([call("bash", json.dumps({"command": f"until [ -e {release} ]; do sleep .2; done", "wait_ms": 60000, "description": "Run the slow check"}))])
+slow = response([call("bash", json.dumps({"command": f"until [ -e {release} ]; do sleep .2; done", "wait_ms": 180000, "description": "Run the slow check"}))])
 check = response([call("bash", json.dumps({"command": "true", "description": "Checking the result."}), "call_check")])
 quick = response([call("bash", json.dumps({"command": "sleep 1"}), "call_quick")])
 logs, config = (response([call("bash", json.dumps({"command": f"until [ -e {release}-{n} ]; do sleep .2; done",
@@ -66,7 +66,7 @@ with flow([done(), slow, check, done(), done(), quick, done(), done(), logs, don
     with serve(script, capture) as url:
         config = f.home / ".razor/config.toml"
         config.write_text(config.read_text() + f'\n[live]\nurl={json.dumps(url)}\n')
-        (f.home / ".razor/key").write_text("flow-dummy-live-key")
+        f.env["OPENAI_API_KEY"] = "flow-dummy-live-key"
         seeded = f.run("--print=json", "Seed the call.")
         assert seeded.returncode == 0, seeded.stderr
         session = json.loads(seeded.stdout)["session"]
@@ -80,7 +80,7 @@ with flow([done(), slow, check, done(), done(), quick, done(), done(), logs, don
         config.write_text('call_model = "sol"\ncall_effort = "medium"\n' + config.read_text())
         assert start() == ("gpt-6.1-sol", "medium"), "the configured call model or effort did not apply"
         assert {"call_model": "sol", "call_effort": "medium"}.items() <= json.loads(server.send(f, "GET", "/models").read()).items(), "/models"
-        seen = asyncio.run(phone(f, session, end))
+        seen = asyncio.run(phone(f, session, end, timeout=180))
         assert b"".join(e["audio"] for e in seen if "audio" in e) == tone.read_bytes(), "voice PCM changed, vanished or was heard while held"
         assert [e for e in seen if e.get("type") == "hush"] == [{"type": "hush"}] * 2 and not any(e.get("text") == "Okay, pausing." for e in seen), "stop did not hush the phone or hold the voice's words"
         assert seen[-1].get("type") == "closed" and seen[-1]["reason"] == "ended", ("end was not acknowledged", seen[-1])
@@ -90,6 +90,10 @@ with flow([done(), slow, check, done(), done(), quick, done(), done(), logs, don
         silent = [c for c in sent if c["type"] == "session.thinking.append"]
         spoken = [c for c in sent if c["type"] == "session.commentary.append"]
         assert [c["content"].rsplit(": ", 1)[-1] for c in spoken] == ["Please check the work.", "Run the slow check", "Say in two or three words that you're still here and still on it; the line has been quiet."], "acknowledgement did not name the request, or the step or its reminder was not said once"
+        events = list(map(json.loads, (capture / "events.jsonl").read_text().splitlines()))
+        correction = next(e for e in events if e.get("delegation", {}).get("id") == "d2")
+        assert spoken[1]["_at"] - correction["_at"] >= 59, "the step was spoken before a quiet minute"
+        assert spoken[2]["_at"] - spoken[1]["_at"] >= 59, "the reminder came before another quiet minute"
         assert [c["content"] for c in silent] == ["flow done"], "held reply spoken, or a step given to the voice"
         assert [c["delegation_id"] for c in spoken + silent] == ["d1", "d2", "d2", "d2"], "agent's progress did not reach the voice's latest delegation"
         entries = server.until(f, session, lambda es: sum(e["kind"] == "turn_end" for e in es) == 2)

@@ -29,9 +29,11 @@ agent-browser install
 
 ## Desktop apps
 
-Agents can use [agent-desktop](https://github.com/vercel-labs/agent-desktop) (Apache-2.0), shipped beside Razor, to read and operate desktop apps through the operating system's accessibility interface. Its starter skill explains how to observe, act and check the result. `razor doctor` checks that the program runs; `~/.local/share/razor/current/agent-desktop status` reports platform support and permissions. A source build can use an independently installed copy on `PATH`.
+Agents can use [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-driver) (MIT), shipped beside Razor, to read and operate desktop apps through the operating system's accessibility interface. Its command line, `cua-driver`, talks to a background program of its own, which the Razor server runs for its agents on a socket in Razor's folder (`~/.razor/cua-driver.sock`), only where it can work: on a Mac once Razor has Accessibility, on Linux when the server has an X display (`DISPLAY`, which XWayland provides under Wayland). The program stops with the server. The starter skill `cua-driver` explains how to find a window, act on it and check the result. `razor doctor`'s Desktop line says whether the background program answers; a build from source runs it only with a `cua-driver` binary beside `razor`.
 
-On macOS, desktop control and screenshots require permissions for Razor; see [screen and control](security.md#screen-and-control-on-macos). On Linux, desktop access requires an accessible graphical session; see [agent-desktop's Linux requirements](https://agent-browser.dev/desktop/platforms/linux). Screenshots, accessibility output and clipboard contents can contain private information.
+Cua Driver tries to work in the background, without bringing windows forward or moving your pointer, but it does not always manage to: on a Mac it has taken over the screen and mouse during a task. Agents are told to say so before a desktop task. On a Mac it keeps the display awake until ten minutes after an agent's last call, since it cannot read or operate apps while the Mac is locked. Razor turns off Cua Driver's usage reporting and its update check ([Security](security.md#contacting-only-your-model-provider)). Each Razor release ships the newest Cua Driver release at the time it is built; every Cua Driver release so far is marked a prerelease.
+
+On macOS, desktop control and screenshots require permissions for Razor; see [screen and control](security.md#screen-and-control-on-macos). On Linux, it needs the desktop's accessibility bus (AT-SPI). Screenshots, accessibility output and clipboard contents can contain private information.
 
 ## Web search, page reading and answers
 

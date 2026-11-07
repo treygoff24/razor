@@ -5,6 +5,7 @@ pub(crate) mod shared;
 mod task;
 
 use crate::protocol::{FromBridge, Line, ToBridge};
+use serde_json::{Value, json};
 pub(crate) use shared::{Output, SharedBridge};
 use std::fmt;
 use std::io::ErrorKind;
@@ -183,15 +184,54 @@ async fn cli(dir: &Path) -> Result<PathBuf, Error> {
     })
 }
 
-/// One tool-free Haiku answer at medium effort on this machine's Claude sign-in, in `cwd`;
-/// no session file, at most 64 KiB read back, killed when the request is dropped.
-pub(crate) async fn recap(cwd: &Path, prompt: &str, evidence: &str) -> Result<String, Error> {
+/// What a conversation on a provider's Anthropic-format endpoint starts with in place of every
+/// sign-in: the provider's address, its key as both Anthropic's API key and a bearer token, so a
+/// gateway reading either finds it, the CLI's files in `folder`, and none of Claude Code's own
+/// traffic to Anthropic. `Missing` names an unset key; the key goes only to the CLI.
+pub(crate) fn provider(
+    endpoint: &crate::profiles::Endpoint,
+    folder: &Path,
+) -> Result<Value, Error> {
+    let name = endpoint.key.as_deref().unwrap_or_default();
+    let key = match std::env::var(name).ok().filter(|key| !key.is_empty()) {
+        Some(key) => key,
+        None if name.is_empty() => String::new(),
+        None => {
+            let sentence = format!(
+                "{name} is not set; save it with razor setup or in keys.toml, then run razor restart."
+            );
+            return Err(Error::Missing(sentence));
+        }
+    };
+    Ok(
+        json!({"ANTHROPIC_BASE_URL": endpoint.url, "CLAUDE_CONFIG_DIR": folder,
+        "CLAUDE_CODE_OAUTH_TOKEN": "", "ANTHROPIC_API_KEY": key, "ANTHROPIC_AUTH_TOKEN": key,
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}),
+    )
+}
+
+/// One tool-free answer at medium effort from `model` through the bundled CLI in `cwd`, with
+/// `env` over the server's environment (a provider's, or null for this machine's sign-in): a
+/// recap, or doctor's test request. No session file, at most 64 KiB read back, killed when the
+/// request is dropped.
+pub(crate) async fn answer(
+    cwd: &Path,
+    model: &str,
+    env: &Value,
+    prompt: &str,
+    text: &str,
+) -> Result<String, Error> {
     let io = |doing| move |source| Error::Io { doing, source };
+    // Its own error may quote what the host said back, a provider's key included.
+    let key = env["ANTHROPIC_API_KEY"]
+        .as_str()
+        .filter(|key| !key.is_empty());
+    let env = env.as_object().into_iter().flatten();
     let mut run = Command::new(cli(&dir().await?).await?)
         .args([
             "-p",
             "--model",
-            "haiku",
+            model,
             "--effort",
             "medium",
             "--output-format",
@@ -206,6 +246,7 @@ pub(crate) async fn recap(cwd: &Path, prompt: &str, evidence: &str) -> Result<St
             prompt,
         ])
         .env("DISABLE_PROMPT_CACHING", "1")
+        .envs(env.map(|(name, value)| (name, value.as_str().unwrap_or_default())))
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -217,17 +258,17 @@ pub(crate) async fn recap(cwd: &Path, prompt: &str, evidence: &str) -> Result<St
         return Err(Error::Exited);
     };
     stdin
-        .write_all(evidence.as_bytes())
+        .write_all(text.as_bytes())
         .await
-        .map_err(io("writing the recap's evidence"))?;
+        .map_err(io("writing the request"))?;
     drop(stdin);
     let mut answer = Vec::new();
     stdout
         .take(64 << 10)
         .read_to_end(&mut answer)
         .await
-        .map_err(io("reading the recap"))?;
-    let status = run.wait().await.map_err(io("waiting for the recap"))?;
+        .map_err(io("reading the answer"))?;
+    let status = run.wait().await.map_err(io("waiting for the answer"))?;
     let answer: serde_json::Value = serde_json::from_slice(&answer).unwrap_or_default();
     match (
         status.success(),
@@ -235,7 +276,11 @@ pub(crate) async fn recap(cwd: &Path, prompt: &str, evidence: &str) -> Result<St
         answer["result"].as_str(),
     ) {
         (true, Some(false), Some(text)) => Ok(text.into()),
-        _ => Err(Error::Missing("The Claude Code CLI gave no recap.".into())),
+        (_, Some(true), Some(text)) => {
+            let text = key.map_or(text.into(), |key| text.replace(key, "[key removed]"));
+            Err(Error::Missing(format!("Claude Code answered: {text}")))
+        }
+        _ => Err(Error::Missing("The Claude Code CLI gave no answer.".into())),
     }
 }
 
