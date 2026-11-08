@@ -87,12 +87,12 @@ def _processes(groups):
 
 
 def _stop(home):
-    """Stops the server alone, as its service does (a signalled CLI may start one more request),
-    then live jobs' groups, whose end could wake a turn; kills and names any alive 10 s later."""
-    info = home / ".razor/server.json"
-    server = {json.loads(info.read_text())["pid"]} if info.exists() else set()
+    """Stops the servers alone, as their service does (a signalled CLI may start one more request),
+    then live jobs' groups, whose end could wake a turn; kills and names any alive 10 s later.
+    Every server whose state is under `home` counts, a flow's second server included."""
+    server = {json.loads(info.read_text())["pid"] for info in home.rglob("server.json")}
     jobs = set()
-    for record in home.glob(".razor/sessions/*/record.jsonl"):
+    for record in home.rglob("sessions/*/record.jsonl"):
         live = {}
         for entry in map(json.loads, record.read_bytes().split(b"\n")[:-1]):
             if entry["kind"] == "job":

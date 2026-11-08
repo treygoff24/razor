@@ -2,6 +2,13 @@
 
 What changed in each Razor release. [Configuration](docs/configuration.md) and the other pages in [docs](docs/README.md) describe each feature in full.
 
+## 0.3.1 (8 November 2026)
+
+### Changed
+
+- A paired device that sends a scaled picture may leave its origin's `device` empty, and the server fills in the name the device was paired under, so the record says which device keeps the original ("IMG_1234.HEIC in Photos on phone"). An origin that names a device keeps it. The `image_origins` field is otherwise unchanged.
+- Releases ship Cua Driver 0.44.0, Cua's newest, in place of 0.43.2: it types exact text on the active keyboard layout or refuses it, names the dialog that blocks keys, and reports which window an action opened on macOS.
+
 ## 0.3.0 (8 November 2026)
 
 ### New

@@ -126,3 +126,16 @@ with flow([response([call("handover", json.dumps({"note": "Continue inspecting t
     for index in (1, 2):
         sent = f.request(index)
         assert origin["path"] in json.dumps(sent["input"]), f"image origin missing in request {index}"
+
+# From a paired device, an origin without a device names the device that sent the input; one naming a device keeps it.
+with flow([response([message("PHONE_82")])], model="sol", config=PLAIN) as f:
+    server.start(f)
+    session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    phone = f.run("devices", "add", "phone").stdout.splitlines()[1]
+    origins = [{"number": 1, "path": "IMG_82.HEIC in Photos", "device": "", "copy": "scaled"},
+               {"number": 2, "path": "s82/drop.png", "device": "mac82", "copy": "scaled"}]
+    sent = server.send(f, "POST", f"/sessions/{session}/input", {"text": "From the phone.", "images": [PNG, PNG], "image_origins": origins}, key=phone)
+    assert sent.status == 200, sent.read()
+    entries = server.until(f, session, lambda es: any(e["kind"] == "turn_end" for e in es))
+    person = next(e for e in entries if e["kind"] == "input" and e["from"] == "person")
+    assert person["image_origins"] == [{**origins[0], "device": "phone"}, origins[1]], person

@@ -139,7 +139,7 @@ Prompt-cache discipline is a rule of the architecture: the default GPT profile's
 
 ## 6. Budgets
 
-The ceiling is 78,613 lines: non-blank, non-comment lines of source (Rust, TypeScript, the flows' language, shell) in this repository, counted by one checked-in counter the gate runs per module from the first commit; the table's rows bind the same way; Razor-specific code moved into another repository counts here too. A raise needs Trey's written yes. Starting table:
+The ceiling is 78,625 lines: non-blank, non-comment lines of source (Rust, TypeScript, the flows' language, shell) in this repository, counted by one checked-in counter the gate runs per module from the first commit; the table's rows bind the same way; Razor-specific code moved into another repository counts here too. A raise needs Trey's written yes. Starting table:
 
 | Module | Lines |
 | --- | ---: |
@@ -151,12 +151,12 @@ The ceiling is 78,613 lines: non-blank, non-comment lines of source (Rust, TypeS
 | Tool service, MCP, skills | 3,941 |
 | Shell and jobs | 742 |
 | Children, mail, schedules, memory client | 5,981 |
-| API server and configuration | 9,943 |
+| API server and configuration | 9,947 |
 | Extension surface (events, command hooks, JavaScript plugins; provisional until its events are named) | 2,000 |
 | Terminal app | 28,268 |
-| Flows, stand-ins, eval runner | 15,587 |
+| Flows, stand-ins, eval runner | 15,595 |
 | Performance harness | 657 |
-| **Total** | **78,613** |
+| **Total** | **78,625** |
 
 A raise changes only this table's numbers and the ceiling above; the maintainers keep each raise's record, with its measured counts and the ruling that granted it.
 

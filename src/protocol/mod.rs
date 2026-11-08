@@ -491,11 +491,12 @@ impl Input {
     }
 }
 
-/// The original of a scaled or absent image, on the sending device.
+/// The original of a scaled or absent image, and the device it stays on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImageOrigin {
     pub(crate) number: usize,
     pub(crate) path: String,
+    /// Empty from a client: the device that sent the input.
     pub(crate) device: String,
     pub(crate) copy: ImageCopy,
 }

@@ -6,9 +6,9 @@ version=${1:?version required} out=${2:?output directory required} base=${3:?bas
 case "$version" in *[!a-zA-Z0-9._-]*|'') echo 'Invalid version' >&2; exit 1;; esac
 case "$base" in *[!a-zA-Z0-9._:/~-]*|'') echo 'Invalid base URL' >&2; exit 1;; esac
 case "${RAZOR_PLATFORM:-$(uname -s)-$(uname -m)}" in
-  Linux-x86_64|linux-x64) platform=linux-x64; target=x86_64-unknown-linux-gnu; cua=linux-x86_64-binary; cua_sha=6f57880235d00e6ce6c5483b41eec9f1fd731dea1ba862fe06b82fce02de9c78; browser=c4351f3802ffa5254d8c69f20a52e2fcf56925c6016fcf4203db25a07d811379; rg=x86_64-unknown-linux-musl; rg_sha=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c; jq=linux-amd64; jq_sha=b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f ;;
-  Linux-aarch64|linux-arm64) platform=linux-arm64; target=aarch64-unknown-linux-gnu; cua=linux-arm64-binary; cua_sha=7a9cd278c3d447a19b313259ad4f5f23e270d6e0b0f540fa8db3bf8f93060920; browser=00d291f45e1c4d527b3aa08c70c54c7c3030fde0794f8d4575aaa3ca1680f728; rg=aarch64-unknown-linux-musl; rg_sha=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915; jq=linux-arm64; jq_sha=8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309 ;;
-  Darwin-arm64|darwin-arm64) platform=darwin-arm64; target=aarch64-apple-darwin; cua=darwin-universal-binary; cua_sha=16b3ea310f10ad1d72c552314a5257807e6399511c79fb55acb4c7a901929a64; browser=19680f06cf87d0095c318a2e80bea6b71523d95d3b651cd18d81885cd182477a; rg=aarch64-apple-darwin; rg_sha=3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4; jq=macos-arm64; jq_sha=2d75340ba57a4b4b4c8708a21c2dc8e958a48aaa8bba13b27f77f6e4c0eca07e ;;
+  Linux-x86_64|linux-x64) platform=linux-x64; target=x86_64-unknown-linux-gnu; cua=linux-x86_64-binary; cua_sha=9d87c18e983eca8e2c2448149d943e0e1dd2a6d86bdd108560c5f3bc64e62f29; browser=c4351f3802ffa5254d8c69f20a52e2fcf56925c6016fcf4203db25a07d811379; rg=x86_64-unknown-linux-musl; rg_sha=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c; jq=linux-amd64; jq_sha=b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f ;;
+  Linux-aarch64|linux-arm64) platform=linux-arm64; target=aarch64-unknown-linux-gnu; cua=linux-arm64-binary; cua_sha=ff2c83ea6dfff11130bb0928aa06c41c45316f6eb201a414f0595e4d05616ce0; browser=00d291f45e1c4d527b3aa08c70c54c7c3030fde0794f8d4575aaa3ca1680f728; rg=aarch64-unknown-linux-musl; rg_sha=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915; jq=linux-arm64; jq_sha=8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309 ;;
+  Darwin-arm64|darwin-arm64) platform=darwin-arm64; target=aarch64-apple-darwin; cua=darwin-universal-binary; cua_sha=4ad632365a32ce26f2c40bd3bc80ef76ecaf544eaeb0e47c805379a4f33ea7c3; browser=19680f06cf87d0095c318a2e80bea6b71523d95d3b651cd18d81885cd182477a; rg=aarch64-apple-darwin; rg_sha=3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4; jq=macos-arm64; jq_sha=2d75340ba57a4b4b4c8708a21c2dc8e958a48aaa8bba13b27f77f6e4c0eca07e ;;
   *) echo 'Unsupported platform; use Linux x86_64 or aarch64, or macOS arm64.' >&2; exit 1 ;;
 esac
 stage=$(mktemp -d)
@@ -41,7 +41,7 @@ sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum 
 # Downloads $1 to $2, which must match the pinned SHA-256 $3.
 fetch() { curl -fsSL "$1" -o "$2" && [ "$(sha256 "$2" | cut -d ' ' -f 1)" = "$3" ] || { echo "Download or checksum failed: $1" >&2; exit 1; }; }
 fetch "https://github.com/vercel-labs/agent-browser/releases/download/v0.41.2/agent-browser-$platform" "$stage/agent-browser" "$browser"
-fetch "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.43.2/cua-driver-rs-0.43.2-$cua.tar.gz" "$stage.cua" "$cua_sha"
+fetch "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.44.0/cua-driver-rs-0.44.0-$cua.tar.gz" "$stage.cua" "$cua_sha"
 tar -xzf "$stage.cua" -C "$stage" cua-driver
 # ripgrep and jq for agents' shells, in tools/, which serve puts last on PATH so the person's own copies win.
 fetch "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-$rg.tar.gz" "$stage.rg" "$rg_sha"

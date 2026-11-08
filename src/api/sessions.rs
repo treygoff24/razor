@@ -217,11 +217,16 @@ async fn input(
         let (_, skill) = found.map_err(|e| bad(e.to_string()))?;
         text = format!("<skill name=\"{name}\">\n{skill}\n</skill>\n\n{text}");
     }
+    // An origin a client leaves without a device names the device that sent the input.
+    let mut image_origins = c.image_origins;
+    for origin in image_origins.iter_mut().filter(|o| o.device.is_empty()) {
+        origin.device = device.clone().unwrap_or_default();
+    }
     let input = Input {
         from,
         device,
         text,
-        image_origins: c.image_origins,
+        image_origins,
         model: c.model.map(profiles::id),
         effort: c.effort,
         speed: c.speed,
