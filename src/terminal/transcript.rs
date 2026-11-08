@@ -427,7 +427,7 @@ impl Transcript {
     pub(super) fn bottom(&mut self) {
         (self.held, self.mounted, self.dirty, self.children_at) = (None, MOUNT, true, None);
         match self.newest() {
-            true => self.retain_older = false,
+            true => (self.retain_older, self.wanted) = (false, None),
             false => self.wanted = Some(Direction::Newest),
         }
     }

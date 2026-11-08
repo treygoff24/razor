@@ -146,8 +146,7 @@ pub fn continue_all(app: &mut App) {
 }
 
 /// Hands skill `name` to session `id` as an input of its own, behind every earlier write: never
-/// through the draft, an open answer or a command. The admission clears the session's saved
-/// draft, so the draft read before it is saved again after.
+/// through the draft, an open answer or a command.
 pub fn hand_back(app: &mut App, id: SessionId, name: String) {
     let agent = app.agent_row(&id);
     if !takes(agent) {
@@ -159,13 +158,7 @@ pub fn hand_back(app: &mut App, id: SessionId, name: String) {
     let body = json!({"text": "", "skill": name});
     app.write(|api| async move {
         let path = format!("v1/sessions/{id}/input");
-        let draft = api.draft(&id, None).await;
         let admitted = api.json(Method::POST, &path, Some(body)).await;
-        if let (Ok(_), Ok(draft)) = (&admitted, draft)
-            && !draft.is_empty()
-        {
-            let _ = api.draft(&id, Some(draft)).await;
-        }
         move |app: &mut App| match admitted.map(|v| v["entry"].as_u64().map(EntryId)) {
             Ok(Some(entry)) if working => queue(app, &id, entry),
             Ok(_) => {}
@@ -184,15 +177,12 @@ pub fn take_back(app: &mut App, input: EntryId) {
         return;
     };
     let lead = ["\n", ""][usize::from(app.composer.text.is_empty())];
-    if !app.composer.append(&format!("{lead}{}", sent.text)) {
+    let words = format!("{lead}{}", sent.text);
+    if app.composer.text.len() + words.len() > composer::DRAFT_BYTES {
         return app.say("Those words and the editor's exceed 1 MiB together; nothing was taken.");
     }
-    if let Some(t) = app.transcripts.get_mut(&id) {
-        t.taking.insert(input);
-        t.left = Some((input, now(), true));
-    }
-    app.edited();
-    app.write(|api| async move {
+    let target = id.clone();
+    if app.write(|api| async move {
         let path = format!("v1/sessions/{id}/input/{}", input.0);
         let gone = api.json(Method::DELETE, &path, None).await;
         move |app: &mut App| {
@@ -203,7 +193,14 @@ pub fn take_back(app: &mut App, input: EntryId) {
                 app.say(&e.to_string());
             }
         }
-    });
+    }) {
+        app.composer.append(&words);
+        if let Some(t) = app.transcripts.get_mut(&target) {
+            t.taking.insert(input);
+            t.left = Some((input, now(), true));
+        }
+        app.edited();
+    }
 }
 
 // The made session gets the moved words; anything typed meanwhile is the editor again after.

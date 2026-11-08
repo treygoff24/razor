@@ -219,6 +219,7 @@ async fn changed_files(cwd: &Path) -> String {
 fn rendered(id: EntryId, input: Input) -> Result<String, Error> {
     let from = serde_json::to_string(&input.from)
         .map_err(|e| io("rendering an input's origin")(std::io::Error::other(e)))?;
-    let text = input.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = text::skill(input.skill.as_ref(), input.text);
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     Ok(text::input(id, &from, &text))
 }

@@ -10,9 +10,11 @@ impl Session {
         if self.state == State::Working || self.blocked {
             return Ok(());
         }
-        if let Some(input) = self.turn.tick(&mut self.settings) {
+        if let Some(input) = self
+            .turn
+            .tick(&mut self.settings, self.record.summary().child_task)
+        {
             self.admit(input).await?;
-            self.turn.nudge();
         }
         if self.state == State::Working || self.record.summary().closed {
             return Ok(());
@@ -84,6 +86,7 @@ impl Session {
                 closed: true,
                 close_reason: Some(CloseReason::Idle),
                 report: None,
+                child_grace: None,
             },
             None,
         )

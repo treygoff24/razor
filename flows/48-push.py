@@ -352,3 +352,51 @@ key = {json.dumps(str(apns.key))}
         printed = "\n".join(enroll("tablet"))
         assert "razor://" not in printed and "set server.address to this computer's tailnet name" in printed, printed
         assert not any(b"SECRET48" in r["raw"] for r in apns.received), "a question's words reached Apple"
+
+# More follows than the local queue and active sends combined: neither a first update nor an
+# end loses ownership when the queue is full. The HTTP/2 peer holds responses to fill it.
+with apple(Path(tempfile.mkdtemp(prefix="razor-apns-full-"))) as apns:
+    config = (PLAIN + f'[push]\nteam="FLOWTEAM48"\nbundle="com.example.razor"\nendpoint="{apns.url}"\n'
+              f'[push.development]\nkey_id="FLOWKEY48"\nkey={json.dumps(str(apns.key))}\n')
+    with flow([], model="sol", config=config) as f:
+        server.start(f)
+        sessions = [server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"] for _ in range(8)]
+        tokens = set()
+        apns.ready.clear()
+        for device in range(40):
+            key = server.post(f, "/devices", {"name": f"full-{device}"})["key"]
+            for number, session in enumerate(sessions):
+                token = f"{device:02x}{number:02x}"
+                tokens.add(token)
+                assert api(f, "PUT", f"/sessions/{session}/follow", key,
+                           {"token": token, "environment": "development"}) == (200, {})
+        server.post(f, "/sessions", {"cwd": str(f.cwd)})
+
+        def received(event):
+            return {r["path"].removeprefix("/3/device/") for r in apns.received
+                    if r["body"]["aps"]["event"] == event}
+
+        try:
+            wait(lambda: len(received("update")) == 32)
+            apns.ready.set()
+            wait(lambda: received("update") == tokens, why="a full queue lost a Live Activity update")
+            wait(lambda: apns.answered == len(tokens))
+            apns.ready.clear()
+            for session in sessions:
+                server.post(f, f"/sessions/{session}/quit", {})
+            wait(lambda: len(received("end")) == 32)
+            state = f.home / ".razor/devices.json"
+            pending = lambda: sum(len(d.get("follows", [])) for d in json.loads(state.read_text()))
+            wait(lambda: pending() <= 32)
+            assert pending() > 0, "a full queue forgot ends it could not accept"
+            # A missing record removes its row and publishes a replacement snapshot while its
+            # end is still pending; delivery must no longer depend on that row's lifetime.
+            held = {follow["session"] for d in json.loads(state.read_text()) for follow in d.get("follows", [])}
+            for session in held:
+                (f.home / ".razor/sessions" / session / "record.jsonl").unlink()
+                wait(lambda: server.send(f, "GET", f"/sessions/{session}/agent").status == 404,
+                     why="a session whose record is gone kept its row")
+        finally:
+            apns.ready.set()
+        wait(lambda: received("end") == tokens, why="a full queue lost a Live Activity end")
+        wait(lambda: pending() == 0)

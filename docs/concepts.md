@@ -42,7 +42,9 @@ Everything earlier stays in the record, one recall away. Razor calls this a rebu
 
 ## Closing a session
 
-`/done` asks the agent for one last turn: it brings the project's notes up to date and writes the project's state note, a short note on where the work stands that the next session in the project starts with. The session closes when that turn ends. `/end` (or `/quit`) closes it at once, with no last turn. `/detach` (or `/background` or `/exit`) leaves the terminal app with the session still running, as Ctrl-C pressed twice does unless [`[ui] quit`](configuration.md#the-terminal-app) says to end it. A closed session reopens when you send it a message.
+`/done` asks the agent for one last turn: it records what it learned, closes finished tasks and writes its own state note, a short note on where the work stands. Later sessions start with the project's merged note and newer sessions' notes; [dreaming](memory.md#dreaming) merges them. In an always-on agent's folder, only its home session writes state notes; a closing thread sends it what to keep. The session closes when that turn ends. `/end` (or `/quit`) closes it at once, with no last turn. `/detach` (or `/background` or `/exit`) leaves the terminal app with the session still running, as Ctrl-C pressed twice does unless [`[ui] quit`](configuration.md#the-terminal-app) says to end it. A closed session reopens when you send it a message.
+
+`/done` and `/quit` clear the command from the composer as soon as you send it. If you type more before closing finishes, the terminal stays on the closed session with those words; sending them reopens it.
 
 ## Helpers, and merging or discarding their work
 
@@ -88,7 +90,7 @@ An always-on agent is an agent you define in your settings that runs as part of 
 
 ## Memory
 
-Each project keeps a memory across sessions, and every session starts with two parts of it: the state note, on where the work stands, and your rulings, decisions you made, quoted in your own words. [Memory](memory.md) explains what is kept and where.
+Each project keeps a memory across sessions. A session starts with its state notes, your rulings quoted in your own words, a list of wiki pages and recent facts and notes, and its tasks. A nightly dreaming pass checks memory against its sources and recent sessions, files lasting knowledge in wiki pages and merges state notes. [Memory](memory.md) explains what is kept and where, and how to run dreaming or turn it off.
 
 ## Settings and packs
 
@@ -106,7 +108,7 @@ Every agent has Razor's own tools, whatever its model:
 | `agent` | Starts, steers, waits for, stops and settles helpers; sets the session's headline and name. |
 | `message` | Mail to any agent, posts to the channel, and notes and questions to you. |
 | `status` | The agents in its tree and what each is doing. |
-| `recall` | Any entry of the record, whole, by its id; and a search of your past conversations by words. |
+| `recall` | Any entry of the record, whole, by its id; a search of your past conversations by words; or, with only `session`, its digest. Add `@<server>` to a session id on a paired server. |
 | `memory` | Searches, reads and writes the project's memory ([Memory](memory.md)). |
 | `task` | The project's tasks: lists, adds, claims, comments on and closes them. |
 | `deliver` | Hands you a file or a link with a line saying what it is. |
@@ -148,7 +150,7 @@ The words you meet in Razor's screens, settings and these pages. Words used only
 - **job**: a command the shell started. One that outlives its call has a **handle** the agent uses to wait on it, peek at it, type into it or kill it.
 - **mail**: a note, question or answer from one agent to another. It carries information, never orders.
 - **match**: a repository, folder or session that places a top-level session in a group of a view.
-- **memory**: what a project keeps across sessions: Razor's own memory files in its home's `memory` folder, and its tasks. The **startup page** is what a session reads from it at its start: the project's **state note** (what the last session wrote at its close), its **rulings** (what you decided, in your own words; only you can make one), a line for each **fact** and **note** it knows, and the session's tasks.
+- **memory**: what a project keeps across sessions: Razor's own memory files in its home's `memory` folder, and its tasks. The **startup page** is what a session reads from it at its start: the project's **state note** (the merged note and newer sessions' handoffs), its **rulings** (what you decided, in your own words; only you can make one), its wiki contents and recent **facts** and **notes**, and the session's tasks.
 - **pack**: a folder of default settings, prompt files and skills that sits beneath your own settings; Razor ships one, the starter pack, which a new install uses.
 - **pair**: to connect two machines' Razor servers, each holding a key for the other, so each shows and reaches the other's sessions (`razor devices add --address`).
 - **plugin**: a program or JavaScript file named in the settings that sees **events** (a prompt, an input, a tool call, a rebuild) and may observe, change or refuse them. A **hook** is a plugin written as a program.

@@ -70,6 +70,7 @@ pub(in crate::terminal) fn read_visible(app: &mut App) {
         return;
     }
     t.loading = true;
+    let held = t.held;
     app.spawn(|api| async move {
         let read = async {
             match direction {
@@ -82,7 +83,7 @@ pub(in crate::terminal) fn read_visible(app: &mut App) {
         let timeout = "Reading transcript history timed out; try its page again.";
         let page = tokio::time::timeout(std::time::Duration::from_secs(30), read).await;
         let page = page.map_err(fail(timeout)).and_then(|page| page);
-        move |app: &mut App| paged(app, id, direction, page)
+        move |app: &mut App| paged(app, id, direction, held, page)
     });
 }
 
@@ -120,13 +121,14 @@ fn paged(
     app: &mut App,
     id: crate::protocol::SessionId,
     direction: Direction,
+    held: Option<(EntryId, isize)>,
     page: Result<Page, Error>,
 ) {
     let Some(t) = app.transcripts.get_mut(&id) else {
         return;
     };
     t.loading = false;
-    if app.focus.as_ref() != Some(&id) {
+    if app.focus.as_ref() != Some(&id) || t.wanted != Some(direction) || t.held != held {
         return;
     }
     let page = match page {
@@ -158,7 +160,7 @@ pub(in crate::terminal) fn jump(app: &mut App, session: &crate::protocol::Sessio
         true => {
             let after = t.entries.range(id..).filter(|(_, e)| item(e)).count();
             t.mounted = t.mounted.max(after).min(ITEMS);
-            (t.held, t.dirty) = (Some((id, 0)), true);
+            (t.held, t.wanted, t.dirty) = (Some((id, 0)), Some(Direction::Older), true);
         }
         false => t.wanted = Some(Direction::At(id)),
     }

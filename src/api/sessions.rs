@@ -26,6 +26,7 @@ pub(super) fn routes() -> Router<App> {
         .route("/v1/sessions/{id}/asks/{entry}", post(answer))
         .route("/v1/sessions/{id}/events", get(events))
         .route("/v1/sessions/{id}/entries", get(entries))
+        .route("/v1/sessions/{id}/digest", get(digest))
         .route("/v1/sessions/{id}/agent", get(agent))
         .route("/v1/notifications/{id}", get(notification))
         .route("/v1/sessions/{id}/tasks", get(tasks))
@@ -210,13 +211,14 @@ async fn input(
         Some(name) => (Origin::Program { name }, None),
         None => (Origin::Person, enrolled),
     };
-    let mut text = c.text;
-    if let Some(name) = c.skill {
+    let skill = if let Some(name) = c.skill {
         let dirs = app.controller.settings(&id).await?.skills();
         let found = crate::tools::find_skill(dirs, &name).await;
         let (_, skill) = found.map_err(|e| bad(e.to_string()))?;
-        text = format!("<skill name=\"{name}\">\n{skill}\n</skill>\n\n{text}");
-    }
+        Some(crate::protocol::InputSkill { name, text: skill })
+    } else {
+        None
+    };
     // An origin a client leaves without a device names the device that sent the input.
     let mut image_origins = c.image_origins;
     for origin in image_origins.iter_mut().filter(|o| o.device.is_empty()) {
@@ -225,7 +227,8 @@ async fn input(
     let input = Input {
         from,
         device,
-        text,
+        text: c.text,
+        skill,
         image_origins,
         model: c.model.map(profiles::id),
         effort: c.effort,
@@ -359,6 +362,13 @@ async fn entries(
         Some((line, replay))
     });
     Ok(([(header::CONTENT_TYPE, NDJSON)], Body::from_stream(lines)).into_response())
+}
+
+async fn digest(State(app): State<App>, Path(id): Path<SessionId>) -> Reply<String> {
+    let text = crate::record::digest(&app.home, &id, 24 * 1024)
+        .await
+        .map_err(controller::Error::from)?;
+    Ok(Json(text))
 }
 
 /// A stored or live line as a reader gets it: unless `native`, a reply shows without its

@@ -13,7 +13,7 @@ import time
 from dataclasses import replace
 from driver import flow
 from model import agent, message, reply, tool
-from server import listed, send, start, stop, until, wait
+from server import listed, published, send, start, stop, until, wait
 from terminal import Terminal
 
 root, child = "FLOW_REMOTE_49", "You are oak49,"
@@ -29,7 +29,7 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     beta.base()
     start(f)
     assert beta.run("devices").returncode == 0
-    addresses = {h: json.loads((h / "server.json").read_text())["address"] for h in (local, other)}
+    addresses = {h: published(h) for h in (local, other)}
     # Count recovery on the real peer connection, including ordinary status traffic.
     recovery, details, listening, control, silent = [], [], [], [], [False]
 

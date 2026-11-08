@@ -312,6 +312,9 @@ pub enum Body {
         /// A child's report to its parent, in the same write as the end of the turn it ends.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         report: Option<Box<Input>>,
+        /// A child's outstanding mail grace, committed with the end that starts it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_grace: Option<Millis>,
     },
     /// A rebuild: what set it off, the note it carried, and the context it sent verbatim. The
     /// context counts as an input; taking it answers only the inputs at or before `cut`.
@@ -375,6 +378,9 @@ pub struct Input {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) device: Option<String>,
     pub(crate) text: String,
+    /// The skill resolved at admission, separate from the person's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) skill: Option<InputSkill>,
     /// Origins of images whose original remains on the sending device.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) image_origins: Vec<ImageOrigin>,
@@ -422,6 +428,13 @@ pub struct Input {
     /// that command rather than Razor's text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) command: Option<Command>,
+}
+
+/// A skill handed with an input, kept as the model received it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct InputSkill {
+    pub name: String,
+    pub text: String,
 }
 
 /// The person's command an input carries out; Razor writes its text.

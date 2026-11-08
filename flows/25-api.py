@@ -45,7 +45,7 @@ pack = Path(tempfile.mkdtemp()) / "pack"
 (pack / "config.toml").write_text("")
 with flow([reply("Reply with the flow marker.", "Bash", {"command": "true"}),
            reply("Reply with the flow marker.", "Bash", {"command": "exit 1"}),
-           *[Reply(hello) for _ in range(3)]],
+           *[Reply(hello) for _ in range(4)]],
           config=f'pack = {json.dumps(str(pack))}\n[server]\naddress = "127.0.0.1:0"') as f:
     # 1. --print starts the server through the socket and makes a session. It starts under a
     # soft limit of 64 open files and raises it, since twenty agents' pipes pass macOS's 256.
@@ -94,7 +94,7 @@ with flow([reply("Reply with the flow marker.", "Bash", {"command": "true"}),
     assert status == 200 and json.loads(body)["kind"] == "start", (status, body)
 
     # 5. A draft reads back; attach after the last entry; an input handed the skill `hi` holds
-    # it ahead of its words, its turn arrives as recorded, and admitting it cleared the draft.
+    # its resolved text separately from its words, renders it, and clears the sent draft.
     status, body = call(remote, "GET", f"/sessions/{session}/skills", phone)
     assert json.loads(body) == [{"name": "hi", "description": "Says hi."}], (status, body)
     draft = f"/sessions/{session}/draft"
@@ -117,10 +117,19 @@ with flow([reply("Reply with the flow marker.", "Bash", {"command": "true"}),
             streamed.append(line)
     assert streamed[0]["id"] == entry and streamed[0]["kind"] == "input", streamed
     skill = '<skill name="hi">\n---\ndescription: Says hi.\n---\nSay hi first.\n\n</skill>\n\n'
-    assert streamed[0]["text"] == skill + "Again.", streamed[0]
+    assert streamed[0]["text"] == "Again.", streamed[0]
+    assert streamed[0]["skill"] == {"name": "hi", "text": (pack / "skills/hi/SKILL.md").read_text()}, streamed[0]
+    assert any(part.get("text") == skill + "Again." for message in f.request(4)["messages"]
+               for part in message["content"] if isinstance(part, dict)), f.request(4)
     assert streamed[-1]["inputs"] == [entry], streamed[-1]
     assert streamed == [bare(e) for e in f.record(session)][len(stored):], streamed
     assert call(remote, "GET", draft, phone) == (200, b"")
+    # Handing the skill alone sends none of the saved draft, so admission leaves it intact.
+    assert call(remote, "PUT", draft, phone, "still composing")[0] == 200
+    assert call(remote, "POST", f"/sessions/{session}/input", phone, {"text": "", "skill": "hi"})[0] == 200
+    while lines(events)["kind"] != "turn_end":
+        pass
+    assert call(remote, "GET", draft, phone) == (200, b"still composing")
 
     # 6. No file name leaves the session's directory; a file that is not there is 404.
     for name, refused in (("../../device.key", 400), ("..%2F..%2Fdevice.key", 400),

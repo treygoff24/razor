@@ -292,7 +292,16 @@ impl Session {
         );
         let (config, child) = (&settings.config, s.child.is_some());
         let home = &c.inner.home;
-        let profile = config.profile(home, &s.model, tools.actions(), child)?;
+        let profile = config.profile(
+            home,
+            &s.model,
+            tools.actions(),
+            if crate::memory::dreaming(s) {
+                crate::profiles::Builtins::Dream
+            } else {
+                child.into()
+            },
+        )?;
         // An admitted `/done` survives a crash until answered or withdrawn.
         let mut done = s.job();
         for &entry in &s.unanswered {
@@ -316,6 +325,7 @@ impl Session {
             reported: s.window,
             context: s.context,
             stopped: s.stopped.iter().copied().collect(),
+            turn: s.child_turn,
             record,
             settings,
             mcp_revision,
@@ -324,7 +334,6 @@ impl Session {
             state: State::NeedsYou,
             blocked: false,
             conversation: None,
-            turn: Default::default(),
             actions: FuturesUnordered::new(),
             order: Arc::default(),
             pending: VecDeque::new(),
@@ -358,12 +367,9 @@ impl Session {
             _ => None,
         };
         let children = record::ChildSummary::changed_by(&body);
-        // This task alone appends, so the next committed id is last + 1.
-        let mut turn = self.turn;
-        turn.recorded(&body, EntryId(self.record.summary().last.0 + 1));
         let (id, line) = self.record.append(body, native).await?;
         self.record.mark(self.due()).await?;
-        self.turn = turn;
+        self.turn = self.record.summary().child_turn;
         if let Some((inputs, end)) = failed {
             crate::residents::failed(&self.settings.config, &self.id, &self.record, &inputs, &end)
                 .await;

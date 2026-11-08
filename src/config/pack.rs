@@ -500,6 +500,15 @@ fn allowed(table: &Table, path: &Path, project: bool) -> Result<(), Error> {
         let only = "only a project's .razor/config.local.toml names where its tasks go";
         return Err(Error::Invalid(format!("{shown} cannot set tasks; {only}.")));
     }
+    let memory_remote = table
+        .get("memory")
+        .and_then(Value::as_table)
+        .is_some_and(|t| t.contains_key("remote"));
+    if memory_remote && !(project && path.ends_with("config.local.toml")) {
+        return Err(Error::Invalid(format!(
+            "{shown} cannot set memory.remote; only a project's .razor/config.local.toml names where its memory goes."
+        )));
+    }
     if !project {
         return Ok(());
     }
@@ -511,6 +520,8 @@ fn allowed(table: &Table, path: &Path, project: bool) -> Result<(), Error> {
     keys.extend(nested("responses", "base_url").map(|_| "responses.base_url"));
     keys.extend(table.get("sessions").map(|_| "sessions"));
     keys.extend(nested("children", "startup").map(|_| "children.startup"));
+    keys.extend(nested("memory", "night").map(|_| "memory.night"));
+    keys.extend(nested("memory", "model").map(|_| "memory.model"));
     if keys.is_empty() {
         return Ok(());
     }

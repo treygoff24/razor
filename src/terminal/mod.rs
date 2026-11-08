@@ -172,7 +172,10 @@ pub async fn run(
                 Some(line) = incoming.recv() => {
                     let snapshot = matches!(&line.line, Line::Event(ApiEvent::Live(Live::Agents { .. })));
                     app.fold_line(line);
-                    if snapshot && std::mem::take(&mut recent) {
+                    if snapshot && std::mem::take(&mut recent)
+                        && app.focus.is_none() && app.composer.is_empty() && app.edits == 0
+                        && app.sending.is_none() && app.start.is_none()
+                    {
                         agents::recent(&mut app);
                     }
                 },
@@ -521,7 +524,7 @@ impl App {
     /// Whether leaving the addressed session now would lose or misplace words: an admission or
     /// note is pending, or words were typed before its saved draft was read, read again now.
     fn waiting(&mut self) -> bool {
-        if self.sending.is_some() || audio::unsent(self) {
+        if self.sending.is_some() || self.loading_images > 0 || audio::unsent(self) {
             return true;
         }
         let unread = (self.focus.clone()).filter(|_| !self.drafting() && !self.composer.is_empty());

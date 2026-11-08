@@ -118,7 +118,7 @@ pub(super) fn input_rows(
     let weight = [Modifier::empty(), Modifier::BOLD][usize::from(human)];
     let mut content = input.text.as_str();
     // A handed-over skill is its gift line; the band holds only the person's words.
-    if let Some((line, words)) = tools::skill::handed(content, model, columns).filter(|_| human) {
+    if let Some((line, words)) = tools::skill::handed(input, model, columns).filter(|_| human) {
         rows.push(line);
         if let Some(entry) = worn {
             rows.push(Row {

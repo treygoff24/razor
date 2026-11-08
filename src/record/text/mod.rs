@@ -1,7 +1,7 @@
 //! Model-facing rebuild text, checked by the compiler rather than a runtime template parser.
 
 mod input;
-pub(crate) use input::{call_line, calls_left_out, heard, length};
+pub(crate) use input::{call_line, calls_left_out, heard, length, skill};
 
 use super::{ChildSummary, Summary};
 use crate::protocol::{Body, End, EntryId, JobEvent, Millis, Outcome, Trigger, Usage};
@@ -32,6 +32,7 @@ pub(crate) fn interrupted(gap: Millis) -> Body {
         closed: true,
         close_reason: None,
         report: None,
+        child_grace: None,
     }
 }
 

@@ -13,7 +13,7 @@ from dataclasses import replace
 import time
 from driver import Reply, flow
 from model import agent, message, reply, tool
-from server import Local, send, until, wait
+from server import Local, published, send, until, wait
 from terminal import Terminal
 
 replies = [agent("RESIDENT_56", "start", name="resident-kid56", brief="Deliver and wait.", placement="in_place"),
@@ -53,7 +53,7 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
     (b / "config.toml").write_text((a / "config.toml").read_text().replace(
         'address = "127.0.0.1:0"', f'address = "127.0.0.1:0"\nshared = "{owner}"\nlabel = "box · personal"'))
     assert beta.run("devices").returncode == 0
-    address = {home: json.loads((home / "server.json").read_text())["address"] for home in (a, b)}
+    address = {home: published(home) for home in (a, b)}
     printed = alpha.run("devices", "add", "b", "--address", address[b]).stdout
     assert beta.run("devices", "add", "a", *printed.splitlines()[-1].split()[4:]).returncode == 0
 

@@ -106,6 +106,8 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     sid = child(parent, "mail40")
     entries = ended(sid, "mail-waiting40")
     assert any(e["kind"] == "mail_sent" for e in entries) and not reports(parent, sid), entries
+    server.stop(f, signal.SIGKILL)
+    server.start(f)
     config = f.home / ".razor/config.toml"
     config.write_text(config.read_text().replace('grace = "1h"', 'grace = "1s"'))
     server.until(f, parent, lambda _: bool(reports(parent, sid)))

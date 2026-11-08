@@ -3,7 +3,7 @@ project's state note; an input still waiting when it ends ends stopped and reach
 its next input reopens it, though an input hook rewrote the closing input and the server restarted.
 A session closed with `/quit` reads done after that restart too, and neither row's activity moves.
 Closed rows are read from their direct detail endpoint, outside the live feed.
-A second session in the same folder reads the note at its start, and its own `/done` replaces it
+A second session in the same folder reads the note at its start, and its own `/done` keeps a separate note
 (docs/design/done.md)."""
 import json
 import sys
@@ -19,7 +19,7 @@ replies = [reply(("toolu_job", "Bash", {"command": "sleep 600", "run_in_backgrou
            reply(("toolu_note", "mcp__razor__memory", dict(state, text="First closeout."))),
            reply(text="Closed out."), reply(text="Reopened."), reply(text="Hello."),
            reply(("toolu_next", "mcp__razor__memory", dict(state, text="Second closeout."))),
-           reply(text="Closed out again.")]
+           reply(text="Closed out again."), reply(text="Both notes read.")]
 
 
 def answered(entry, end):
@@ -109,4 +109,6 @@ with flow(replies, config='[[plugins]]\nfile = "rewrite.py"\nbefore = ["input"]\
     entries = server.until(f, other, answered(server.post(f, f"/sessions/{other}/done", {})["entry"], "done"))
     result = next(e for e in entries if e.get("call") == "toolu_next" and e["kind"] == "result")
     assert result["outcome"] == "success", result
-    assert json.loads(result["output"])["id"] == first["id"], (first, result)
+    assert json.loads(result["output"])["id"] != first["id"], (first, result)
+    f.ask("Read the project's state.")
+    assert all(note in f.sent()[-1] for note in ("First closeout.", "Second closeout.")), "a closeout lost another session's state"

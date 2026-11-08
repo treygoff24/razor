@@ -11,6 +11,10 @@ import server
 patch = "*** Begin Patch\n*** Update File: note\n@@\n-before\n+after\n*** End Patch"
 source = ('text(await tools.flow_script({text:"seed"}));'
           f'text(await tools.apply_patch({json.dumps(patch)}));')
+for before, after, destination in [("after", "same", "note"), ("same", "alias", "../cwd/note"),
+                                    ("alias", "moved", "moved")]:
+    move = f"*** Begin Patch\n*** Update File: note\n*** Move to: {destination}\n@@\n-{before}\n+{after}\n*** End Patch"
+    source += f'text(await tools.apply_patch({json.dumps(move)}));'
 script = "python3 -c 'import json,sys; print(json.load(sys.stdin)[\"text\"].upper())'"
 config = (f"[tools.flow_script]\ncommand = {json.dumps(script)}\n"
           'description = "Uppercase the input text."\n'
@@ -33,7 +37,7 @@ for model, extra, replies in [
             assert "flow_script(" in exec_["description"], "exec's description was cut short"
         second = f.request(2)
         assert "SEED" in json.dumps(second), "the model did not receive the script's output"
-        assert (f.cwd / "note").read_text() == "after\n", "patch did not change the file"
+        assert not (f.cwd / "note").exists() and (f.cwd / "moved").read_text() == "moved\n", "patch lost the moved file"
 
 # A command that ran reports its exit to JavaScript even when the record marks it failed.
 source = ('const first = await tools.exec_command({cmd:"exit 1"});'
@@ -59,6 +63,20 @@ with flow([response([{"type":"custom_tool_call", "id":"ct_cap", "call_id":"call_
     assert "FIRST 🪶" in output and "LAST 🪶" in output, output
     assert "bytes omitted" in output and "Full output:" in output and "�" not in output, output
     assert len(output.split("\nFull output:")[0].split("\n",1)[1]) <= 400, output
+
+# A failed final status write is an error, even after another exec evicts the ended cell.
+execute = lambda id: response([{"type":"custom_tool_call", "id":"ct_" + id, "call_id":id,
+                                "name":"exec", "input":'text("finished");'}])
+with flow([execute("status"), execute("prune"), response([call("wait", '{"cell_id":"status"}', "status_wait")]),
+           done()], model="sol") as f:
+    server.start(f)
+    session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    (f.home / ".razor/sessions" / session / "cells/status.end").mkdir(parents=True)
+    outputs = {e["call"]: e for e in f.record(f.ask("--resume", session, "Read both statuses.")["session"])
+               if e["kind"] == "result"}
+    assert outputs["prune"]["outcome"] == "success", outputs
+    assert all(outputs[c]["outcome"] == "error" and "reading the cell status" in outputs[c]["output"]
+               and "Script running" not in outputs[c]["output"] for c in ("status", "status_wait")), outputs
 
 # A configured tool whose name ends in "message" asks the person nothing, though its input looks
 # like a question: only Razor's own `message` does.

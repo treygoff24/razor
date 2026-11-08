@@ -2,6 +2,8 @@
 
 One task owns each session's record, admission, actions and conversation. Claude and Responses exchange the same protocol messages; the controller has no route-specific request loop. The API, children and residents pages govern this page where they differ.
 
+Admitting a person's words, images or files clears their saved draft because its content was sent. A skill alone carries none of that content and leaves the draft intact; handing it back needs only admission.
+
 ## Public surface
 
 ```rust

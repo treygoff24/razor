@@ -144,7 +144,6 @@ pub(in crate::terminal) fn places(
     }
     let (mut start, mut since) = (0, 0);
     let mut bounded = matches!(entries.first().map(|e| &e.body), Some(Body::Start { .. }));
-    let mut failures = BTreeMap::new();
     for (end, at, inputs, state, usage) in turns {
         if end > start {
             let last = places.get(&calls[end - 1].id).and_then(|p| p.beat);
@@ -179,14 +178,13 @@ pub(in crate::terminal) fn places(
                 Some(ended),
                 &outcomes,
                 &mut places,
-                &mut failures,
                 motion,
             );
         }
         (start, since, bounded) = (end, at, true);
     }
     let rest = &calls[start..];
-    locate(rest, None, &outcomes, &mut places, &mut failures, motion);
+    locate(rest, None, &outcomes, &mut places, motion);
     places
 }
 
@@ -281,14 +279,14 @@ pub(super) fn thread(
     line.spans.splice(1..1, cells);
 }
 
-fn locate<'a>(
-    calls: &[&'a Entry],
+fn locate(
+    calls: &[&Entry],
     end: Option<Ended>,
     outcomes: &BTreeMap<EntryId, Outcome>,
     places: &mut BTreeMap<EntryId, Place>,
-    failures: &mut BTreeMap<(&'a str, &'a str), Vec<EntryId>>,
     motion: bool,
 ) {
+    let mut failures = BTreeMap::<_, Vec<EntryId>>::new();
     let failed = calls
         .iter()
         .filter(|e| outcomes.get(&e.id).is_some_and(|o| *o != Outcome::Success))

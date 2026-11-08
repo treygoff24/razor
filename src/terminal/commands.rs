@@ -162,14 +162,14 @@ fn rename(app: &mut App, name: String) {
 }
 
 // `/done` and `/quit` (`route`), and a quit key set to end: the addressed session ends, after a last turn that runs on in
-// the server or at once. Once the server takes it, unless the person has moved on, the draft
-// clears; once its row reads it closed, `ended` moves a person still on it.
+// the server or at once. The submitted command clears now; once its row reads it closed,
+// `ended` moves a person still on it with an empty composer.
 pub(super) fn done(app: &mut App, route: &'static str) {
     let Some(id) = app.focus.clone() else {
         return app.say("No session has started yet, so there is nothing to close out.");
     };
     let working = app.row().is_some_and(|a| a.state == State::Working);
-    app.write(|api| async move {
+    if app.write(|api| async move {
         let done = api
             .json(
                 Method::POST,
@@ -183,9 +183,6 @@ pub(super) fn done(app: &mut App, route: &'static str) {
                 if let Some(entry) = v["entry"].as_u64().filter(|_| working) {
                     inputs::queue(app, &id, EntryId(entry));
                 }
-                if app.focus.as_ref() == Some(&id) {
-                    app.composer = Composer::default();
-                }
                 let row = Action::Agent(id.clone());
                 let at = app.list.rows.iter().position(|a| *a == row);
                 if app.focus.as_ref() == Some(&id) {
@@ -195,7 +192,9 @@ pub(super) fn done(app: &mut App, route: &'static str) {
             }
             Err(e) => app.say(&e.to_string()),
         }
-    });
+    }) {
+        clear(app);
+    }
 }
 
 /// Once the session `/done` or `/quit` closed reads closed, a helper's parent is addressed, and
@@ -210,7 +209,7 @@ pub fn ended(app: &mut App) {
         .is_some_and(|(id, _)| app.agent_row(id).is_some_and(|a| a.state == State::Done));
     let closing = app.closing.take_if(|_| ended);
     let closed = |id: &SessionId| app.agent_row(id).is_some_and(|a| a.state == State::Done);
-    let shown = |id: &SessionId| app.focus.as_ref() == Some(id);
+    let shown = |id: &SessionId| app.focus.as_ref() == Some(id) && app.composer.is_empty();
     let Some((id, at)) = closing.filter(|(id, _)| shown(id)) else {
         return;
     };

@@ -31,7 +31,7 @@ with flow(replies) as f:
         t.send('/tasks\r')
         t.shown('READY', 'Task view item 1')
         t.send('\x1b')
-        t.shown('Message the agent')
+        t.until(lambda t: '── READY' not in t.text())
         t.send('/tasks 1\r')
         t.shown('── DESCRIPTION', 'Description of item 1')
         t.send('\x1b')

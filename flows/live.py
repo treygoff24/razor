@@ -15,6 +15,7 @@ import uuid
 from websockets.asyncio.server import serve as listen
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
+from server import published
 
 # With no script: words once the phone's audio comes, a hand-off, the voice saying the agent's
 # reply once it is given, and two seconds of use.
@@ -144,7 +145,7 @@ async def phone(f, session, act=None, *, streaming=False, timeout=60):
     """The phone's half of a call, through the real API; retain frames through socket close.
     `act` can react to each frame; `streaming` sends PCM until Razor closes the socket."""
     home = f.home / ".razor"
-    address = json.loads((home / "server.json").read_text())["address"]
+    address = published(home)
     key = (home / "device.key").read_text().strip()
     seen = []
     async with connect(f"ws://{address}/v1/sessions/{session}/call", proxy=None,

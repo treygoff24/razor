@@ -2,6 +2,7 @@
 
 mod calls;
 mod cursor;
+mod digest;
 mod rebuild;
 mod reply;
 mod runs;
@@ -10,6 +11,7 @@ mod summary;
 mod text;
 pub(crate) use calls::{action, ask, target};
 pub(crate) use cursor::Summaries;
+pub(crate) use digest::digest;
 pub(crate) use reply::{Hold, reply, shown};
 pub use search::backfill;
 pub(crate) use search::search;

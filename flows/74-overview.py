@@ -369,6 +369,23 @@ with flow(replies, model="sol", config=config) as f:
         # The header precedes its draft read; quit must see the loaded draft before clearing it.
         t.shown("bdraft74acc74")
     upstream.replace(path)
+    # A full write queue refuses take-back before copying words into the editor. Otherwise the
+    # original could still run while its copied words are sent again.
+    with Terminal(f, "--resume", work) as t:
+        t.shown("Message the agent")
+        t.send("queue_refused74\r")
+        t.shown("queue_refused74", "↑ take back", "Message the agent")
+        queued = next(e["id"] for e in f.record(work) if e.get("text") == "queue_refused74")
+        os.kill(pid, signal.SIGSTOP)
+        try:
+            t.send("/name work74\r" * 12)
+            t.shown("EIGHT DRAFT OR INPUT WRITES ARE PENDING")
+            t.send("\x15" + UP)
+            t.pump(.2)
+            assert "Message the agent" in t.text(), "refused withdrawal copied queued words"
+        finally:
+            os.kill(pid, signal.SIGCONT)
+        server.send(f, "DELETE", f"/sessions/{work}/input/{queued}").read()
     (f.cwd / names[1]).touch()
     server.until(f, work, lambda es: es[-1]["kind"] == "turn_end")
     server.until(f, b, lambda es: es[-1]["kind"] == "turn_end" and any(e["kind"] == "input" and "Blocked74." in str(e) for e in es))

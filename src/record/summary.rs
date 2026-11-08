@@ -110,6 +110,7 @@ pub(crate) struct Summary {
     /// Indexed outgoing report and latest tagged input; no report text is retained.
     pub(crate) reported: Option<EntryId>,
     pub(crate) child_task: Option<EntryId>,
+    pub(crate) child_turn: crate::children::Turn,
     /// The name the session answers to, fixed by its Start: a child's own, a root's stored one,
     /// else its id's (`SessionId::name`), so a record from before keeps the name it showed.
     pub(crate) name: String,
@@ -166,7 +167,9 @@ impl Summary {
             speed: Some(self.settings.speed),
             resident: thread.map(|t| t.resident.clone()),
             resident_project: thread.and_then(|t| t.resident_project.clone()),
-            job: thread.and_then(|t| t.job.clone()),
+            job: thread
+                .and_then(|t| t.job.clone())
+                .or_else(|| self.scheduled.contains_key("dream").then(|| "dream".into())),
         }
     }
 
@@ -216,6 +219,7 @@ impl Summary {
             child: None,
             reported: None,
             child_task: None,
+            child_turn: Default::default(),
             name: String::new(),
             children: Vec::new(),
             headline: String::new(),
@@ -251,7 +255,7 @@ impl Summary {
     }
 
     /// Open work: unanswered inputs, jobs, or, while this session is open and has not reported,
-    /// a child at work, so a restart recovers a report its parent never admitted.
+    /// a child at work or its own grace/nudge, so a restart recovers outstanding child work.
     pub(super) fn live(&self) -> bool {
         let open = !self.closed && self.reported.is_none();
         !self.unanswered.is_empty()
@@ -260,7 +264,8 @@ impl Summary {
                 .iter()
                 .any(|m| m.state != MeetingState::Closed)
             || !self.jobs.is_empty()
-            || (open && self.children.iter().any(ChildSummary::working))
+            || (open
+                && (self.child_turn.waiting() || self.children.iter().any(ChildSummary::working)))
     }
 
     /// Closed by `/done`, `/quit` or a settle, and no input since, or a child that reported:
@@ -293,6 +298,15 @@ impl Summary {
     }
 
     pub(super) fn fold(&mut self, entry: &Entry) {
+        if self.child.is_some() {
+            if let Body::Input(input) = &entry.body
+                && input.child_task.is_some()
+                && input.child_task != self.child_task
+            {
+                self.child_turn = Default::default();
+            }
+            self.child_turn.recorded(&entry.body, entry.id);
+        }
         self.last = entry.id;
         self.at = entry.at;
         if let Body::Input(input) = &entry.body {

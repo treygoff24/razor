@@ -165,7 +165,7 @@ with flow([reply(text='printed remotely'), reply(text='heard here'), reply(text=
     light, elsewhere = f.home / '.light', f.home / 'elsewhere'
     light.mkdir(), elsewhere.mkdir()
     (light / 'mac.key').write_text(f.run('devices', 'add', 'mac').stdout.splitlines()[1])
-    remote = {'address': json.loads((f.home / '.razor/server.json').read_text())['address'], 'key': 'mac.key', 'folder': str(f.cwd)}
+    remote = {'address': server.published(f.home / '.razor'), 'key': 'mac.key', 'folder': str(f.cwd)}
     here = config({k: commands[k] for k in ('capture', 'play')})
     (light / 'config.toml').write_text(f'{here}\n[server]\nname = "lightmac"\n[remote]\n{config(remote)}\n')
     mac = replace(f, cwd=elsewhere, env={**f.env, 'RAZOR_HOME': str(light)})

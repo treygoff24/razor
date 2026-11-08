@@ -200,7 +200,8 @@ impl Session {
         inputs.dedup();
         // Entry 0 is `/quit`'s: the turn ending now is the last.
         let closed = self.done.is_some_and(|d| d.0 == 0 || inputs.contains(&d));
-        let close_reason = (closed && self.done != s.job()).then_some(CloseReason::Person);
+        let close_reason = (closed && self.done != s.job() && !crate::memory::dreaming(s))
+            .then_some(CloseReason::Person);
         if closed {
             self.close_out(&inputs).await?;
             close(self.c.clone(), self.id.clone(), None);
@@ -219,6 +220,7 @@ impl Session {
             closed,
             close_reason,
             report: report.map(Box::new),
+            child_grace: self.turn.grace(),
         };
         self.append(end, None).await?;
         self.c.inner.space.notify_waiters();

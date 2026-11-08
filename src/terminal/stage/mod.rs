@@ -96,7 +96,7 @@ impl Stage {
             joined: old
                 .and_then(|s| s.joined)
                 .or_else(|| (self.ready && old.is_none()).then_some(now)),
-            ended: old.and_then(|s| s.ended).or_else(|| {
+            ended: old.filter(|_| ended).and_then(|s| s.ended).or_else(|| {
                 (ended && self.ready && old.is_none_or(|s| !s.finished)).then_some(now)
             }),
             finished: ended,

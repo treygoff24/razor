@@ -63,7 +63,12 @@ impl Session {
     pub(super) fn render(&self, model: &str, actions: Arc<[Action]>) -> Result<Profile, Error> {
         let child = self.record.summary().child.is_some();
         let config = &self.settings.config;
-        Ok(config.profile(&self.c.inner.home, model, actions, child)?)
+        let role = if crate::memory::dreaming(self.record.summary()) {
+            crate::profiles::Builtins::Dream
+        } else {
+            child.into()
+        };
+        Ok(config.profile(&self.c.inner.home, model, actions, role)?)
     }
 
     /// Why the conversation cannot go on with `model`, rendered as `profile`: another profile,

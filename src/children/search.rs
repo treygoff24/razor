@@ -45,13 +45,35 @@ pub(crate) async fn search(c: &Controller, q: Search) -> Result<Found, Error> {
     Ok(Found { hits, partial })
 }
 
-/// `recall` with `session` or `query`: a search's hits, or with `session` and `id` that entry
-/// whole, here or on its paired server, a thinking entry refused as a session's own is.
+/// Session-only recall returns a digest; a query returns hits, and an id the whole entry,
+/// here or on its paired server. Thinking entries are refused as a session's own are.
 pub(super) async fn recall(c: &Controller, input: Value) -> Result<Value, Error> {
     let id = input["id"].as_u64().map(EntryId);
     let q: Search = parse(input)?;
-    let (Some(session), Some(id), "") = (&q.session, id, q.q.as_str()) else {
+    let (Some(session), "") = (&q.session, q.q.as_str()) else {
         return serde_json::to_value(search(c, q).await?).map_err(other("answering a search"));
+    };
+    let Some(id) = id else {
+        let text = match session.address() {
+            None => crate::record::digest(c.home(), session, 24 * 1024)
+                .await
+                .map_err(other("reading a session's digest"))?,
+            Some((native, server)) => {
+                let devices = c.devices();
+                let missing = || {
+                    Error::Refused(format!(
+                        "The digest of {session} could not be read; check its paired server."
+                    ))
+                };
+                let server = devices.peer(server).await.ok_or_else(missing)?;
+                let path = format!("/v1/sessions/{native}/digest");
+                devices
+                    .fetch(&server, &path, &(), BODY_BYTES)
+                    .await
+                    .ok_or_else(missing)?
+            }
+        };
+        return Ok(Value::String(text));
     };
     let missing = || Error::Refused(format!("{session} has no entry {} to recall.", id.0));
     let entry: Entry = match session.address() {

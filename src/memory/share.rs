@@ -1,18 +1,68 @@
-//! A shared project's tasks: its folder is a
-//! git checkout whose commits travel only as `refs/razor/tasks` on the remote the person names.
+//! Shared tasks and memory: each folder is a git checkout whose commits travel only on its
+//! own reference on the remote the person names.
 //! A write runs against the remote's tasks as last fetched, and its push is the compare-and-swap:
 //! when another machine pushed first, the write's commit is dropped and the write runs again.
 
-use super::{Error, TEXT, fill, other, refuse};
+use super::{Answer, Error, TEXT, blocking, fill, other, refuse};
+use serde_json::Value;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
 
 /// The one reference pushed, and the remote's tasks as last fetched.
-const REF: &str = "refs/razor/tasks";
 const SEEN: &str = "refs/razor/remote";
 /// Seconds a fetch or a push may take: about three times the slowest GitHub took on 2026-11-03.
 const NET: u64 = 60;
+
+/// Fetch, apply and push under the caller's lock. A raced push or a refusal on an older view
+/// retries against a new fetch, at most twice more. Without an operation this only refreshes.
+/// The bool reports remote changes even when the operation is refused.
+pub(super) async fn change<F>(
+    root: &Path,
+    dir: &Path,
+    remote: &Result<Option<String>, String>,
+    reference: &str,
+    op: Option<F>,
+    subject: impl Fn(&Value) -> String,
+) -> (Answer, bool)
+where
+    F: Fn() -> Answer + Send + Sync + 'static,
+{
+    let op = op.map(Arc::new);
+    let mut synced = false;
+    let answer = async {
+        let mut last = Ok(Value::Null);
+        for round in 0..3 {
+            let fetch = round > 0 || stale(dir).await;
+            let url = match remote {
+                Ok(Some(name)) => {
+                    let (url, changed) = fresh(root, dir, name, fetch, reference).await?;
+                    synced |= changed;
+                    Some(url)
+                }
+                Ok(None) => None,
+                Err(why) => return Err(refuse(&fill(&TEXT.settings, &[("why", why)]))),
+            };
+            let Some(op) = op.clone() else { break };
+            match (url, blocking(move || op()).await) {
+                (Some(_), Err(_)) if !fetch => {}
+                (Some(url), Ok(done)) => {
+                    last = push(dir, &url, &subject(&done), reference)
+                        .await?
+                        .map(|()| done);
+                    if last.is_ok() {
+                        break;
+                    }
+                }
+                (_, done) => return done,
+            }
+        }
+        last
+    }
+    .await;
+    (answer, synced)
+}
 
 /// Git in the task folder `dir` for at most `secs` seconds, with no hooks, no signing, Razor as
 /// the author, and credentials sent with the first request instead of after its refusal.
@@ -36,6 +86,7 @@ pub(super) async fn fresh(
     dir: &Path,
     name: &str,
     get: bool,
+    reference: &str,
 ) -> Result<(String, bool), Error> {
     let url = git(root, 10, &["remote", "get-url", "--", name]).await;
     let url = url.unwrap_or_else(|_| name.to_owned());
@@ -57,7 +108,7 @@ pub(super) async fn fresh(
     let seen = if get { rev(SEEN).await } else { None };
     let tree = if get { rev("HEAD^{tree}").await } else { None };
     // The pattern matches nothing on a remote with no tasks yet, rather than failing.
-    let refs = format!("+{REF}*:{SEEN}*");
+    let refs = format!("+{reference}*:{SEEN}*");
     if get {
         let fetched = git(dir, NET, &["fetch", "-q", "--no-tags", &url, &refs]).await;
         fetched.map_err(|e| refuse(&fill(&TEXT.offline, &[("why", &e)])))?;
@@ -88,10 +139,15 @@ pub(super) async fn fresh(
 /// git's words inside `Ok`, so the write may run again from a fetch, and otherwise it is the
 /// remote out of reach. When a file the commit changed was edited meanwhile, the commit stays,
 /// nothing is pushed, and the answer is the refusal that says what to do.
-pub(super) async fn push(dir: &Path, url: &str, subject: &str) -> Result<Result<(), Error>, Error> {
+pub(super) async fn push(
+    dir: &Path,
+    url: &str,
+    subject: &str,
+    reference: &str,
+) -> Result<Result<(), Error>, Error> {
     git(dir, 10, &["add", "-A"]).await?;
     git(dir, 10, &["commit", "-q", "--allow-empty", "-m", subject]).await?;
-    let pushed = git(dir, NET, &["push", "-q", url, &format!("HEAD:{REF}")]).await;
+    let pushed = git(dir, NET, &["push", "-q", url, &format!("HEAD:{reference}")]).await;
     let Err(e) = pushed else { return Ok(Ok(())) };
     let kept = git(dir, 10, &["reset", "-q", "--keep", "HEAD~1"]).await;
     kept.map_err(|_| refuse(&fill(&TEXT.conflict, &[("dir", &dir.display())])))?;

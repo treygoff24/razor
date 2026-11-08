@@ -166,6 +166,7 @@ const COMMANDS: &[&str] = &[
     "mcp list                   list MCP servers\nmcp add <name> --scope <global|project|private> --config '<JSON>'\nmcp remove|enable|disable <name> --scope <global|project|private>\nmcp reconnect|sign-in|sign-out <name>  reconnect or change sign-in\nmcp import <file> --scope <global|project|private>  preview definitions; apply with /mcp import in the app\nmcp complete '<redirect address>'  finish a browser sign-in\n  --scope defaults to private",
     "config get <key>           print an effective setting and its source\nconfig set <key> <value> [--project|--local]  save a setting\nconfig unset <key> [--project|--local]  remove an override\nconfig path [--project|--local]  print the settings file\n  default: your own file; --project: shared project; --local: private project\nconfig get|set|unset voice.<field>  read or change a voice setting this home's server keeps",
     "plugins                    list configured plugins",
+    "dream [folder]             run this project's dreaming pass now; print its session id",
 ];
 
 /// Print a command's syntax, or all help; unknown commands return false without side effects.
@@ -372,6 +373,21 @@ async fn run(home: PathBuf, words: Vec<String>) -> Result<ExitCode, Error> {
             Some(text) => println!("{text}"),
             None => return Err(Usage("Use razor config get <key>, set <key> <value>, unset <key>, or path; writes and path accept --project or --local.".into())),
         },
+        Some("dream") => {
+            if words.len() > 2 { return Err(Usage("Use razor dream [folder].".into())); }
+            let server = api::connection(&home).await?;
+            let folder = words.get(1).map(PathBuf::from).unwrap_or_else(|| server.cwd.clone());
+            let folder = if folder.is_absolute() { folder } else { server.cwd.join(folder) };
+            let url = server.url.join("v1/residents/project/run/dream")?;
+            let response = server.http.post(url).bearer_auth(&server.key).query(&[("cwd", &folder)])
+                .send().await?;
+            let status = response.status();
+            let text = response.text().await?;
+            if !status.is_success() { return Err(Failed(text)); }
+            let result: Value = serde_json::from_str(&text)?;
+            if result["off"] == true { println!("Dreaming is off for this project."); }
+            else { println!("{}", result["session"].as_str().ok_or_else(|| Failed("Dreaming returned no session id.".into()))?); }
+        }
         Some("login" | "devices") => manage(home, &words).await?,
         Some("doctor") => api::doctor(&home).await?,
         Some("plugins") => {

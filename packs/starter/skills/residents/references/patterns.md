@@ -53,7 +53,7 @@ effort = "low"
 [residents.watcher.schedules.check]
 at = ["09:00", "12:00", "15:00", "18:00"]
 days = ["mon", "tue", "wed", "thu", "fri"]
-text = "Read routine.md check and sources.json. Compare approved observations with working/seen.json. Write output/latest.md with findings, source times and unavailable sources. Update the cursor after recording the result. Send one note only for a new actionable change within the contact policy. Leave a concise first line for the home's nightly review."
+text = "Read routine.md check and sources.json. Compare approved observations with working/seen.json. Write output/latest.md with findings, source times and unavailable sources. Update the cursor after recording the result. Send one note only for a new actionable change within the contact policy. Leave a concise final summary for dreaming's review."
 model = "haiku"
 effort = "low"
 fresh = true

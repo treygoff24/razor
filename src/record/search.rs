@@ -55,22 +55,46 @@ pub(super) fn line(entry: &Entry, s: &Summary) -> Option<String> {
             ("", &s.name)
         }
         Body::Name { .. } => ("", &s.name),
-        Body::Text { text } => ("agent", super::reply(text).text),
-        Body::Input(input) => match &input.from {
-            Origin::Person | Origin::Answer { .. } => ("person", &input.text),
-            Origin::Mail { from, .. } if from.is_empty() => ("mail", &input.text),
-            Origin::Mail { from, .. } => (from.as_str(), &input.text),
-            Origin::Report { child, .. } => {
-                let mut children = s.children.iter();
-                let named = children.find(|c| c.session == *child);
-                (named.map_or(child.as_str(), |c| &c.child.name), &input.text)
-            }
-            _ => return None,
-        },
-        _ => return None,
+        body => {
+            let (from, text) = text(body)?;
+            let named = match body {
+                Body::Input(input) => match &input.from {
+                    Origin::Report { child, .. } => s.children.iter().find(|c| c.session == *child),
+                    _ => None,
+                },
+                _ => None,
+            };
+            (named.map_or(from, |c| &c.child.name), text)
+        }
     };
+    let handed = match &entry.body {
+        Body::Input(i) if i.skill.is_some() => {
+            Some(super::text::skill(i.skill.as_ref(), i.text.clone()))
+        }
+        _ => None,
+    };
+    let text = handed.as_deref().unwrap_or(text);
     let (id, at, from, fold, text) = (entry.id.0, entry.at, flat(from), fold(text), flat(text));
     Some(format!("{from}\t{id}\t{at}\t{fold}\t{text}{start}\n"))
+}
+
+/// The conversation text shared by search and digests, without search's session exclusions.
+/// Replies leave out their suggestion; Razor's inputs and thinking never enter either readout.
+pub(super) fn text(body: &Body) -> Option<(&str, &str)> {
+    match body {
+        Body::Text { text } => Some(("agent", super::reply(text).text)),
+        Body::Input(input) => Some((
+            match &input.from {
+                Origin::Person | Origin::Answer { .. } => "person",
+                Origin::Mail { from, .. } if from.is_empty() => "mail",
+                Origin::Mail { from, .. } => from,
+                Origin::Report { child, .. } => child.as_str(),
+                _ => return None,
+            },
+            &input.text,
+        )),
+        _ => None,
+    }
 }
 
 /// Writes the search file of each session that has none, from its record, before the server

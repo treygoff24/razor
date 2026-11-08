@@ -51,9 +51,20 @@ async fn project(
 }
 
 /// Run now: the schedule's entry in the resident's home session.
-async fn run(State(app): State<App>, Path((name, schedule)): Path<(SessionId, String)>) -> Reply {
-    let entry = app.residents.run(&name, &schedule).await?;
-    Ok(Json(json!({ "entry": entry })))
+#[derive(Default, Deserialize)]
+struct DreamFolder {
+    cwd: Option<PathBuf>,
+}
+async fn run(
+    State(app): State<App>,
+    Path((name, schedule)): Path<(String, String)>,
+    Query(folder): Query<DreamFolder>,
+) -> Reply {
+    Ok(Json(
+        app.residents
+            .run(&name, &schedule, folder.cwd.as_deref())
+            .await?,
+    ))
 }
 
 /// What a resident remembers, as memory lists it.

@@ -185,15 +185,26 @@ pub(in crate::terminal) fn line(
     (Row::plain(Line::from(clip_spans(left, columns))), next)
 }
 
-/// A skill the person handed over with `/name`, which the server records ahead of their words
-/// as `<skill name="…">`, the `SKILL.md` and `</skill>`: its one gift line and the words after.
+/// A handed skill and the person's words, including inputs recorded before skills were fields.
+pub(in crate::terminal) fn input(input: &crate::protocol::Input) -> Option<(&str, &str, &str)> {
+    if let Some(skill) = &input.skill {
+        return Some((&skill.name, &skill.text, &input.text));
+    }
+    let (name, rest) = input
+        .text
+        .strip_prefix("<skill name=\"")?
+        .split_once("\">\n")?;
+    let (skill, words) = rest.split_once("\n</skill>")?;
+    Some((name, skill, words.trim_start()))
+}
+
+/// A skill the person handed over with `/name`: its gift line and the person's words.
 pub(in crate::terminal) fn handed<'a>(
-    text: &'a str,
+    handed: &'a crate::protocol::Input,
     model: &str,
     columns: usize,
 ) -> Option<(Row, &'a str)> {
-    let (name, rest) = text.strip_prefix("<skill name=\"")?.split_once("\">\n")?;
-    let (skill, words) = rest.split_once("\n</skill>")?;
+    let (name, skill, words) = input(handed)?;
     let front = skill
         .strip_prefix("---\n")
         .and_then(|s| s.split_once("\n---"));
@@ -211,10 +222,7 @@ pub(in crate::terminal) fn handed<'a>(
     if !why.is_empty() {
         left.extend([span(" — ", GRAY_DIM), span(why, GRAY)]);
     }
-    Some((
-        Row::plain(Line::from(clip_spans(left, columns))),
-        words.trim_start(),
-    ))
+    Some((Row::plain(Line::from(clip_spans(left, columns))), words))
 }
 
 fn when(call: &Call<'_>, at: u64, now: u64) -> String {

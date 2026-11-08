@@ -7,11 +7,18 @@ use serde_json::{Value, json};
 /// Claude Code's built-ins, its web tools included, and the shell's aliases, then every other
 /// action as an MCP declaration: Razor's own tools with the declaration GPT's two modes share
 /// (data/tools.json), scripted and MCP tools with their own.
-pub(super) fn tools(actions: &[Action], builtins: &[Value]) -> Result<Vec<Value>, Error> {
+pub(super) fn tools(
+    actions: &[Action],
+    builtins: &[Value],
+    dream: bool,
+) -> Result<Vec<Value>, Error> {
     let mut tools = super::shipped(include_str!("data/claude.json"))?
         .as_array()
         .cloned()
         .unwrap_or_default();
+    if dream {
+        tools.retain(|t| t["builtin"] == "Read");
+    }
     for action in actions {
         let shared = |b: &&Value| b["action"] == action.name.as_str() && b["mode"] == "both";
         let (description, schema) = match (&action.schema, builtins.iter().find(shared)) {

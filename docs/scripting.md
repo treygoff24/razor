@@ -64,6 +64,8 @@ razor --print --model sonnet --effort low "Which files changed most this month?"
 {"id":7,"at":1793827016507,"kind":"turn_end","inputs":[6],"end":{"error":"Claude is not signed in; run razor setup."},"usage":{"input":0,"output":0,"cache_read":0,"cache_write":0,"requests":0,"waited":0},"context":null,"threshold":0.8}
 ```
 
+An input that hands the agent a skill records it separately as `"skill":{"name":"razor","text":"<the resolved SKILL.md>"}`. The input's `text` holds only the person's words, which may be empty when handing back a skill. To display the skill's name, read `skill.name`; to read its instructions, use `skill.text`. Records from before 0.4.0 keep the instructions inside `text`, between `<skill>` lines. Handing back a skill without words, pictures or files preserves the session's saved draft.
+
 ## What a headless session is
 
 A `--print` session is an ordinary session that no terminal app happens to show. The server runs it, so:
@@ -96,9 +98,10 @@ The routes a script needs:
 | --- | --- | --- |
 | `GET /v1/sessions?cwd=<folder>&limit=<n>` | | Top-level sessions, most recently started first, each with its `session` id, `cwd`, `model`, `effort`, `name` and `title` (your first message's first line). 50 unless `limit` says otherwise, at most 1,000. |
 | `POST /v1/sessions` | `{"cwd": "<folder>"}`, and optionally `model`, `effort`, `speed` | `{"session": "<id>", "name": "<name>"}`: a new session, idle until its first input. |
-| `POST /v1/sessions/<id>/input` | `{"text": "…"}`, and optionally `model`, `effort`, `speed`, `from`, `request`, `images` | `{"entry": <n>}` once the message is recorded. A message sent mid-turn reaches the agent before its next step. |
+| `POST /v1/sessions/<id>/input` | `{"text": "…"}`, and optionally `model`, `effort`, `speed`, `from`, `request`, `images`, `skill` | `{"entry": <n>}` once the message is recorded. A message sent mid-turn reaches the agent before its next step. |
 | `GET /v1/sessions/<id>/events?after=<entry>` | | The session as JSON lines: `attached`, then every entry after that id, then each new line as it happens, until you close the connection. `--print=stream` prints exactly this. Entries leave out `native`, the model's own replay data, and a reply's `text` leaves out its suggested next message, given as `suggestion`; add `&native=true` for both as recorded. Add `&follow=true` to follow it as a view: it does not mark the session looked at or stop the person's finished-turn pushes. Add `&heartbeat=true` to get `{"kind":"heartbeat"}` after every 15 seconds without a line, so you can tell a quiet session from a dropped connection. |
 | `GET /v1/sessions/<id>/entries?before=<entry>&limit=<n>` | | One page of the record as JSON lines, oldest first, ending before that entry (or at the end); 256 entries unless `limit` says otherwise, at most 1,024. `&native=true` as on `events`. |
+| `GET /v1/sessions/<id>/digest` | | One JSON string, at most 24 KiB of text: inputs and replies, failed calls with their error's first line, memory and task calls with their JSON arguments, and changed files, in entry order. Includes helpers and fresh runs. Newest failures have priority, then newest other entries; a last line counts omissions. Each entry is at most 1 KiB, with longer entries clipped and marked. |
 | `POST /v1/sessions/<id>/asks/<entry>` | `{"option": <n>}`, counting from 0, or `{"text": "…"}` | `{"entry": <n>}`: the answer, recorded as the session's next input. Refused once the question has an answer. |
 | `POST /v1/sessions/<id>/stop` | | `{}`: what Escape does. The turn and the command it is running stop; background commands and helpers keep going. |
 | `DELETE /v1/sessions/<id>/input/<entry>` | | `{}`: withdraws a message the agent has not taken yet. |
@@ -115,11 +118,12 @@ The routes a script needs:
 | `GET /v1/search?q=<words>` | | Past conversations holding every word, here and on paired servers ([Concepts](concepts.md#the-record)). |
 | `GET /v1/models` | | The models Razor can run, each one's efforts, and your defaults. |
 
-Three optional fields of an input are for programs:
+Four optional fields of an input are for programs:
 
 - `from` names the program that sent it, such as `"nightly"`. The record then shows the input came from that program, not from you, and only your own words can become [rulings](memory.md#how-your-decisions-become-rulings).
 - `request` is your own id for the message, 1 to 64 letters, digits and hyphens. Sending the same id again within the session's newest 64 answers with the first message's entry and sends nothing, so a script can retry safely.
 - `images` is a list of pictures as plain base64, JPEG, PNG or WebP, at most 20 to a message and 10 MB of base64 each.
+- `skill` is the name of a skill to load, such as `"razor"`. Razor resolves it at admission and records the resulting name and text as the `skill` object described above.
 
 The status stream carries the agents of the live list: the always-on agents, every session at work, asking or stuck, an idle one with an unread delivery, your input in the last twelve hours, a terminal open on it or a reply you have not looked at, and their helpers. The rest stay on disk, read a page at a time with `GET /v1/agents`. After the first line, the stream sends:
 

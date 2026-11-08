@@ -7,7 +7,7 @@ description: Set up, change, explain or debug Razor itself: settings, models and
 
 Read the reference for the job, then the installed documentation it names. Check the actual home, settings, version and error before changing anything; keep unrelated settings and secrets intact. Verify the requested behavior, or report what remains unverified. For always-on agents, use the `residents` skill.
 
-- [Settings](./references/settings.md): config files, precedence, startup, about, terminal keys and daily voice and call limits.
+- [Settings](./references/settings.md): config files, precedence, startup, about, terminal keys, dreaming and shared memory, and daily voice and call limits.
 - [Models and keys](./references/models.md): sign-in, API keys, providers and `provider_only`.
 - [Tools and skills](./references/tools.md): MCP, script tools, plugins and skills.
 - [Other agents](./references/other-agents.md): bringing MCP servers, skills, plugins and tools over from Claude Code, Codex, OpenCode, pi, Code Puppy or any other agent.

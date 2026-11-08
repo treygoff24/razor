@@ -26,6 +26,9 @@ class Apple:
         openssl("pkey", "-in", str(self.key), "-pubout", "-out", str(self.public))
         self.folder, self.key_id, self.team = folder, key_id, team
         self.received, self.gone, self.errors = [], set(), []
+        self.answered = 0
+        self.ready = threading.Event()
+        self.ready.set()
 
     def signed(self, authorization: str) -> bool:
         """The bearer token's header and claims name this key and team, and its signature holds."""
@@ -49,33 +52,57 @@ class Apple:
                                   str(self.folder / "signature"), str(self.folder / "signed")], capture_output=True)
         return checked.returncode == 0
 
-    def answer(self, connection, stream: int, headers: dict, body: bytes):
+    def answer(self, headers: dict, body: bytes):
         token = headers[":path"].removeprefix("/3/device/")
         if not self.signed(headers.get("authorization", "")):
             self.errors.append(f"a push to {token} was not signed by the key")
         self.received.append({"path": headers[":path"], "headers": headers, "raw": body, "body": json.loads(body)})
         status, reply = (410, b'{"reason":"Unregistered"}') if token in self.gone else (200, b"")
-        connection.send_headers(stream, [(":status", str(status))], end_stream=not reply)
-        if reply:
-            connection.send_data(stream, reply, end_stream=True)
+        return status, reply
 
     def serve(self, client: socket.socket):
         connection = h2.connection.H2Connection(h2.config.H2Configuration(client_side=False, header_encoding="utf-8"))
         connection.initiate_connection()
         client.sendall(connection.data_to_send())
         streams = {}
+        waiting = []
         # Razor closes its connection when its server stops.
+        client.settimeout(.05)
         with client, suppress(OSError):
-            while data := client.recv(65536):
-                for event in connection.receive_data(data):
+            while True:
+                sent = 0
+                if self.ready.is_set():
+                    sent = len(waiting)
+                    for stream, status, reply in waiting:
+                        connection.send_headers(stream, [(":status", str(status))], end_stream=not reply)
+                        if reply:
+                            connection.send_data(stream, reply, end_stream=True)
+                    waiting.clear()
+                client.sendall(connection.data_to_send())
+                self.answered += sent
+                try:
+                    data = client.recv(65536)
+                except socket.timeout:
+                    continue
+                if not data:
+                    break
+                # Root probes are not push requests; reject them without entering HTTP/2.
+                if data.startswith(b"GET / HTTP/1.1\r\n"):
+                    client.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    return
+                events = connection.receive_data(data)
+                if any(isinstance(e, h2.events.ConnectionTerminated) for e in events):
+                    return
+                for event in events:
                     if isinstance(event, h2.events.RequestReceived):
                         streams[event.stream_id] = (dict(event.headers), bytearray())
                     elif isinstance(event, h2.events.DataReceived):
                         streams[event.stream_id][1].extend(event.data)
                         connection.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
                     elif isinstance(event, h2.events.StreamEnded):
-                        self.answer(connection, event.stream_id, *streams.pop(event.stream_id))
-                client.sendall(connection.data_to_send())
+                        waiting.append((event.stream_id, *self.answer(*streams.pop(event.stream_id))))
+                    elif isinstance(event, h2.events.StreamReset):
+                        waiting = [w for w in waiting if w[0] != event.stream_id]
 
 
 @contextmanager
@@ -98,5 +125,6 @@ def apple(folder: Path, key_id: str = "FLOWKEY48", team: str = "FLOWTEAM48"):
     try:
         yield stand_in
     finally:
+        stand_in.ready.set()
         listener.close()
     assert not stand_in.errors, "; ".join(stand_in.errors)

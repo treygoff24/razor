@@ -117,9 +117,17 @@ impl Memory {
         let found = blocking(move || Ok(tasks::projects(&dir))).await;
         let (mut notes, mut holders, today) = (Vec::new(), Vec::new(), jiff::Zoned::now().date());
         let (today, owed) = (today.to_string(), self.owed.swap(false, Relaxed));
-        for project in found.unwrap_or_default() {
+        // A folder unread keeps owed releases owed; with none owed, nothing was missed.
+        let (projects, whole) = found.unwrap_or_default();
+        if owed && !whole {
+            self.owed.store(true, Relaxed);
+        }
+        for project in projects {
             let read = |p: Project| Ok((tasks::scan(&p.tasks, false)?, p));
             let Ok((all, p)) = self.files(c, &project, read).await else {
+                if owed {
+                    self.owed.store(true, Relaxed);
+                }
                 continue;
             };
             let held = all.iter().filter_map(|t| t.holder(&p.server));
@@ -161,12 +169,23 @@ impl Memory {
     /// released them, had that release not failed: a root's once it is closed, a child's once
     /// it or an ancestor is settled, or its root is closed. A report alone releases nothing.
     async fn recover(&self, c: &Controller, id: &str) -> Option<()> {
+        let read = async |id: &SessionId| {
+            let summary = c.summary(id).await;
+            // A session gone for good has nothing left to retry.
+            if summary
+                .as_ref()
+                .is_err_and(|e| !matches!(e, crate::controller::Error::NoSession(_)))
+            {
+                self.owed.store(true, Relaxed);
+            }
+            summary.ok()
+        };
         let id = SessionId::try_from(id.to_owned()).ok()?;
-        let s = c.summary(&id).await.ok()?;
+        let s = read(&id).await?;
         if s.closed && s.child.is_none() {
             self.release(c, &s.cwd, (&id, &s.name), None, None).await;
         }
-        let parent = c.summary(&s.child?.parent).await.ok()?;
+        let parent = read(&s.child?.parent).await?;
         let child = parent.children.iter().find(|k| k.session == id)?;
         let mut how = child.settled;
         let mut ancestor = parent.clone();
@@ -176,7 +195,7 @@ impl Memory {
                 how = how.or(ancestor.closed.then_some(Decision::Discard));
                 break;
             }
-            let above = c.summary(&ancestor.child.as_ref()?.parent).await.ok()?;
+            let above = read(&ancestor.child.as_ref()?.parent).await?;
             let settled = above
                 .children
                 .iter()
@@ -208,7 +227,14 @@ impl Memory {
         });
         let report = report.filter(|r| !r.0.trim().is_empty());
         let comment = report.map(|(text, _)| text[..text.floor_char_boundary(16 << 10)].to_owned());
-        let (held, server) = held.await.unwrap_or_default();
+        let (held, server) = match held.await {
+            Ok(held) => held,
+            Err(e) => {
+                self.owed.store(true, Relaxed);
+                eprintln!("razor: finding tasks of {}: {e}", by.0);
+                return;
+            }
+        };
         for (id, seen) in held {
             let close = report
                 .filter(|r| r.1 == Some(id))

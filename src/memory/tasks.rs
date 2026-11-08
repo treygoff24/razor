@@ -147,17 +147,22 @@ pub(super) fn scan(dir: &Path, closed: bool) -> Result<Vec<Task>, Error> {
             Err(e) if e.kind() == ErrorKind::NotFound => continue,
             entries => entries.map_err(other("reading task files"))?,
         };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let id = name.to_str().and_then(|n| n.strip_suffix(".md"));
-            let id = id.and_then(|n| n.parse().ok());
-            // A folder, a pipe, or a file removed since the listing is no task.
+        for entry in entries {
+            let path = entry.map_err(other("reading task files"))?.path();
+            let id = path
+                .file_name()
+                .and_then(|n| n.to_str()?.strip_suffix(".md")?.parse().ok());
+            let Some(id) = id else { continue };
+            // A folder, a pipe, or a file removed since the listing is no task; a task file
+            // that cannot be read refuses, so no claim in it is taken for released.
             let file = match open || closed {
-                true => files::read(&entry.path(), "").map(|found| found.file),
+                true => files::read(&path, "").map(|found| found.file),
                 false => Ok(String::new()),
             };
-            if let (Some(id), Ok(file)) = (id, file) {
-                all.push(Task::read(id, open, &file));
+            match file {
+                Ok(file) => all.push(Task::read(id, open, &file)),
+                Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::InvalidInput) => {}
+                Err(e) => return Err(other("reading a task file")(e)),
             }
         }
     }
@@ -482,19 +487,36 @@ pub(super) fn folder(root: &Path) -> PathBuf {
     root.iter().skip(1).map(part).chain(["%".into()]).collect()
 }
 
-/// The project of each folder `folder` made within the tasks folder `dir`.
-pub(super) fn projects(dir: &Path) -> Vec<PathBuf> {
-    let (mut dirs, mut found) = (vec![dir.to_owned()], Vec::new());
+/// The project of each folder `folder` made within the tasks folder `dir`, and whether every
+/// folder in it could be read.
+pub(super) fn projects(dir: &Path) -> (Vec<PathBuf>, bool) {
+    let (mut dirs, mut found, mut whole) = (vec![dir.to_owned()], Vec::new(), true);
     while let Some(at) = dirs.pop() {
-        for entry in fs::read_dir(&at).into_iter().flatten().flatten() {
+        let entries = match fs::read_dir(&at) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && at == dir => continue,
+            Err(_) => {
+                whole = false;
+                continue;
+            }
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                whole = false;
+                continue;
+            };
             if entry.file_name() == "%" {
                 let parts = at.strip_prefix(dir).unwrap_or(&at).iter();
                 let parts = parts.map(|p| p.to_string_lossy().replace("%25", "%"));
                 found.push(Path::new("/").join(parts.collect::<PathBuf>()));
-            } else if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            } else if entry
+                .file_type()
+                .inspect_err(|_| whole = false)
+                .is_ok_and(|t| t.is_dir())
+            {
                 dirs.push(entry.path());
             }
         }
     }
-    found
+    (found, whole)
 }

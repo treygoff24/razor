@@ -66,12 +66,12 @@ type Alert = (&'static str, SessionId, Option<EntryId>, Vec<String>);
 /// `liveactivity`), the priority and the payload.
 struct Message(String, Push, &'static str, u8, Value);
 
-/// A follow's Live Activity: what it last showed and when, and an ordinary update waiting.
+/// A follow's accepted content and next attempt, with its end kept until queued.
+#[derive(Default)]
 struct Shown {
-    device: String,
-    push: Push,
     sent: Option<(Following, Instant)>,
-    waiting: bool,
+    waiting: Option<Instant>,
+    end: Option<Following>,
 }
 
 struct Sender {
@@ -371,44 +371,52 @@ impl Sender {
         self.shown
             .retain(|token, _| follows.iter().any(|(_, f)| f.push.token == *token));
         for (device, Follow { session, push }) in follows {
-            let Some(row) = self
-                .rows
-                .get(&session)
-                .filter(|r| r.close_reason != Some(CloseReason::Idle))
-            else {
-                continue;
+            let ending = self.shown.get(&push.token).and_then(|s| s.end.clone());
+            let (following, ended) = if let Some(following) = ending {
+                (following, true)
+            } else {
+                let Some(row) = self
+                    .rows
+                    .get(&session)
+                    .filter(|r| r.close_reason != Some(CloseReason::Idle))
+                else {
+                    self.shown.remove(&push.token);
+                    continue;
+                };
+                let children = self
+                    .rows
+                    .values()
+                    .filter(|r| r.parent.as_ref() == Some(&session));
+                let working = children.clone().any(|r| r.state == State::Working);
+                let children = children.filter(|r| r.state != State::Done);
+                let following = Following {
+                    state: row.state,
+                    asks: row.asks.len(),
+                    failed: row.failed,
+                    headline: row.headline.chars().take(200).collect(),
+                    children: children.take(32).map(|r| (r.state, r.asks.len())).collect(),
+                };
+                let ended = row.state == State::Done || row.finished && !working;
+                (following, ended)
             };
-            let children = self
-                .rows
-                .values()
-                .filter(|r| r.parent.as_ref() == Some(&session));
-            let working = children.clone().any(|r| r.state == State::Working);
-            let children = children.filter(|r| r.state != State::Done);
-            let following = Following {
-                state: row.state,
-                asks: row.asks.len(),
-                failed: row.failed,
-                headline: row.headline.chars().take(200).collect(),
-                children: children.take(32).map(|r| (r.state, r.asks.len())).collect(),
-            };
-            if row.state == State::Done || row.finished && !working {
+            let shown = self.shown.entry(push.token.clone()).or_default();
+            if ended {
+                shown.end = Some(following.clone());
+                shown.waiting = Some(Instant::now() + EVERY);
+                let Ok(permit) = self.queue.try_reserve() else {
+                    continue;
+                };
                 if let Err(e) = self.app.devices.forget(&device, &push.token).await {
                     eprintln!("razor: {e}");
                     continue;
                 }
                 self.shown.remove(&push.token);
-                enqueue(&self.queue, activity(device, push, &following, "end", 10));
+                permit.send(activity(device, push, &following, "end", 10));
                 continue;
             }
-            let shown = self.shown.entry(push.token.clone()).or_insert(Shown {
-                device,
-                push,
-                sent: None,
-                waiting: false,
-            });
             let last = shown.sent.as_ref().map(|(f, _)| f);
             if last == Some(&following) {
-                shown.waiting = false;
+                shown.waiting = None;
                 continue;
             }
             let urgent = last.is_some_and(|f| {
@@ -417,15 +425,15 @@ impl Sender {
             });
             let due = (shown.sent.as_ref()).is_none_or(|(_, at)| at.elapsed() >= EVERY);
             if urgent || due {
-                let (device, push) = (shown.device.clone(), shown.push.clone());
+                shown.waiting = Some(Instant::now() + EVERY);
+                let Ok(permit) = self.queue.try_reserve() else {
+                    continue;
+                };
                 let priority = if urgent { 10 } else { 5 };
-                enqueue(
-                    &self.queue,
-                    activity(device, push, &following, "update", priority),
-                );
-                (shown.sent, shown.waiting) = (Some((following, Instant::now())), false);
+                permit.send(activity(device, push, &following, "update", priority));
+                (shown.sent, shown.waiting) = (Some((following, Instant::now())), None);
             } else {
-                shown.waiting = true;
+                shown.waiting = shown.sent.as_ref().map(|(_, at)| *at + EVERY);
             }
         }
     }
@@ -449,11 +457,7 @@ impl Sender {
 
     /// When the next waiting update may go.
     fn due(&self) -> Option<Instant> {
-        let waiting = self.shown.values().filter(|s| s.waiting);
-        waiting
-            .filter_map(|s| s.sent.as_ref())
-            .map(|(_, at)| *at + EVERY)
-            .min()
+        self.shown.values().filter_map(|s| s.waiting).min()
     }
 }
 

@@ -200,7 +200,7 @@ async fn listen(
         Error::Refused(format!("Razor cannot listen on {}: {e}.", socket.display()))
     })?;
     let found = json!({ "pid": std::process::id(), "address": null });
-    tokio::fs::write(home.join("server.json"), found.to_string())
+    save(&home, "server.json", found.to_string().as_bytes())
         .await
         .map_err(other("Writing server.json"))?;
     let (_sleep, asleep) = watch::channel(None);
@@ -361,7 +361,7 @@ async fn network(app: &App, address: Option<String>, router: Router) -> io::Resu
         eprintln!("Razor is now listening on server.address {address} ({bound}).");
     }
     let found = json!({"pid": std::process::id(), "address": bound.to_string()});
-    tokio::fs::write(app.home.join("server.json"), found.to_string()).await?;
+    save(&app.home, "server.json", found.to_string().as_bytes()).await?;
     // Streaming small writes must not wait for a peer's delayed acknowledgment, and a
     // peer that vanished without closing (a phone that lost its network) is let go about
     // two minutes after it last answered: keepalive probes an idle connection after 60

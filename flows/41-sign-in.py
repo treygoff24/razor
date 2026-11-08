@@ -92,3 +92,22 @@ with flow([reply(text="before"), *([invalid] * 10), reply(text="unchanged"), ref
     assert recovered.returncode == 0 and recovered.stdout.strip() == "after", (recovered.stdout, recovered.stderr)
     tokens = [json.loads(path.read_text())["headers"].get("authorization") for path in sorted(f.requests.glob("[0-9]*.json"))]
     assert tokens == [f"Bearer flow-token-{session}-{n}" for n in ([1] * 13 + [2] * 3 + [3])], tokens
+
+# Changing a provider's credential setting takes effect on the next turn, with a warm native
+# conversation or after its idle close; no sign-in saved on the old provider overrides it.
+for idle in (0, 3600):
+    config = (f'[sessions]\nidle = {idle}\n[providers.local]\nformat = "anthropic"\n'
+              'base_url = "{standin}"\nkey = "FLOW_FIRST"\n')
+    with flow([reply(text="first"), reply(text="second"), reply(text="first again")], model="local/opus",
+              config=config, env={"FLOW_FIRST":"flow-first", "FLOW_SECOND":"flow-second"}) as f:
+        session = f.ask("First key.")["session"]
+        person = f.home / ".razor/config.toml"
+        previous = "FLOW_FIRST"
+        for key, text in (("FLOW_SECOND", "Second key."), ("FLOW_FIRST", "First key again.")):
+            person.write_text(person.read_text().replace(f'key = "{previous}"', f'key = "{key}"'))
+            previous = key
+            f.ask("--resume", session, text)
+        headers = [json.loads((f.requests / f"{i:03}.json").read_text())["headers"] for i in range(1, 4)]
+        assert [h.get("authorization") for h in headers] == ["Bearer flow-first", "Bearer flow-second", "Bearer flow-first"], headers
+        assert [h.get("x-api-key") for h in headers] == ["flow-first", "flow-second", "flow-first"], headers
+        assert len([e for e in f.record(session) if e["kind"] == "rebuild"]) == 2

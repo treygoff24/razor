@@ -126,3 +126,18 @@ with tempfile.TemporaryDirectory() as scratch:
         for name, i in (("old65", 66), ("weekly", 67), ("old01", 64), ("old00", 65), ("old64", 68)):
             latest = row["schedules"][name]["latest"]
             assert latest and latest["at"] == now - (140 - i * 2) * day, (name, latest)
+        stop(f)
+        entries = [entries[0],
+                   {"id": 2, "at": now - 2 * day, "kind": "input", "text": "Delayed run.",
+                    "from": {"schedule": {"name": "old65", "due": now - 2 * day}}},
+                   {"id": 3, "at": now, "kind": "input", "text": "New run.",
+                    "from": {"schedule": {"name": "weekly", "due": now}}},
+                   {"id": 4, "at": now, "kind": "withdrawn", "inputs": [3]},
+                   {"id": 5, "at": now, "kind": "text", "text": "Delayed run completed."},
+                   {"id": 6, "at": now, "kind": "turn_end", "inputs": [2], "end": "done",
+                    "usage": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "requests": 0, "waited": 0}}]
+        (f.home / ".razor/sessions/ember/record.jsonl").write_text(''.join(json.dumps(e) + '\n' for e in entries))
+        start_server(f)
+        row = next(r for r in json.load(send(f, "GET", "/residents")) if r["session"] == "ember")
+        latest = row["schedules"]["old65"]["latest"]
+        assert latest["start"] == 5 and latest["line"] == "Delayed run completed.", latest

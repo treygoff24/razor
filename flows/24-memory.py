@@ -13,6 +13,7 @@ import threading
 from claude import reply
 from driver import flow
 from model import tool
+from responses import PLAIN, call as response_call, done, response
 from server import post, send, stop, until
 
 def task_events(f):
@@ -53,7 +54,7 @@ with flow(replies) as f:
     assert not memory(action="search", query="faded")["hits"] and list(retired.rglob(f"{faded}.md")), "an expired memory stayed"
     assert not memory(action="search", query="lamplight")["hits"] and list(retired.rglob(f"{old}.md")), "replacement did not retire the old file"
     assert [h["id"] for h in memory(action="search", query="lantern")["hits"]] == [new], "replacement was not searchable"
-    memory(action="write", kind="fact", replaces=new)
+    memory(action="write", replaces=new)
     assert not memory(action="search", query="lantern")["hits"] and list(retired.rglob(f"{new}.md")), "retirement did not move the file out of search"
     memory(action="write", kind="state", text="STATE_FILES_24 ready for a new session.", replaces="state")
     ruling = memory(action="write", kind="ruling", text="Keep the marker.")["id"]
@@ -76,6 +77,43 @@ with flow(replies) as f:
     assert "STATE_FILES_24" in page and ruling in page, "helper lost main checkout's memory"
     offered = {t["name"]: t["input_schema"] for t in json.loads(page)["tools"]}
     assert [offered[f"mcp__razor__{n}"]["properties"]["action"]["enum"] for n in ("memory", "task")] == [["search", "get"], ["list", "get", "write"]], "a helper cannot claim or comment"
+
+    # Only dreaming writes pages. Its fresh run closes after the scheduled turn and sees
+    # work awaiting merge on a live helper branch, rather than calling it a change on main.
+    assert use("memory", resume=session, action="write", kind="page", name="guide",
+               description="Guide.", text="Must not land.")[1]["outcome"] == "error", "ordinary session wrote a wiki page"
+    helper = replace(f, cwd=Path(entries[0]["cwd"]))
+    (helper.cwd / "base").write_text("Changed on the helper branch.")
+    helper.git("-c", "user.name=Flow", "-c", "user.email=flow@example.invalid", "commit", "-am", "Change base")
+    branch = helper.git("branch", "--show-current").strip()
+    cite = f"file:base@{helper.git('rev-parse', 'HEAD').strip()}"
+    cited = memory(action="write", kind="fact", text="Helper changed base.", description="Branch work.", cites=[cite])["id"]
+    config = f.home / ".razor/config.toml"
+    config.write_text(config.read_text() + PLAIN + '[memory]\nnight = false\nmodel = "sol"\n')
+    sessions = f.home / ".razor/sessions"
+    before, requests = set(sessions.iterdir()), len(f.sent())
+    off = f.run("dream")
+    assert off.returncode == 0 and "off" in off.stdout.lower(), off
+    assert set(sessions.iterdir()) == before and len(f.sent()) == requests, "disabled dreaming started work"
+    config.write_text(config.read_text().replace("night = false", 'night = "03:00"'))
+    replies.extend([response([response_call("bash", '{"command":"touch forbidden-dream-write"}', "dream_shell")]), done(),
+                    response([response_call("memory", json.dumps({"action": "write", "kind": "ruling", "text": "Must not land."}), "dream_ruling")]), done()])
+    started = f.run("dream", str(f.cwd))
+    assert started.returncode == 0, started
+    dream = started.stdout.strip()
+    dreamed = until(f, dream, lambda es: any(e["kind"] == "turn_end" for e in es))
+    assert set(sessions.iterdir()) - before == {sessions / dream}, "dreaming started more than one session"
+    scheduled = next(e for e in dreamed if e["kind"] == "input")
+    assert scheduled["from"]["schedule"]["name"] == "dream", scheduled
+    assert any(e["kind"] == "turn_end" and e.get("closed") and scheduled["id"] in e["inputs"] for e in dreamed), dreamed[-3:]
+    refused = next(e for e in dreamed if e["kind"] == "result" and e["call"] == "dream_shell")
+    assert refused["outcome"] == "error" and not (f.cwd / "forbidden-dream-write").exists(), refused
+    assert any(all(part in line for part in (cited, cite, "awaiting merge", branch))
+               for line in scheduled["text"].splitlines()), "citation lost its unmerged helper branch"
+    # A real person's input supplies valid ruling provenance; the dreaming role still refuses.
+    f.ask("--resume", dream, "Keep this decision in the project.")
+    refused = next(e for e in f.record(dream) if e["kind"] == "result" and e["call"] == "dream_ruling")
+    assert refused["outcome"] == "error", "dreaming wrote a ruling"
 
     # Two homes share tasks through a bare repository's hidden ref: a claim on one is refused on
     # the other, a write while the remote is unreachable is refused, and closing releases a claim.

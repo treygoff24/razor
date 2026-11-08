@@ -4,6 +4,7 @@
 
 mod calendar;
 mod deliveries;
+mod dream;
 mod install;
 mod list;
 mod notify;
@@ -94,6 +95,7 @@ struct Inner {
     state: Mutex<State>,
     wake: Notify,
     sorting: watch::Sender<Sort>,
+    dreaming: tokio::sync::Mutex<()>,
 }
 
 /// At most one entry per configured resident in `stopped` and `started`.
@@ -128,6 +130,7 @@ impl Residents {
                 state: Mutex::default(),
                 wake: Notify::new(),
                 sorting,
+                dreaming: tokio::sync::Mutex::new(()),
             }),
         };
         tokio::spawn(residents.clone().fire());
@@ -193,14 +196,34 @@ impl Residents {
 
     /// Run `schedule` now, as when it comes due, with `due` now: in the home session, waiting for
     /// a busy turn, or in a fresh thread. Its entry in the home session.
-    pub(crate) async fn run(&self, name: &SessionId, schedule: &str) -> Result<EntryId, Error> {
+    pub(crate) async fn run(
+        &self,
+        name: &str,
+        schedule: &str,
+        cwd: Option<&Path>,
+    ) -> Result<serde_json::Value, Error> {
+        if schedule == "dream" {
+            let cwd = match cwd {
+                Some(cwd) => cwd.to_owned(),
+                None => {
+                    let name = SessionId::try_from(name.to_owned())
+                        .map_err(other("reading the resident name"))?;
+                    self.resident(&name).await?.cwd
+                }
+            };
+            return self.dream_now(&cwd).await;
+        }
+        let name =
+            SessionId::try_from(name.to_owned()).map_err(other("reading the resident name"))?;
+        let name = &name;
         let resident = self.resident(name).await?;
         let Some(s) = resident.schedules.get(schedule) else {
             let sentence =
                 (TEXT.no_schedule.replace("{name}", name.as_str())).replace("{schedule}", schedule);
             return Err(Error::Refused(sentence));
         };
-        self.schedule(name, schedule, s, now()).await
+        let (entry, _) = self.schedule(name, schedule, s, now(), None).await?;
+        Ok(serde_json::json!({"entry": entry}))
     }
 
     /// A thread of resident `name`: its folder, or its resident project's, and the thread its
@@ -284,6 +307,13 @@ impl Residents {
             if now / 60_000 > last / 60_000 {
                 self.inner.controller.memory().tick(&self.inner.controller);
             }
+            if let crate::config::DreamNight::At(night) = config.memory.night
+                && let Some(due) = calendar::due(&[night], &[], now, true)
+                && due > last
+            {
+                let residents = self.clone();
+                tokio::spawn(async move { residents.dreams(due).await });
+            }
             let mut sleep = 60_000;
             for (name, resident) in &config.residents {
                 if self.state().stopped.contains(name) {
@@ -349,50 +379,23 @@ impl Residents {
             if due <= recorded.get(schedule).copied().unwrap_or(since) {
                 continue;
             }
-            if let Err(e) = self.schedule(name, schedule, s, due).await {
+            if let Err(e) = self.schedule(name, schedule, s, due, None).await {
                 eprintln!("razor: resident {name}'s schedule {schedule}: {e}");
             }
         }
         if came(&[resident.night], &[]) {
-            let input = self.day(name, &resident.cwd, now).await;
+            let from = Origin::Program {
+                name: "razor".into(),
+            };
+            let input = c
+                .admit(name, Input::new(from, TEXT.day.clone()))
+                .await
+                .inspect_err(|e| eprintln!("razor: resident {name}'s day: {e}"))
+                .ok();
             if let Err(e) = c.night(name, input).await {
                 eprintln!("razor: resident {name}'s night: {e}");
             }
         }
-    }
-
-    /// Before the night's rebuild, the home session gets one input asking it to tidy its memory
-    /// and tasks, with the day's threads and fresh runs, a line each, so the resident keeps one
-    /// mind (a thread's name and its last reply's first line, and a fresh run's job and line),
-    /// and its memories' lines; the input's entry, for the rebuild, which waits for that input's
-    /// turn to end. A busy home session settles its current batch, and gets the input after its
-    /// turn, past the rebuild.
-    async fn day(&self, name: &SessionId, cwd: &Path, now: Millis) -> Option<EntryId> {
-        let (c, since) = (&self.inner.controller, now - DAY);
-        let mut lines = Vec::new();
-        let roots = crate::record::list(c.home(), None, Some(name), false, usize::MAX).await;
-        for (session, .., changed) in roots.unwrap_or_default() {
-            if crate::protocol::millis(changed) >= since
-                && let Ok(summary) = c.summary(&session).await
-            {
-                let reply = self.reply(&session).await;
-                lines.push(format!("- {session} {}: {reply}", summary.name));
-            }
-        }
-        let home = c.summary(name).await.ok();
-        let runs = home.iter().flat_map(|s| s.runs.since(since));
-        for run in runs.filter(|r| r.session != *name) {
-            let run = self.shown(run, home.as_ref()).await;
-            lines.push(format!("- {}: {}", run.what, run.line));
-        }
-        let index = c.memory().index(c, cwd).await;
-        let text = format!("{}\n\n{}\n\n{index}", TEXT.day, lines.join("\n"));
-        let from = Origin::Program {
-            name: "razor".into(),
-        };
-        let admitted = c.admit(name, Input::new(from, text)).await;
-        let report = |e: &controller::Error| eprintln!("razor: resident {name}'s day: {e}");
-        admitted.inspect_err(report).ok()
     }
 
     /// The first line of a session's last reply among its newest entries.
@@ -419,7 +422,8 @@ impl Residents {
         schedule: &str,
         s: &Schedule,
         due: Millis,
-    ) -> Result<EntryId, Error> {
+        id: Option<SessionId>,
+    ) -> Result<(EntryId, SessionId), Error> {
         let c = &self.inner.controller;
         let text = match s.deliver {
             Deliver::None => s.text.clone(),
@@ -435,17 +439,11 @@ impl Residents {
             return c
                 .admit(name, input)
                 .await
+                .map(|entry| (entry, name.clone()))
                 .map_err(other("admitting a schedule"));
         }
         let (cwd, thread) = self.thread(name, Some(schedule.into()), None).await?;
-        let created = c.create(
-            cwd,
-            input.model.clone(),
-            (s.effort, None),
-            None,
-            None,
-            thread,
-        );
+        let created = c.create(cwd, input.model.clone(), (s.effort, None), id, None, thread);
         let session = created
             .await
             .map_err(other("starting a fresh run's thread"))?;
@@ -466,7 +464,9 @@ impl Residents {
             Err(e) => Err(e),
         };
         self.state().starting.remove(&session);
-        started.map_err(other("starting a fresh run"))
+        started
+            .map(|entry| (entry, session))
+            .map_err(other("starting a fresh run"))
     }
 
     /// The resident's config; `NoResident` when there is none.

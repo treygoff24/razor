@@ -80,11 +80,19 @@ async fn write(tools: &Tools, hunk: &Hunk<'_>) -> Result<(), Error> {
         Hunk::Delete { path } => remove(tools, path).await,
         Hunk::Update { path, to, chunks } => {
             let text = replace(&load(&tools.path(path), path).await?, chunks, path)?;
+            let moving = match to {
+                Some(to) => {
+                    let from = tokio::fs::canonicalize(tools.path(path)).await;
+                    let to = tokio::fs::canonicalize(tools.path(to)).await;
+                    !matches!((from, to), (Ok(from), Ok(to)) if from == to)
+                }
+                None => false,
+            };
             tools.save(to.unwrap_or(path), &text).await?;
-            match to {
-                Some(_) => remove(tools, path).await,
-                None => Ok(()),
+            if moving {
+                remove(tools, path).await?;
             }
+            Ok(())
         }
     }
 }

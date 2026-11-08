@@ -169,7 +169,7 @@ impl Transcript {
                 None => {
                     // A handed skill's text is worn off once a later rebuild pages it out.
                     let after = || self.entries.range(e.id..).map(|(_, e)| &e.body);
-                    let worn = input.text.starts_with("<skill name=\"")
+                    let worn = tools::skill::input(input).is_some()
                         && after().any(|b| matches!(b, Body::Rebuild { .. }));
                     let worn = (worn && self.takes).then_some(e.id);
                     rows.push(Row::plain(""));

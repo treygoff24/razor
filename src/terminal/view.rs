@@ -445,13 +445,7 @@ fn press(app: &App, id: &SessionId, action: transcript::Action) -> Action {
                 .get(&id)
                 .and_then(|t| Some(&t.entries.get(&entry)?.body));
             let name = body.and_then(|body| match body {
-                Body::Input(input) => Some(
-                    input
-                        .text
-                        .strip_prefix("<skill name=\"")?
-                        .split_once('"')?
-                        .0,
-                ),
+                Body::Input(input) => super::tools::skill::input(input).map(|(name, _, _)| name),
                 Body::Call { input, .. } => input["name"].as_str(),
                 _ => None,
             });

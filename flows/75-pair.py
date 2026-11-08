@@ -6,7 +6,7 @@ import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from driver import flow
-from server import post, send, start, stop, wait
+from server import published, post, send, start, stop, wait
 
 
 def remote(address, method, path, body=None, source=None):
@@ -25,7 +25,7 @@ with flow([], config='[server]\nname = "alpha"\naddress = "127.0.0.1:0"') as f, 
     second = beta.home / ".razor"
     start(f)
     assert beta.run("devices").returncode == 0
-    a, b = (json.loads((p / "server.json").read_text())["address"] for p in (first, second))
+    a, b = (published(p) for p in (first, second))
     assert remote(b, "GET", "/pair") == (200, b'{"name":""}'), "public identity leaked data or needs auth"
     assert remote(b, "POST", "/pair", {"address": "127.0.0.2:7433", "key": "0" * 64})[0] == 400, "pair request accepted a different sender IP"
     assert remote(b, "GET", "/devices")[0] == 401, "discovery opened protected routes"
@@ -115,7 +115,7 @@ with flow([], config='[server]\nname = "alpha"\naddress = "127.0.0.1:0"') as f, 
     settings.write_text(settings.read_text().replace(f'127.0.0.1:{peer_port}', '127.0.0.1:0'))
     start(f)
     assert beta.run("devices").returncode == 0
-    a, b = (json.loads((p / "server.json").read_text())["address"] for p in (first, second))
+    a, b = (published(p) for p in (first, second))
     # Clear beta's stale untrusted requests by its restart above.
     first_add = f.run("devices", "add", "beta", "--address", b)
     assert first_add.returncode == 0 and "--key" not in first_add.stdout, first_add

@@ -202,16 +202,38 @@ fn shared(b: &Value, action: &str, mode: &str) -> bool {
     b["action"] == action && (b["mode"] == "both" || b["mode"] == mode)
 }
 
+/// One server-selected tool set; dreaming has no shell or file-writing tools.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Builtins {
+    Normal,
+    Child,
+    Dream,
+}
+impl From<bool> for Builtins {
+    fn from(child: bool) -> Self {
+        if child { Self::Child } else { Self::Normal }
+    }
+}
+pub(crate) fn dream_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read" | "recall" | "skill" | "status" | "memory" | "message"
+    )
+}
 /// The shipped built-in declarations, with a variant's entries and then, for a child, the
 /// child's set over them: an entry sets each of its fields over its action's shared declaration,
 /// a field being a path of names joined by `/` whose value replaces what is there whole.
-fn builtins(variant: &Value, child: bool, mode: &str) -> Result<Vec<Value>, Error> {
+fn builtins(variant: &Value, role: Builtins, mode: &str) -> Result<Vec<Value>, Error> {
     let Value::Array(mut builtins) = shipped(include_str!("data/tools.json"))? else {
         return Err(Error::Invalid("Shipped tools.json is not a list".into()));
     };
     let reads = shipped(include_str!("data/child-tools.json"))?;
     let (tools, reads) = (variant["tools"].as_array(), reads.as_array());
-    for entry in tools.into_iter().chain(reads.filter(|_| child)).flatten() {
+    for entry in tools
+        .into_iter()
+        .chain(reads.filter(|_| role == Builtins::Child))
+        .flatten()
+    {
         let action = entry["action"].as_str().unwrap_or_default();
         let at = builtins.iter().position(|b| shared(b, action, mode));
         let at = at.unwrap_or_else(|| {
@@ -235,6 +257,9 @@ fn builtins(variant: &Value, child: bool, mode: &str) -> Result<Vec<Value>, Erro
         {
             builtins[at]["generic"] = description.clone();
         }
+    }
+    if role == Builtins::Dream {
+        builtins.retain(|b| b["action"].as_str().is_some_and(dream_tool));
     }
     Ok(builtins)
 }
@@ -280,7 +305,11 @@ fn version(endpoint: &Endpoint, mode: &str, variant: &Value, actions: &[Action])
     let chat = endpoint.transport == Transport::Chat;
     let family = match (claude, chat) {
         _ if !chat && endpoint.key.is_some() => {
-            format!("{}-{}", if claude { "claude" } else { "gpt" }, endpoint.url)
+            if claude {
+                format!("claude-{}-{:?}", endpoint.url, endpoint.key)
+            } else {
+                format!("gpt-{}", endpoint.url)
+            }
         }
         (true, _) => "claude".to_owned(),
         (_, true) => format!(
@@ -311,7 +340,7 @@ pub(crate) fn load(
     code_mode: bool,
     variant: Option<&Value>,
     actions: Arc<[Action]>,
-    child: bool,
+    role: Builtins,
     image_gen: bool,
 ) -> Result<Profile, Error> {
     let transport = model.endpoint.transport;
@@ -344,9 +373,9 @@ pub(crate) fn load(
         wording: shipped(include_str!("data/results.json"))?,
         renames: Vec::new(),
     };
-    let builtins = builtins(variant, child, mode)?;
+    let builtins = builtins(variant, role, mode)?;
     if claude && !code_mode {
-        profile.tools = claude::tools(&actions, &builtins)?;
+        profile.tools = claude::tools(&actions, &builtins, role == Builtins::Dream)?;
         return Ok(profile);
     }
     profile.bind(&actions, &builtins, mode);
@@ -355,7 +384,9 @@ pub(crate) fn load(
     }
     if !code_mode {
         // OpenAI's hosted search, on the subscription; Lite carries no hosted tools.
-        profile.tools.push(json!({"type": "web_search"}));
+        if role != Builtins::Dream {
+            profile.tools.push(json!({"type": "web_search"}));
+        }
         if image_gen {
             let input = shipped(include_str!("data/image-gen.json"))?["input"].take();
             let tool = profile.declare("imagegen", &imagegen("imagegen", "read"), input);

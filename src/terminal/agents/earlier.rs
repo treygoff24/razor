@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 pub(in crate::terminal) struct Earlier {
     pages: BTreeMap<String, Page>,
     view: Option<(String, u64)>,
+    request: u64,
 }
 
 #[derive(Default)]
@@ -17,7 +18,7 @@ struct Page {
     after: Option<SessionId>,
     next: Option<SessionId>,
     error: Option<String>,
-    loading: bool,
+    loading: Option<u64>,
 }
 
 impl Earlier {
@@ -40,6 +41,7 @@ pub(in crate::terminal) fn sync(app: &mut App) {
     if view != app.list.earlier.view {
         app.list.earlier = Earlier {
             view,
+            request: app.list.earlier.request,
             ..Default::default()
         };
     }
@@ -64,17 +66,18 @@ fn load(app: &mut App, owner: String, after: Option<SessionId>) {
     };
     let name = owner.clone();
     let cursor = after.clone();
+    let request = app.list.earlier.request.wrapping_add(1);
     if app.pending >= 8
         || !app.spawn(|api| async move {
             let read = api.earlier(&name, &view.0, cursor.as_ref()).await;
             move |app: &mut App| {
-                if app.list.earlier.view.as_ref() != Some(&view) {
-                    return;
-                }
                 let Some(page) = app.list.earlier.pages.get_mut(&name) else {
                     return;
                 };
-                page.loading = false;
+                if page.loading != Some(request) {
+                    return;
+                }
+                page.loading = None;
                 match read {
                     Ok(read) => (page.rows, page.next, page.error) = (read.agents, read.next, None),
                     Err(e) => page.error = Some(e.to_string()),
@@ -85,8 +88,9 @@ fn load(app: &mut App, owner: String, after: Option<SessionId>) {
     {
         return;
     }
+    app.list.earlier.request = request;
     let page = app.list.earlier.pages.entry(owner).or_default();
-    (page.after, page.loading) = (after, true);
+    (page.after, page.loading) = (after, Some(request));
 }
 
 fn install(app: &mut App) {
@@ -138,10 +142,12 @@ fn install(app: &mut App) {
 
 pub(super) fn press(app: &mut App) {
     let pages = &app.list.earlier.pages;
-    let retry = pages.values().any(|p| p.error.is_some() && !p.loading);
+    let retry = pages
+        .values()
+        .any(|p| p.error.is_some() && p.loading.is_none());
     let queries: Vec<_> = pages
         .iter()
-        .filter(|(_, p)| !p.loading)
+        .filter(|(_, p)| p.loading.is_none())
         .filter_map(|(name, p)| {
             if retry {
                 p.error.as_ref().map(|_| (name.clone(), p.after.clone()))
@@ -163,7 +169,7 @@ pub(super) fn controls(app: &App, w: usize, tone: panel::Tone) -> Vec<Row> {
         let owner = [owner.as_str(), "this server"][usize::from(owner.is_empty())];
         let notice = match &page.error {
             Some(error) => format!("last heard · {owner}: {error}"),
-            None if page.loading => format!("{owner}: loading"),
+            None if page.loading.is_some() => format!("{owner}: loading"),
             None => continue,
         };
         out.push(Row(
@@ -178,8 +184,14 @@ pub(super) fn controls(app: &App, w: usize, tone: panel::Tone) -> Vec<Row> {
             None,
         ));
     }
-    let retry = pages.values().any(|p| p.error.is_some() && !p.loading);
-    if retry || pages.values().any(|p| p.next.is_some() && !p.loading) {
+    let retry = pages
+        .values()
+        .any(|p| p.error.is_some() && p.loading.is_none());
+    if retry
+        || pages
+            .values()
+            .any(|p| p.next.is_some() && p.loading.is_none())
+    {
         let mark = [" ", "❯"][usize::from(app.list.selected == Some(Action::Earlier))];
         let word = if retry { "Retry" } else { "More" };
         let words = vec![span(format!(" {mark} {word}"), CYAN)];

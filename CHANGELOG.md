@@ -2,6 +2,42 @@
 
 What changed in each Razor release. [Configuration](docs/configuration.md) and the other pages in [docs](docs/README.md) describe each feature in full.
 
+## 0.4.0 (8 November 2026)
+
+### New
+
+- Dreaming: each night at 03:00 Razor checks a project's memory against its recent sessions and sources, one project at a time, in a fresh session. It corrects or retires what no longer holds, files lasting knowledge into wiki pages, merges the sessions' state notes, and looks for repeated failures and questions. It can read, recall, load skills, read status, use memory and send messages, but has no shell or file-writing tools, and it asks you at most one question per project per night. `razor dream [folder]` runs it now; `[memory] night` sets the time or, with `false`, turns it off, and `[memory] model` picks its model ([Memory](docs/memory.md#dreaming)).
+- Wiki pages: dreaming keeps a project's lasting knowledge in `wiki/` under its memory folder (`all/wiki/` for every project), each page with a name, a line saying when to read it and the date it was last checked. The startup page lists them, and search and `get` read them as `wiki/<name>`. A `wiki/_instructions.md` you write tells dreaming what matters and is never changed by it ([Memory](docs/memory.md#wiki-pages)).
+- Each session keeps its own state note, so sessions working in parallel no longer overwrite each other's handoff; the startup page shows the merged note and then newer sessions' notes, and a session's note expires after 14 days unless it says otherwise.
+- Facts and notes can cite their sources with `cites`: session entries, files at a commit, cached references, fetched pages and tasks. Dreaming checks cited code against main and live branches ([Memory](docs/memory.md#sources)).
+- A project can share its memory across machines through `[memory] remote` in `.razor/config.local.toml`, carried on its own git reference the way tasks are ([Memory](docs/memory.md#several-machines)).
+- `recall` with only a session gives that session's digest, and `GET /v1/sessions/<id>/digest` gives it to programs: at most 24 KiB of its inputs, replies, failed calls, memory and task calls and changed files, newest failures first ([Scripting](docs/scripting.md#the-local-api)).
+
+### Changed
+
+- An always-on agent's night asks it only to close finished tasks, turn promises into tasks with due dates and write its state note; dreaming does the memory tidying.
+- **For scripts and apps reading the record:** a skill handed with a message is now its own field, `skill: {name, text}`, on the input, and the input's `text` holds only your words. Older records keep the skill inside `text`. The phone and Mac app read the new field from their next update; until then they show a skill handed back with no words as an empty message.
+- Handing a skill back to an agent no longer touches that agent's saved draft. Only a message carrying your words, pictures or files clears it.
+- `/done` and `/quit` clear the command from the composer as soon as they are sent. If you type more before the session closes, the terminal stays on the closed session with your words, and sending them reopens it.
+- Changing the key setting of a Claude-format provider takes effect on the next turn of an open conversation, instead of only once the conversation is reopened.
+
+### Fixed
+
+- A patch that moved a file to its own path deleted it.
+- Opening the terminal with `--agents` could switch to your most recent conversation after you had started typing a new one.
+- Taking a queued message back into the composer while the terminal's writes were backed up copied its words without withdrawing it, so it could still be sent.
+- Clicking a place in a conversation's history while an earlier page was loading could lose the jump.
+- A picture pasted into a new agent's draft could attach to another draft if you switched destinations while it loaded; switching now waits for the picture.
+- A slow Earlier page could overwrite a newer one after folding and reopening Earlier.
+- A helper that reported and was then continued kept reading "ended" in the stage strip; and a failed call could be marked fixed by a matching call in a later turn.
+- A phone's Live Activity could miss an update or its end when many were waiting to go out; they now wait their turn instead.
+- An always-on agent's run that waited more than a day showed Waiting while it ran.
+- A helper waiting out its grace after sending mail lost the grace, and the reminder that follows it, if the server restarted.
+- A closed session's task claims stay owed until releasing them succeeds, instead of being given up after one failed read; a task file that cannot be read is a refusal rather than an empty list.
+- Replacing a memory writes the new one before retiring the old, so a failed write no longer leaves neither active.
+- A code cell whose final status could not be saved no longer reports itself running forever.
+- The server writes `server.json` whole, so a reader never sees half of it.
+
 ## 0.3.1 (8 November 2026)
 
 ### Changed

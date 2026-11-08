@@ -69,7 +69,17 @@ impl Session {
             n.saturating_add(origin.path.len())
                 .saturating_add(origin.device.len())
         });
-        if input.text.len().saturating_add(origins) > max {
+        let skill = input
+            .skill
+            .as_ref()
+            .map_or(0, |s| s.name.len() + s.text.len() + 30);
+        if input
+            .text
+            .len()
+            .saturating_add(origins)
+            .saturating_add(skill)
+            > max
+        {
             return invalid(&format!(
                 "This input is larger than {max} bytes; shorten it."
             ));
@@ -82,10 +92,20 @@ impl Session {
         self.choosable(input.model.as_deref(), input.speed)?;
         input.suggestions = matches!(input.from, Origin::Person | Origin::Answer { .. })
             && self.c.config().await.ui.suggestions;
-        let person = input.from.is_person() && input.voice.is_none() && input.voice_call.is_none();
+        let person = input.from.is_person()
+            && input.voice.is_none()
+            && input.voice_call.is_none()
+            && (!input.text.is_empty()
+                || !input.images.is_empty()
+                || !input.files.is_empty()
+                || !input.image_origins.is_empty()
+                || input.video.is_some());
         let entry = self.append(Body::Input(input.clone()), None).await?;
         // A fresh run's thread closes with the turn that answers its schedule.
         self.done = self.done.or(self.record.summary().job());
+        if matches!(&input.from, Origin::Schedule { name, .. } if name == "dream") {
+            self.done = Some(entry);
+        }
         if !self.wake(entry, &input) {
             self.pending.push_back((entry, input));
             // A closed session that is no child reopens on its next input.

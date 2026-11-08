@@ -62,7 +62,7 @@ Settings about you or the machine may be set only in your own file, `~/.razor/co
 - what conversations start with: `startup`, `children.startup`, `skills`, `skill_updates`, `pack`;
 - programs Razor runs for you: `ask`, `notify`, `speech`, `transcribe`, `capture`, `play`, `plugins`;
 - safety: `guards`;
-- always-on agents: `residents`;
+- always-on agents and dreaming: `residents`, `memory.night`, `memory.model`;
 - display: `brand`, `ui`;
 - `phone`, `push` and `live`, which serve a separately distributed phone client (`live` sets where its voice calls go: OpenAI by default, or `url`, and `names`, the names its voice will hear).
 
@@ -419,6 +419,9 @@ before = ["call"]
 
 | Setting | Default | What it does |
 | --- | --- | --- |
+| `[memory] night` | `"03:00"` | Local time for dreaming across active projects, one at a time; `false` disables it, including `razor dream`. Your file or a pack only. |
+| `[memory] model` | server default | Model for dreaming; effort is the server's default. Your file or a pack only. |
+| `[memory] remote` | none: plain files | Share project memory through `refs/razor/memory`, as tasks use their own reference. Only `.razor/config.local.toml` may set it ([Memory](memory.md#several-machines)). |
 | `[tasks] remote` | none: plain files | A remote of the project's checkout, or a git URL, through which its tasks are shared, on the hidden reference `refs/razor/tasks` ([Memory](memory.md#tasks)). Only a project's `.razor/config.local.toml` may set it; any other file that sets it is refused. |
 
 ### The server

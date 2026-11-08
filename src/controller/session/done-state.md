@@ -1,1 +1,1 @@
-Then write the project's state note with `memory` (`write`, kind `state`): a few lines on the work in hand and the decisions behind it, not a summary of the past; it replaces the project's last state note and opens the next session's startup page.
+Then write the project's state note with `memory` (`write`, kind `state`): a few lines on the work in hand and the decisions behind it, not a summary of the past; it replaces this session's own note, which opens later sessions' startup pages until dreaming merges it.

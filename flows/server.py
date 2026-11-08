@@ -78,6 +78,11 @@ def until(f, session, done, timeout=30.0):
         time.sleep(0.05)
 
 
+def published(state):
+    """The network address the server whose state directory is `state` publishes once bound."""
+    return wait(lambda: json.loads((state / "server.json").read_text())["address"], 8, "address never published")
+
+
 def wait(condition, timeout=30.0, why="timed out"):
     """`condition()`'s first truthy value, polled every 50 ms; fails with `why` at the deadline."""
     deadline = time.monotonic() + timeout

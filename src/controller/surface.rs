@@ -46,7 +46,7 @@ impl Controller {
         let actions = config.web.actions().collect::<Vec<_>>().into();
         let home = &self.inner.home;
         let version = config
-            .profile(home, &model, actions, child.is_some())?
+            .profile(home, &model, actions, child.is_some().into())?
             .version;
         let effort = choice.0.unwrap_or(config.effort);
         let speed = choice.1.unwrap_or(if child.is_some() {

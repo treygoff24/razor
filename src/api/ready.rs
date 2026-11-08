@@ -289,7 +289,14 @@ pub(super) async fn answer(
     let provider = route.provider.as_deref().unwrap_or_default();
     let at = format!("[providers.{provider}]");
     if endpoint.transport != Transport::Claude {
-        let profile = profiles::load(route.clone(), false, None, Vec::new().into(), false, false);
+        let profile = profiles::load(
+            route.clone(),
+            false,
+            None,
+            Vec::new().into(),
+            false.into(),
+            false,
+        );
         let mut profile = profile.map_err(|e| e.to_string())?;
         profile.prompt = prompt.into();
         let answered = responses.answer(&profile, session, text).await;

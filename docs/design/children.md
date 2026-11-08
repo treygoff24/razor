@@ -72,9 +72,7 @@ pub struct Turn { /* private sent, grace, nudged, text */ }
 impl Turn {
     /// Clears this turn's facts, retaining whether Razor's nudge has been admitted.
     pub fn start(&mut self);
-    /// Marks the nudge after its input passes admission, even if a plugin changes its words.
-    pub fn nudge(&mut self);
-    /// Retains committed mail and closing-text ids, never prose or failed calls.
+    /// Recovers committed turn facts, including grace and Razor's admitted nudge.
     pub fn recorded(&mut self, body: &Body, at: EntryId);
     /// Pending work or answered person input forbids completion; otherwise prepares
     /// the report after a nudge or without sent mail, or starts the mail grace.
@@ -82,8 +80,10 @@ impl Turn {
         -> Result<Option<(SessionId, Input, Option<Vec<PathBuf>>)>, Error>;
     /// Holds an open child's idle task through its grace and unresolved nudge.
     pub fn waiting(&self) -> bool;
+    /// The grace start committed with this turn's end.
+    pub fn grace(&self) -> Option<Millis>;
     /// Offers Razor's nudge against the live setting; only admitted input marks it.
-    pub fn tick(&self, settings: &mut Settings) -> Option<Input>;
+    pub fn tick(&self, settings: &mut Settings, task: Option<EntryId>) -> Option<Input>;
 }
 /// Prepares the same parent, bounded report and changed files for both forms of finish;
 /// no controller call can re-enter the session task that is preparing its own report.
@@ -91,7 +91,7 @@ pub async fn report(summary: &Summary, status: ReportStatus, text: String)
     -> Result<(SessionId, Input, Option<Vec<PathBuf>>), Error>;
 ```
 
-1. `Session` holds `children::Turn`; committed `MailSent` facts set `sent`, so failed calls, channel reads and unmentioned posts do not count as mail.
+1. The record folds `children::Turn` and `Session` takes that value after each append; committed `MailSent` facts set `sent`, so failed calls, channel reads and unmentioned posts do not count as mail.
 2. Starting a turn clears `sent`, `grace` and the text id, not `nudged`; any admitted input wakes a child in grace through the existing admission path. `Session::continued`, after the parent's `Continued` fact and before taking its new task, replaces the whole `Turn`, including `nudged`, with its default.
 3. The controller handles the model's clean `TurnEnd` only after draining job events; Escape, handover and the turn that answers the threshold input never enter this rule; a turn ending in an error reports `blocked` (next section). A rebuild requested while the turn ran does not stop a finish: the child finishes, and the rebuild waits for the turn after a continue.
 4. It records the turn's usage once, releases foreground jobs into end notices, then applies the rule before starting another turn; answered person-input ids come from that turn's actual delivered set, not merely admitted inputs.
@@ -100,9 +100,11 @@ pub async fn report(summary: &Summary, status: ReportStatus, text: String)
 7. No pending work and no sent mail, or an admitted nudge, prepares `ReportStatus::Finished`: completion, not inferred success. Closing Text blocks after the last Call use `record::closing_text`, the same join as `--print`; over 64 KiB, a UTF-8-safe cut ends with their session and entry id or range. Explicit finish still refuses.
 8. Explicit and implicit finish share report preparation and the controller's close/admit path: Results and usage are recorded before close, descendants close before the parent receives its report, and changed files are refreshed without querying the caller's task.
 9. While grace is held, the existing once-a-second controller ticker refreshes the session's settings and calls `tick`; the nudge's exact wording lives in versioned profile data, never a controller template.
-10. `40-no-finish.py` proves the four cases, UTF-8 report truncation, live grace changes and a continuation's fresh nudge; flows 14 and 36 keep pending jobs while exercising the working-child cap and terminal steering. Private turn fields require explicit start, admitted-nudge and idle-hold methods as well as end, tick and the fact setter.
+10. `40-no-finish.py` proves the four cases, UTF-8 report truncation, live grace changes and a continuation's fresh nudge; flows 14 and 36 keep pending jobs while exercising the working-child cap and terminal steering. Private turn fields require explicit start and idle-hold methods as well as end, tick and the fact setter.
 
 **Hard decision: a live grace, checked by the existing ticker.** Add `[children] grace = "3m"` in `src/config`, reusing its duration parser. Each check reads the live value, including project overrides, against the original grace start; editing the setting does not restart the interval. Flows set this same key to seconds. A fixed duration makes every no-reply flow wait three minutes; a flow-only switch violates SPEC 7; a timer task duplicates the controller's ticker. Reusing it costs at most one second of delay and a settings refresh only for a child in grace. Late replies remain the agreed loss: the parent can continue the child.
+
+The turn end commits the grace's wall-clock start in `child_grace` with its answered inputs. The record folds the child's turn facts, so a restart restores the remaining grace and the live marker keeps it loaded. Razor's admitted nudge carries a request keyed to the parent's task entry; the fold recognizes that request regardless of its wording and retains it until a new task. Flow 40 kills and restarts the server during grace before shortening the live setting, then checks one nudge and the report.
 
 ## A child's turn ending in an error
 

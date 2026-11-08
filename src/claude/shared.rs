@@ -71,11 +71,14 @@ impl SharedBridge {
             at.and_then(|at| kept.remove(at))
         };
         let endpoint = profile.borrow().endpoint.clone();
-        let signed = match kept.filter(|(.., closed)| resumed && closed.elapsed() < KEEP) {
-            Some((_, signed, _)) => signed,
-            None if endpoint.key.is_some() => (super::provider(&endpoint, &self.1)?, Value::Null),
+        let signed = match (
+            endpoint.key.is_some(),
+            kept.filter(|(.., closed)| resumed && closed.elapsed() < KEEP),
+        ) {
+            (true, _) => (super::provider(&endpoint, &self.1)?, Value::Null),
+            (false, Some((_, signed, _))) => signed,
             // Outside the lock: an account pick may take a second, and every line waits on it.
-            None => env(&claude.sign_in, &self.1, session.as_str()).await?,
+            (false, None) => env(&claude.sign_in, &self.1, session.as_str()).await?,
         };
         (wire["env"], wire["account"]) = signed.clone();
         if child {
@@ -107,7 +110,7 @@ impl SharedBridge {
             )
             .await;
             let mut state = shared.0.lock().await;
-            if !refused && !signed.0.is_null() {
+            if !refused && endpoint.key.is_none() && !signed.0.is_null() {
                 let kept = &mut state.signed;
                 kept.retain(|(id, ..)| *id != session);
                 if kept.len() == KEPT {

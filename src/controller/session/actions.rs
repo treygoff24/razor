@@ -89,6 +89,9 @@ impl Session {
             Ok((action, input)) => (action, input, None),
             Err(e) => (String::new(), Value::Null, Some((e.to_string(), true))),
         };
+        if crate::memory::dreaming(s) && !crate::profiles::dream_tool(&action) {
+            known = Some(("Dreaming can only read files, recall, load skills, read status, use memory and message.".into(), true));
+        }
         // Another session's entry and a search run as children's actions.
         if action == "recall" && input["session"].is_null() && input["query"].is_null() {
             let entry = EntryId(input["id"].as_u64().unwrap_or(0));
@@ -115,6 +118,21 @@ impl Session {
         {
             c.handover = Some(input["note"].as_str().unwrap_or_default().to_owned());
         }
+        let mut answer = false;
+        if action == "memory" && crate::memory::dreaming(s) {
+            for id in &self.opening {
+                if matches!(
+                    self.record.entry(*id).await.map(|e| e.body),
+                    Ok(Body::Input(Input {
+                        from: Origin::Answer { .. },
+                        ..
+                    }))
+                ) {
+                    answer = true;
+                    break;
+                }
+            }
+        }
         let actions = self.tools.actions();
         let read_only = actions.iter().any(|a| a.name == action && a.read_only);
         let run = Run {
@@ -128,6 +146,7 @@ impl Session {
             input,
             known,
             cited,
+            answer,
             cwd: s.cwd.clone(),
             child: s.child.is_some(),
             tools: self.tools.clone(),
@@ -328,6 +347,7 @@ struct Run {
     known: Option<(String, bool)>,
     /// The entry a memory write cites.
     cited: Option<crate::memory::Cited>,
+    answer: bool,
     cwd: std::path::PathBuf,
     /// Whether the session is a child, which writes no memory or tasks.
     child: bool,
@@ -363,6 +383,7 @@ impl Run {
                     cwd,
                     child,
                     cited,
+                    answer: self.answer,
                 };
                 said(c.inner.memory.run(c, tool, caller, self.input).await)
             }

@@ -4,16 +4,18 @@ use super::{Error, TEXT, other, report};
 use crate::{
     config::Settings,
     profiles,
-    protocol::{Body, End, EntryId, Input, Origin, ReportStatus, SessionId},
+    protocol::{Body, End, EntryId, Input, Millis, Origin, ReportStatus, SessionId, now},
     record::{Record, TEXT_BREAK, closing_text},
 };
-use std::{path::PathBuf, time::Instant};
+use std::path::PathBuf;
+
+const NUDGE: &str = "child-nudge:";
 
 /// Constant-space turn facts; closing text stays only in the record during the grace.
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Turn {
     sent: bool,
-    grace: Option<Instant>,
+    grace: Option<Millis>,
     nudged: bool,
     text: Option<(EntryId, EntryId)>,
 }
@@ -26,14 +28,24 @@ impl Turn {
         self.text = None;
     }
 
-    /// Marks Razor's nudge only after its input has passed admission.
-    pub(crate) fn nudge(&mut self) {
-        self.nudged = true;
-    }
-
-    /// Remembers only committed mail and the first and last closing Text ids.
+    /// Recovers turn facts from committed entries, including grace and Razor's admitted nudge.
     pub(crate) fn recorded(&mut self, body: &Body, at: EntryId) {
         match body {
+            Body::Input(input) => {
+                self.grace = None;
+                if matches!(input.from, Origin::Razor)
+                    && input
+                        .request
+                        .as_deref()
+                        .is_some_and(|r| r.starts_with(NUDGE))
+                {
+                    self.nudged = true;
+                }
+            }
+            Body::TurnEnd { child_grace, .. } => {
+                self.start();
+                self.grace = *child_grace;
+            }
             Body::MailSent { .. } => self.sent = true,
             Body::Text { .. } => self.text = Some((self.text.map_or(at, |(first, _)| first), at)),
             Body::Call { .. } => self.text = None,
@@ -82,7 +94,7 @@ impl Turn {
                 (ReportStatus::Blocked, closing_text(&parts))
             }
             _ if self.sent && !self.nudged => {
-                self.grace = Some(Instant::now());
+                self.grace = Some(now());
                 return Ok(None);
             }
             _ => (ReportStatus::Finished, self.closing(record, TEXT).await?),
@@ -140,12 +152,22 @@ impl Turn {
         self.grace.is_some() || self.nudged
     }
 
+    /// The grace start written with the turn end that begins it.
+    pub(crate) fn grace(&self) -> Option<Millis> {
+        self.grace
+    }
+
     /// Offers the nudge against the live setting without marking an unadmitted input.
-    pub(crate) fn tick(&self, settings: &mut Settings) -> Option<Input> {
+    pub(crate) fn tick(&self, settings: &mut Settings, task: Option<EntryId>) -> Option<Input> {
         let since = self.grace?;
         settings.read();
-        (since.elapsed() >= settings.config.children.grace)
-            .then(|| Input::new(Origin::Razor, profiles::CHILD_NUDGE.into()))
+        (now().saturating_sub(since) >= settings.config.children.grace.as_millis() as u64).then(
+            || {
+                let mut input = Input::new(Origin::Razor, profiles::CHILD_NUDGE.into());
+                input.request = Some(format!("{NUDGE}{}", task.unwrap_or_default().0));
+                input
+            },
+        )
     }
 }
 

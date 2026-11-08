@@ -438,10 +438,9 @@ fn named(app: &App, mid: bool) -> Vec<Candidate> {
     let t = app.focus.as_ref().and_then(|s| app.transcripts.get(s));
     let loaded = t.into_iter().flat_map(|t| t.entries.values().rev());
     let loaded = loaded.filter_map(|e| match &e.body {
-        Body::Input(i) if i.from.is_person() => Some((
-            e.at,
-            i.text.strip_prefix("<skill name=\"")?.split('"').next()?,
-        )),
+        Body::Input(i) if i.from.is_person() => {
+            Some((e.at, super::super::tools::skill::input(i)?.0))
+        }
         _ => None,
     });
     let mut recent: Vec<_> = app.menu.ran.iter().copied().chain(loaded.take(5)).collect();

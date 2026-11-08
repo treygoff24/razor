@@ -2,10 +2,15 @@
 //! `memory` and `task` actions, on Razor's own files, and the rules for their writes. Tasks
 //! share memory's files, page and project; a project's tasks may be shared through git.
 
+mod citations;
 mod claims;
+mod dream;
+pub(crate) use dream::Dream;
 mod files;
 mod share;
+mod shared;
 mod tasks;
+mod write;
 
 use crate::controller::Controller;
 use crate::profiles::machine;
@@ -36,6 +41,17 @@ const STATE: usize = 1500;
 
 #[derive(Deserialize)]
 struct Text {
+    cites: String,
+    page_only: String,
+    page_name: String,
+    dream_ruling: String,
+    file_long: String,
+    scope: String,
+    pages_full: String,
+    instructions: String,
+    dream_input: String,
+    dream_sessions: String,
+    dream_omitted: String,
     state: String,
     rulings: String,
     known: String,
@@ -50,6 +66,7 @@ struct Text {
     state_long: String,
     state_all: String,
     no_text: String,
+    kind: String,
     expires: String,
     description: String,
     no_person: String,
@@ -109,6 +126,8 @@ pub(crate) struct Caller<'a> {
     /// The owned entry at `ref`, or at the latest person input when `ref` is absent.
     /// The controller fetches it with [`cited`] before queueing; memory validates its origin.
     pub(crate) cited: Option<Cited>,
+    /// This turn opened with the person's answer to a question in this session.
+    pub(crate) answer: bool,
 }
 
 /// An entry a ruling may cite and, when it is the person's input or answer, their words.
@@ -177,9 +196,9 @@ enum TaskCall {
 }
 
 /// A write as the model asks it; the shared rules then compose its text and fill its source.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Write {
-    kind: Kind,
+    kind: Option<Kind>,
     #[serde(default)]
     text: String,
     /// One line saying what a fact or note is, for the startup page.
@@ -189,11 +208,19 @@ struct Write {
     /// A date, `2026-12-31`, through which it applies.
     expires: Option<String>,
     replaces: Option<String>,
+    #[serde(default)]
+    cites: Vec<String>,
+    name: Option<String>,
+    checked: Option<String>,
     #[serde(rename = "ref")]
     cite: Option<EntryId>,
     /// The entry the memory comes from: never the model's to set.
     #[serde(skip)]
     source: String,
+    #[serde(skip)]
+    session: String,
+    #[serde(skip)]
+    dreaming: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Deserialize)]
@@ -203,11 +230,13 @@ enum Kind {
     Fact,
     Note,
     State,
+    Page,
 }
 
 /// Where a session keeps memory and tasks, found at each call from the person's settings: the
 /// folder of the resident whose folder holds the session's (the closest when several do), else
 /// its project's main checkout.
+#[derive(Clone)]
 struct Project {
     root: PathBuf,
     memory: files::Folders,
@@ -217,6 +246,7 @@ struct Project {
     /// The remote the project's private settings name, which its tasks are shared through, or
     /// why those settings do not read.
     remote: Result<Option<String>, String>,
+    memory_remote: Result<Option<String>, String>,
     /// This server's id: a claim names it, and only this server releases the claim.
     server: String,
 }
@@ -289,16 +319,19 @@ impl Memory {
         let call = serde_json::from_value(input)
             .map_err(|e| refuse(&TEXT.input.replace("{why}", &e.to_string())))?;
         match call {
-            Call::Search { query: q, limit } => {
-                let limit = limit.unwrap_or(8).clamp(1, 20);
-                let search = move |p: Project| files::search(&p.memory, &q, limit);
-                self.files(c, at.cwd, search).await
+            Call::Write(write) => self.write(c, &at, write).await,
+            Call::Search { query, limit } => {
+                self.memory_fresh(c, at.cwd).await;
+                self.files(c, at.cwd, move |p| {
+                    files::search(&p.memory, &query, limit.unwrap_or(8).clamp(1, 20))
+                })
+                .await
             }
             Call::Get { id } => {
-                let get = move |p: Project| files::get(&p.memory, &id);
-                self.files(c, at.cwd, get).await
+                self.memory_fresh(c, at.cwd).await;
+                self.files(c, at.cwd, move |p| files::get(&p.memory, &id))
+                    .await
             }
-            Call::Write(write) => self.write(c, &at, write).await,
         }
     }
 
@@ -313,16 +346,12 @@ impl Memory {
     /// and all, so a deleted memory is gone, not only hidden.
     pub(crate) async fn forget(&self, c: &Controller, cwd: &Path, id: &str) -> Answer {
         let id = id.to_owned();
-        let forget = move |p: Project| files::retire(&p.memory, &id, true);
-        self.files(c, cwd, forget).await
-    }
-
-    /// Every fact's and note's line, newest first, at most 200 in 16 KiB: the page's list,
-    /// longer, for a resident's night.
-    pub(crate) async fn index(&self, c: &Controller, cwd: &Path) -> String {
-        let index = |p: Project| files::known(&p.memory, (200, 16 << 10));
-        let index = self.files(c, cwd, index).await;
-        index.unwrap_or_else(|e| e.to_string())
+        let lookup = id.clone();
+        let all = self
+            .files(c, cwd, move |p| files::global(&p.memory, &lookup))
+            .await?;
+        let forget = move |p: &Project| files::retire(&p.memory, &id, true);
+        self.memory_change(c, cwd, all, forget).await
     }
 
     /// The project's tasks as seen by `session`, or one structured task when `id` is given.
@@ -442,108 +471,25 @@ impl Memory {
         let (dir, server) = (p.tasks.clone(), p.server.clone());
         let at = dir.clone();
         let before = blocking(move || tasks::scan(&at, false)).await;
-        let mut synced = false;
-        let answer = async {
-            let mut last: Answer = Ok(Value::Null);
-            for round in 0..3 {
-                // The push checks a write against the remote's latest, so fetching first only
-                // saves a refused push.
-                let fetch = round > 0 || share::stale(&dir).await;
-                let url = match &p.remote {
-                    Ok(Some(name)) => {
-                        let (url, changed) = share::fresh(&p.root, &dir, name, fetch).await?;
-                        synced |= changed;
-                        Some(url)
-                    }
-                    Ok(None) => None,
-                    Err(why) => return Err(refuse(&fill(&TEXT.settings, &[("why", why)]))),
-                };
-                let Some((who, edit)) = change.clone() else {
-                    break;
-                };
-                let by = tasks::shown(&who).to_owned();
-                let (at, server) = (dir.clone(), server.clone());
-                let done = blocking(move || tasks::apply(&at, &server, &who, &edit)).await;
-                match (url, done) {
-                    // A refusal stands only against the remote's latest.
-                    (Some(_), Err(_)) if !fetch => {}
-                    (Some(url), Ok(done)) => {
-                        let subject = format!("task {}, by {by}", done["id"]);
-                        last = share::push(&dir, &url, &subject).await?.map(|()| done);
-                        if last.is_ok() {
-                            break;
-                        }
-                    }
-                    (_, done) => return done,
-                }
-            }
-            last
-        };
-        let answer = answer.await;
+        let by = change.as_ref().map(|(who, _)| tasks::shown(who).to_owned());
+        let project = p.clone();
+        let op = change
+            .clone()
+            .map(|(who, edit)| move || tasks::apply(&project.tasks, &project.server, &who, &edit));
+        let (answer, synced) =
+            share::change(&p.root, &dir, &p.remote, "refs/razor/tasks", op, |done| {
+                format!(
+                    "task {}, by {}",
+                    done["id"],
+                    by.as_deref().unwrap_or_default()
+                )
+            })
+            .await;
         if synced || change.is_some() && answer.is_ok() {
             c.tasks_changed(p.root.clone());
         }
         let closes = blocking(move || tasks::closes(&dir, &server, &before.unwrap_or_default()));
         (answer, closes.await.unwrap_or_default())
-    }
-
-    /// A write, a replacement or a retirement, after the rules, all checked before anything is
-    /// retired: a ruling's text holds the person's words from the record, a fact or note has a
-    /// description, every memory names the entry it comes from, the composed text is at most 16
-    /// KiB, and a state note replaces the project's last, whatever `replaces` names, and in a
-    /// resident's folder is its home session's.
-    async fn write(&self, controller: &Controller, c: &Caller<'_>, mut w: Write) -> Answer {
-        let t = &*TEXT;
-        if c.child {
-            return Err(refuse(&t.child));
-        }
-        match w.kind {
-            Kind::State if w.all => return Err(refuse(&t.state_all)),
-            Kind::State if w.text.len() > STATE => return Err(refuse(&t.state_long)),
-            Kind::Fact | Kind::Note if !w.text.is_empty() => {
-                let line = w.description.as_deref().unwrap_or_default();
-                if line.trim().is_empty() || line.len() > 200 || line.contains(['\n', '\r']) {
-                    return Err(refuse(&t.description));
-                }
-            }
-            // A state note replaces the last, so `replaces` names nothing else to retire.
-            Kind::State => (w.description, w.replaces) = (None, None),
-            _ => w.description = None,
-        }
-        let date = |d: String| d.parse::<jiff::civil::Date>().map(|d| d.to_string());
-        let expires = w.expires.map(date).transpose();
-        w.expires = expires.map_err(|_| refuse(&t.expires))?;
-        w.source = format!("razor:{}:l-{}", c.session, c.at.0);
-        let ruled = (w.kind == Kind::Ruling)
-            .then(|| cite(c, w.cite))
-            .transpose()?;
-        if let Some((cited, Said { words, asked })) = ruled.filter(|_| !w.text.is_empty()) {
-            // The person's words and the question they answer, verbatim, then the agent's.
-            w.source = format!("razor:{}:l-{}", c.session, cited.0);
-            let q = format!("the agent asked: \"{asked}\"\n\n");
-            let q = if asked.is_empty() { "" } else { &q };
-            let said = format!("{q}the human said ({}): \"{words}\"\n\n", w.source);
-            w.text = format!("{said}agent's reading: {}", w.text);
-        }
-        if w.text.len() > 16 * 1024 {
-            return Err(refuse(&t.too_long));
-        }
-        let session = c.session.clone();
-        self.files(controller, c.cwd, move |p| {
-            if w.kind == Kind::State
-                && let Some(home) = p.resident.filter(|r| *r != session)
-            {
-                let state = files::state(&p.memory).unwrap_or_else(|| TEXT.no_state.clone());
-                let (thread, heading) = (&TEXT.thread, &TEXT.state);
-                return Err(refuse(&format!("{thread} {home}.\n\n{heading}\n\n{state}")));
-            }
-            match (&w.replaces, w.text.is_empty()) {
-                (Some(old), true) => files::retire(&p.memory, old, false),
-                (None, true) => Err(refuse(&TEXT.no_text)),
-                _ => files::write(&p.memory, w),
-            }
-        })
-        .await
     }
 
     /// `op` on `cwd`'s project, on a thread of its own, off the loop.
@@ -562,24 +508,18 @@ impl Memory {
 /// The project a session in `cwd` keeps memory and tasks for, from `settings`, the machine's as
 /// last read good, and the project's own as they now read.
 fn project(home: &Path, settings: &crate::config::Settings, cwd: &Path) -> Result<Project, Error> {
-    let (_, main) = crate::config::roots(cwd).map_err(|e| refuse(&e.to_string()))?;
-    let residents = settings.config.residents.iter();
-    let holds = |(_, r): &(&SessionId, &crate::config::Resident)| {
-        cwd.starts_with(&r.cwd) || main.starts_with(&r.cwd)
-    };
-    let found = residents
-        .filter(holds)
-        .max_by_key(|(_, r)| r.cwd.components().count());
-    let (root, resident) = match found {
-        Some((name, r)) => (r.cwd.clone(), Some(name.clone())),
-        None => (main, None),
-    };
+    let (root, resident) = root(settings, cwd)?;
     // A project's own settings that do not read add errors past the machine's.
-    let remote = settings.project(&root).map_err(|e| e.to_string());
-    let remote = remote.and_then(|s| match s.errors.len() > settings.errors.len() {
+    let config = settings.project(&root).map_err(|e| e.to_string());
+    let config = config.and_then(|s| match s.errors.len() > settings.errors.len() {
         true => Err(s.errors.join(" ")),
-        false => Ok(s.config.tasks.remote),
+        false => Ok(s.config),
     });
+    let remote = config
+        .as_ref()
+        .map(|c| c.tasks.remote.clone())
+        .map_err(Clone::clone);
+    let memory_remote = config.map(|c| c.memory.remote);
     let server = std::fs::read_to_string(home.join("server.id")).unwrap_or_default();
     Ok(Project {
         memory: files::folders(&home.join("memory"), &root),
@@ -588,7 +528,53 @@ fn project(home: &Path, settings: &crate::config::Settings, cwd: &Path) -> Resul
         root,
         resident,
         remote,
+        memory_remote,
     })
+}
+
+/// The memory owner, without loading any project's settings.
+fn root(
+    settings: &crate::config::Settings,
+    cwd: &Path,
+) -> Result<(PathBuf, Option<SessionId>), Error> {
+    let (_, main) = crate::config::roots(cwd).map_err(|e| refuse(&e.to_string()))?;
+    let residents = settings.config.residents.iter();
+    let holds = |(_, r): &(&SessionId, &crate::config::Resident)| {
+        cwd.starts_with(&r.cwd) || main.starts_with(&r.cwd)
+    };
+    let found = residents
+        .filter(holds)
+        .max_by_key(|(_, r)| r.cwd.components().count());
+    Ok(match found {
+        Some((name, r)) => (r.cwd.clone(), Some(name.clone())),
+        None => (main, None),
+    })
+}
+
+pub(crate) fn dream_sessions_heading() -> &'static str {
+    &TEXT.dream_sessions
+}
+
+/// A schedule input is bounded at 64 KiB; keep whole lines and report the omitted count.
+pub(crate) fn dream_text(text: &str) -> String {
+    let (text, more) = files::fit(text.lines().map(str::to_owned), (usize::MAX, 63 * 1024));
+    if more == 0 {
+        text
+    } else {
+        format!(
+            "{text}\n{}",
+            TEXT.dream_omitted.replace("{n}", &more.to_string())
+        )
+    }
+}
+
+/// The server-created dreaming run, from its schedule input or resident fresh-run job.
+pub(crate) fn dreaming(summary: &crate::record::Summary) -> bool {
+    summary.scheduled.contains_key("dream")
+        || summary
+            .thread
+            .as_ref()
+            .is_some_and(|t| t.job.as_deref() == Some("dream"))
 }
 
 /// A session making a task change, and its name.

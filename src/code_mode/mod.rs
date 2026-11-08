@@ -168,7 +168,12 @@ impl CodeMode {
                 }
             };
             // The status is on disk before the ring, so whoever wakes reads the whole output.
-            let _ = std::fs::write(spool.with_extension("end"), status);
+            let saved = std::fs::write(spool.with_extension("end.tmp"), status).and_then(|()| {
+                std::fs::rename(spool.with_extension("end.tmp"), spool.with_extension("end"))
+            });
+            if let Err(error) = saved {
+                eprintln!("razor: Failed saving the cell status: {error}.");
+            }
             shared.done.store(true, Relaxed);
             shared.wake.notify_one();
         });
@@ -224,7 +229,7 @@ impl CodeMode {
         yield_ms: u64,
         cap: usize,
     ) -> Result<String, Error> {
-        if let Some(cell) = cell.filter(|cell| !cell.done.load(Relaxed)) {
+        if let Some(cell) = cell.as_ref().filter(|cell| !cell.done.load(Relaxed)) {
             let _ =
                 tokio::time::timeout(Duration::from_millis(yield_ms), cell.wake.notified()).await;
         }
@@ -233,8 +238,14 @@ impl CodeMode {
         let missing = |_| Error::Refused(format!("No cell named {id} exists in this session."));
         let mut file = fs::File::open(&spool).await.map_err(missing)?;
         // Read the status first: once it is final, the length read after it is too.
-        let status = fs::read_to_string(spool.with_extension("end")).await;
-        let status = status.unwrap_or_else(|_| format!("Script running with cell ID {id}"));
+        let live = cell.as_ref().is_some_and(|cell| !cell.done.load(Relaxed));
+        let status = match fs::read_to_string(spool.with_extension("end")).await {
+            Ok(status) => status,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && live => {
+                format!("Script running with cell ID {id}")
+            }
+            Err(error) => return Err(other("reading the cell status")(error)),
+        };
         let end = file
             .metadata()
             .await

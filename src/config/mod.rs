@@ -131,6 +131,7 @@ pub struct Config {
     pub(crate) push: Option<Push>,
     /// `[tasks]`: set only in a project's own `.razor/config.local.toml`.
     pub(crate) tasks: Tasks,
+    pub(crate) memory: Memory,
 }
 
 /// One plugin file; handlers run in configuration order. Relative paths start at Razor's home.
@@ -179,6 +180,36 @@ pub(crate) struct Tasks {
     pub(crate) remote: Option<String>,
 }
 
+/// The nightly pass and optional project memory sharing.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Memory {
+    pub(crate) night: DreamNight,
+    pub(crate) model: Option<String>,
+    pub(crate) remote: Option<String>,
+}
+impl Default for Memory {
+    fn default() -> Self {
+        Self {
+            night: DreamNight::At(Time(3 * 3600)),
+            model: None,
+            remote: None,
+        }
+    }
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(untagged, expecting = "a time of day or false")]
+pub(crate) enum DreamNight {
+    At(Time),
+    Off(#[serde(deserialize_with = "disabled")] bool),
+}
+/// Only false disables dreaming; true is not a time.
+fn disabled<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    match bool::deserialize(d)? {
+        false => Ok(false),
+        true => Err(serde::de::Error::custom("use a time or false")),
+    }
+}
 /// A machine key: calls go to OpenAI, or to `url`, which speaks GPT-Live's protocol (a stand-in, or
 /// the person's own relay); either gets `OPENAI_API_KEY` when it is set.
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -399,6 +430,7 @@ impl Default for Config {
             play: Vec::new(),
             push: None,
             tasks: Tasks::default(),
+            memory: Memory::default(),
         }
     }
 }
@@ -543,17 +575,18 @@ impl Config {
         home: &Path,
         model: &str,
         actions: std::sync::Arc<[tools::Action]>,
-        child: bool,
+        role: crate::profiles::Builtins,
     ) -> Result<crate::profiles::Profile, crate::profiles::Error> {
         use crate::profiles::{self, Transport};
         let route = profiles::model(model, self)?;
-        let mode = match route.endpoint.transport {
-            Transport::Claude => self.profiles.claude.code_mode.unwrap_or(false),
-            Transport::Responses => {
-                (self.profiles.codex.code_mode).unwrap_or(route.endpoint.key.is_none())
-            }
-            Transport::Chat => false,
-        };
+        let mode = role != profiles::Builtins::Dream
+            && match route.endpoint.transport {
+                Transport::Claude => self.profiles.claude.code_mode.unwrap_or(false),
+                Transport::Responses => {
+                    (self.profiles.codex.code_mode).unwrap_or(route.endpoint.key.is_none())
+                }
+                Transport::Chat => false,
+            };
         let variant = self.models.get(model).and_then(|c| c.variant.as_ref());
         // Codex's image generation runs on the ChatGPT sign-in: GPT there gets it, and Claude and
         // chat a helper on it, never a provider's GPT.
@@ -562,7 +595,24 @@ impl Config {
             && !self.provider_only
             && home.join("auth.json").exists()
             && self.profiles.codex.image_gen.unwrap_or(true);
-        let mut profile = profiles::load(route, mode, variant, actions, child, image)?;
+        let actions = if role == profiles::Builtins::Dream {
+            actions
+                .iter()
+                .filter(|a| profiles::dream_tool(&a.name))
+                .cloned()
+                .collect::<Vec<_>>()
+                .into()
+        } else {
+            actions
+        };
+        let mut profile = profiles::load(
+            route,
+            mode,
+            variant,
+            actions,
+            role,
+            image && role != profiles::Builtins::Dream,
+        )?;
         if self.provider_only {
             profile.tools.retain(|tool| tool["builtin"] != "WebFetch");
         }

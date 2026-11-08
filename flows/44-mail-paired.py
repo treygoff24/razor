@@ -16,7 +16,7 @@ import time
 from dataclasses import replace
 from driver import flow
 from model import agent, message, reply, tool
-from server import send, start, stop, until
+from server import published, send, start, stop, until
 from terminal import Terminal
 
 a, b, kid = "FLOW_A44", "FLOW_B44", "You are kid44,"
@@ -39,7 +39,7 @@ with flow(replies, config=keys + '[server]\naddress = "127.0.0.1:0"') as f:
     alpha.cwd.mkdir(), beta.cwd.mkdir()
     start(f)
     assert beta.run("devices").returncode == 0
-    address = {home: json.loads((home / "server.json").read_text())["address"] for home in (f.home / ".razor", other)}
+    address = {home: published(home) for home in (f.home / ".razor", other)}
 
     def ran(result):
         assert result.returncode == 0, result.stderr

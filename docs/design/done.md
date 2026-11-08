@@ -22,10 +22,11 @@ impl Controller {
 
 // ---- src/terminal: `/done` ---------------------------------------------------------------
 // Sends the route for the addressed session through the draft-ordered write queue. Once it is
-// admitted the draft clears and the transcript shows the closing turn as it runs; when the
+// queued the submitted command clears and the transcript shows the closing turn as it runs; when the
 // session's status row reads it closed (after the closing turn ends and its jobs are stopped),
 // the app leaves, or a split goes back to the root (Trey, 2026-11-01). `/quit`, `/quit!` and `/end`
-// do the same with no closing turn. A refusal stays on screen.
+// do the same with no closing turn. Words or images typed afterward keep the closed session
+// on screen with that draft. A refusal stays on screen.
 
 // ---- src/main.rs: `razor doctor` ----------------------------------------------------------
 /// One line per thing Razor runs on, each found or missing with what to do, and never a
@@ -50,7 +51,7 @@ pub fn keys() -> impl Iterator<Item = (&'static str, bool)>;
 
 ## Data flow
 
-1. The person types `/done`; the terminal posts `/v1/sessions/{id}/done` behind any queued draft write and, once the server answers `{entry}`, clears the draft: the transcript shows the closing turn as it runs, and once the session's status row reads it closed the app leaves, or a split goes back to the root (Trey, 2026-11-01: "the ending turn happens but the TUI never closes and the session never ends"); with the agents list open, a closed helper addresses its parent and a closed root the next open top-level row below, else above, never another tree's helper, and with no such row the closed session stays on screen; all this if the person is still on that session: one who moved on while the closing turn ran stays where they are (Trey, 2026-11-06). On 2026-10-30 he had asked it to stay open, when the terminal exited the moment `/done` was admitted and left his pane blank; it now leaves only once the closing turn has ended.
+1. The person types `/done`; the terminal queues `/v1/sessions/{id}/done` behind any queued draft write and clears the submitted command. The transcript shows the closing turn as it runs, and once the session's status row reads it closed the app leaves, or a split goes back to the root (Trey, 2026-11-01: "the ending turn happens but the TUI never closes and the session never ends"); with the agents list open, a closed helper addresses its parent and a closed root the next open top-level row below, else above, never another tree's helper, and with no such row the closed session stays on screen. This happens only if the person is still on that session with an empty composer: words or images keep the closed session and its draft on screen, and sending them reopens it. One who moved on while the closing turn ran stays where they are (Trey, 2026-11-06). On 2026-10-30 he had asked it to stay open, when the terminal exited the moment `/done` was admitted and left his pane blank; it now leaves only once the closing turn has ended.
 2. The API calls `Controller::done`. On the session's task, one queued step admits the input through the usual admission path (64-input cap, plugins, the record) and marks its entry as the last turn's, so no turn can end between the two.
 3. Idle, the session starts the turn at once; working, the input waits for the turn to end, as mail does, and then opens its own.
 4. The model reads `done.md`: bring durable state up to date, tell live children to finish, write the project's state note with `memory` (`write`, kind `state`), end. Memory already makes each state write supersede the project's last (residents.md), so `/done` has no memory code.

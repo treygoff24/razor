@@ -93,7 +93,7 @@ with flow([claude.reply(text="first skill received")]) as f:
         t.shown("first skill received")
         session = next((f.home / ".razor/sessions").iterdir()).name
         inputs = [e for e in f.record(session) if e["kind"] == "input"]
-        assert any('<skill name="new-steward">' in e["text"] for e in inputs), inputs
+        assert any(e.get("skill", {}).get("name") == "new-steward" and not e["text"] for e in inputs), inputs
     late = f.cwd / ".agents/skills/added-later"
     late.mkdir()
     (late / "SKILL.md").write_text("---\ndescription: Added after the session started.\n---\n")

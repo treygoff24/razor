@@ -117,6 +117,7 @@ impl Runs {
         let waiting = self
             .recent
             .iter_mut()
+            .chain(self.older.values_mut())
             .filter(|r| r.state == RunState::Waiting);
         for run in waiting {
             if restart || run.entry == entry.id || front == Some(&run.entry) {

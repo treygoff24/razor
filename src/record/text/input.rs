@@ -34,7 +34,7 @@ fn words(key: &str) -> &'static str {
 /// made absolute; the video goes to the model path only with no watcher, kept for the
 /// conversation's life when it came in mail, which only a watcher's first input does.
 pub(crate) fn heard(me: &Summary, dir: &Path, entry: EntryId, mut input: Input) -> BridgeInput {
-    let mut text = std::mem::take(&mut input.text);
+    let mut text = skill(input.skill.as_ref(), std::mem::take(&mut input.text));
     if input.voice.is_some() {
         text.insert_str(0, words("voice"));
     }
@@ -75,6 +75,17 @@ pub(crate) fn heard(me: &Summary, dir: &Path, entry: EntryId, mut input: Input) 
         images: input.images,
         video,
         keep: matches!(input.from, Origin::Mail { .. }),
+    }
+}
+
+/// The resolved skill ahead of the person's words; old records already carry it in `text`.
+pub(crate) fn skill(skill: Option<&crate::protocol::InputSkill>, text: String) -> String {
+    match skill {
+        Some(skill) => format!(
+            "<skill name=\"{}\">\n{}\n</skill>\n\n{text}",
+            skill.name, skill.text
+        ),
+        None => text,
     }
 }
 
