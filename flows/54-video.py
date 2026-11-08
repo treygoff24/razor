@@ -127,8 +127,8 @@ with flow(replies, model="sol", config=config, env={"GEMINI_API_KEY": "flow-gemi
     entries = turns(parent, 3)
     assert not [e for e in entries if "could not start" in e.get("text", "")], entries
     assert next(e for e in entries if e["id"] == entry)["video"]["watcher"] == "watcher-1"
-    status, _, body = call("GET", f"/sessions/{parent}/children")
-    [row] = json.loads(body)
+    status, _, body = call("GET", f"/sessions/{parent}/agent")
+    [row] = json.loads(body)["children"]
     assert (row["name"], row["launched"], row["model"]) == ("watcher-1", entry, GEMINI), row
     watcher = row["session"]
     full = str(f.home / ".razor/sessions" / parent / two)
@@ -186,7 +186,7 @@ with flow(replies, model="sol", config=config, env={"GEMINI_API_KEY": "flow-gemi
              for w, v in (("one", b"p1"), ("two", b"p2"))]
     threads = [threading.Thread(target=server.post, args=(f, f"/sessions/{mute}/input", s)) for s in sends]
     [t.start() for t in threads] and [t.join() for t in threads]
-    rows = json.loads(call("GET", f"/sessions/{mute}/children")[2])
+    rows = json.loads(call("GET", f"/sessions/{mute}/agent")[2])["children"]
     assert sorted(r["name"] for r in rows) == ["watcher-1", "watcher-2"], rows
     for row in rows:
         turns(row["session"], 1)
@@ -203,7 +203,7 @@ with flow(replies, model="sol", config=config, env={"GEMINI_API_KEY": "flow-gemi
     entry = server.post(f, f"/sessions/{lone}/input", {"text": "Without a key.", "video": {"file": three, "duration_ms": 2000}})["entry"]
     entries = turns(lone, 1)
     assert "watcher" not in next(e for e in entries if e["id"] == entry)["video"]
-    assert json.loads(call("GET", f"/sessions/{lone}/children")[2]) == []
+    assert json.loads(call("GET", f"/sessions/{lone}/agent")[2])["children"] == []
     text = json.loads(call("POST", f"/sessions/{lone}/files/notes.mp4", b"plain words, not a video")[2])["path"]
     status, _, body = call("POST", f"/sessions/{lone}/input", {"text": "x", "video": {"file": text, "duration_ms": 1}})
     assert (status, json.loads(body)["error"]) == (400, "Send the video as an MP4 or QuickTime file uploaded to this session."), body

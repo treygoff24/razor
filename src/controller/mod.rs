@@ -11,8 +11,8 @@ use crate::children;
 use crate::config::{Config, Settings};
 use crate::protocol::{
     AgentView, Answer, Body, Brand, Child, ChildRequest, Effort, EntryId, Image, Input, Listed,
-    Live, Millis, ModelSettings, Origin, Phone, SessionId, Speed, State, Thread, Trigger, Ui,
-    UsageWindow, now,
+    Live, Millis, ModelSettings, Origin, Phone, Report, SessionId, Speed, State, Thread, Trigger,
+    Ui, UsageWindow, now,
 };
 use crate::record::{self, Record, Replay, Summary};
 use crate::residents::Deliveries;
@@ -59,6 +59,9 @@ struct Inner {
     status: Mutex<Status>,
     /// Held by `create` from naming a root to its row being listed, so two never share a name.
     naming: tokio::sync::Mutex<()>,
+    /// Held by each draft write until its rename is done, so drafts land in the order their
+    /// writes took it, even when the request that began one was given up on.
+    drafts: Arc<tokio::sync::Mutex<()>>,
     /// Woken whenever a session answers inputs, so an internal input waiting for room retries.
     space: Notify,
     /// When this server started: a live call recorded as starting earlier is no longer running.
@@ -68,7 +71,10 @@ struct Inner {
 /// The controller-wide stream: a row per agent, with its own readings, and the config notice.
 struct Status {
     agents: BTreeMap<SessionId, AgentView>,
-    remote: BTreeMap<SessionId, (SessionId, record::ChildSummary)>,
+    /// One last look and seen entry per looked-at session, until its record is gone or restart.
+    readings: BTreeMap<SessionId, (Millis, Option<EntryId>)>,
+    /// Outstanding foreign child facts survive their parent's display row for report recovery.
+    remote: BTreeMap<SessionId, SessionId>,
     config: Option<String>,
     /// The brand, `[ui]` and `[phone]` settings last sent.
     shown: (Brand, Ui, Phone),
@@ -93,6 +99,7 @@ impl Controller {
             .map_err(other("opening deliveries"))?;
         let status = Status {
             agents: BTreeMap::new(),
+            readings: BTreeMap::new(),
             remote: BTreeMap::new(),
             config: None,
             shown: (config.brand, config.ui, config.phone),
@@ -121,6 +128,7 @@ impl Controller {
                 idle: Mutex::default(),
                 status: Mutex::new(status),
                 naming: tokio::sync::Mutex::new(()),
+                drafts: Arc::default(),
                 started: now(),
                 space: Notify::new(),
             }),
@@ -320,7 +328,7 @@ impl Controller {
         Ok(rx)
     }
 
-    /// A reader saw `session` through `entry`: its status row says so, and when, until this
+    /// A reader saw `session` through `entry`: its readings keep that entry and time until this
     /// server restarts.
     pub(crate) fn seen(&self, session: &SessionId, entry: EntryId) {
         lock(&self.inner.status).open(session, 0, Some(entry));
@@ -349,6 +357,14 @@ impl Controller {
             }
         });
         rx
+    }
+
+    /// Announces a landed task change to status subscribers.
+    pub(crate) fn tasks_changed(&self, project: PathBuf) {
+        let _ = lock(&self.inner.status).lines.send(Live::Tasks {
+            project,
+            server: None,
+        });
     }
 
     /// A fresh bounded read; an invalid edit keeps the last good value, and a changed notice or
@@ -496,7 +512,8 @@ impl Controller {
         self.inner.space.notify_waiters();
         lock(&self.inner.idle).retain(|id| id != session);
         let mut status = lock(&self.inner.status);
-        status.remote.retain(|_, (parent, _)| parent != session);
+        status.readings.remove(session);
+        status.remote.retain(|_, parent| parent != session);
         if status.agents.remove(session).is_some() {
             let _ = status.lines.send(status.snapshot());
         }
@@ -504,6 +521,19 @@ impl Controller {
 
     fn dir(&self, session: &SessionId) -> PathBuf {
         self.inner.home.join("sessions").join(session.as_str())
+    }
+
+    /// Replaces the session's draft. The write keeps `drafts` until its rename is done, so the
+    /// lock's holder awaits nothing else, and a write that outlives the request that began it
+    /// still lands before the next.
+    async fn write_draft(&self, session: &SessionId, text: String) -> Result<(), Error> {
+        let dir = self.dir(session);
+        let order = self.inner.drafts.clone().lock_owned().await;
+        blocking(move || {
+            let _order = order;
+            files::write(&dir, "draft", text.as_bytes())
+        })
+        .await
     }
 }
 
@@ -542,10 +572,13 @@ impl Status {
     /// A stream to `session` opened or closed, a terminal app's counting 1 or -1, or a reader
     /// reported the last entry it saw: each is the person looking.
     fn open(&mut self, session: &SessionId, change: i32, seen: Option<EntryId>) {
+        let at = now();
+        let seen = seen.or_else(|| self.readings.get(session).and_then(|r| r.1));
+        self.readings.insert(session.clone(), (at, seen));
         if let Some(mut row) = self.agents.get(session).cloned() {
             row.terminals = row.terminals.saturating_add_signed(change);
-            row.looked_at = Some(now());
-            row.seen = seen.or(row.seen);
+            row.looked_at = Some(at);
+            row.seen = seen;
             self.row(row);
         }
     }
@@ -558,20 +591,22 @@ impl Status {
         }
     }
 
-    /// Builds agent rows from the same fold without requiring a loaded session, with the
-    /// model's window and threshold as `profiles::limits` gives them; a session's first row
-    /// also projects its children's.
-    fn record(
-        &mut self,
+    /// Builds a display row without storing or publishing it.
+    fn build(
+        &self,
         s: &Summary,
         state: State,
         context: Option<u64>,
         closing: bool,
         (window, threshold): (Option<u64>, f64),
-    ) {
+    ) -> AgentView {
         let (child, old) = (s.child.as_ref(), self.agents.get(&s.session));
-        let first = old.is_none();
-        self.row(AgentView {
+        let (looked_at, seen) = self
+            .readings
+            .get(&s.session)
+            .map(|(at, seen)| (Some(*at), *seen))
+            .unwrap_or_default();
+        AgentView {
             session: s.session.clone(),
             parent: child.map(|c| c.parent.clone()),
             launched: child.map(|c| c.launched),
@@ -589,15 +624,16 @@ impl Status {
             spoke_at: s.spoke_at,
             last_reply: s.last_reply.clone(),
             suggestion: s.suggestion(),
-            looked_at: old.and_then(|r| r.looked_at),
-            seen: old.and_then(|r| r.seen),
+            looked_at,
+            seen,
             context: context.or(s.context),
             window,
             threshold,
             branch: child
                 .and_then(|c| c.worktree.as_ref())
                 .map(|_| children::branch(&s.session)),
-            changed_files: s.changed_files.clone(),
+            changed_file_count: s.changed_files.len(),
+            changed_file_first: s.changed_files.first().cloned(),
             calls: s.unresolved.iter().map(|(_, at, _)| *at).collect(),
             doing: s.unresolved.last().map(|(.., doing)| doing.clone()),
             hour: s.hour,
@@ -616,7 +652,20 @@ impl Status {
             resident: s.thread.as_ref().map(|t| t.resident.clone()),
             resident_project: s.thread.as_ref().and_then(|t| t.resident_project.clone()),
             terminals: old.map_or(0, |r| r.terminals),
-        });
+        }
+    }
+
+    /// Stores and publishes the fold; a session's first row also projects its children's facts.
+    fn record(
+        &mut self,
+        s: &Summary,
+        state: State,
+        context: Option<u64>,
+        closing: bool,
+        limits: (Option<u64>, f64),
+    ) {
+        let first = !self.agents.contains_key(&s.session);
+        self.row(self.build(s, state, context, closing, limits));
         if first {
             self.child_rows(s);
         }
@@ -626,10 +675,20 @@ impl Status {
     fn child_rows(&mut self, parent: &Summary) {
         for child in &parent.children {
             if child.session.address().is_some() {
-                let fact = (parent.session.clone(), child.clone());
-                if self.remote.insert(child.session.clone(), fact.clone()) != Some(fact) {
-                    let _ = self.lines.send(self.snapshot());
+                if child.working() {
+                    self.remote
+                        .insert(child.session.clone(), parent.session.clone());
+                } else {
+                    self.remote.remove(&child.session);
                 }
+            }
+            if child.session.address().is_none()
+                && child.report.as_ref().is_some_and(Report::listed)
+                && !child.stopped
+                && child.settled.is_none()
+                && !self.agents.contains_key(&child.session)
+            {
+                self.row(children::child(&parent.session, child));
             }
             let Some(row) = self.agents.get_mut(&child.session) else {
                 continue;

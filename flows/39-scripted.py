@@ -69,4 +69,4 @@ with flow([response([call("archive_message", question)]), done()], model="gpt-6.
     session = f.ask("Archive it.")["session"]
     assert [e["outcome"] for e in f.record(session) if e["kind"] == "result"] == ["success"]
     marks = json.loads(server.send(f, "GET", f"/sessions/{session}/marks").read())
-    assert server.agents(f)[session]["asks"] == [] and "question" not in json.dumps(marks), marks
+    assert json.loads(server.send(f, "GET", f"/sessions/{session}/agent").read())["asks"] == [] and "question" not in json.dumps(marks), marks

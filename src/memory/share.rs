@@ -31,7 +31,12 @@ async fn git(dir: &Path, secs: u64, args: &[&str]) -> Result<String, Error> {
 /// folder's own tasks before it was shared among them, are committed and kept on top of the
 /// remote's; when they touch a file the remote's tasks changed, nothing changes and the call is
 /// refused with what to do.
-pub(super) async fn fresh(root: &Path, dir: &Path, name: &str, get: bool) -> Result<String, Error> {
+pub(super) async fn fresh(
+    root: &Path,
+    dir: &Path,
+    name: &str,
+    get: bool,
+) -> Result<(String, bool), Error> {
     let url = git(root, 10, &["remote", "get-url", "--", name]).await;
     let url = url.unwrap_or_else(|_| name.to_owned());
     // A path, no `:` before any `/`, is the checkout's; git would read it from `dir`, where it runs.
@@ -44,6 +49,13 @@ pub(super) async fn fresh(root: &Path, dir: &Path, name: &str, get: bool) -> Res
         made.map_err(other("making a tasks folder"))?;
         git(dir, 10, &["init", "-q"]).await?;
     }
+    let rev = async |name| {
+        git(dir, 10, &["rev-parse", "-q", "--verify", name])
+            .await
+            .ok()
+    };
+    let seen = if get { rev(SEEN).await } else { None };
+    let tree = if get { rev("HEAD^{tree}").await } else { None };
     // The pattern matches nothing on a remote with no tasks yet, rather than failing.
     let refs = format!("+{REF}*:{SEEN}*");
     if get {
@@ -54,23 +66,21 @@ pub(super) async fn fresh(root: &Path, dir: &Path, name: &str, get: bool) -> Res
         git(dir, 10, &["add", "-A"]).await?;
         git(dir, 10, &["commit", "-q", "-m", "edited by hand"]).await?;
     }
-    let has = async |name| {
-        git(dir, 10, &["rev-parse", "-q", "--verify", name])
-            .await
-            .is_ok()
-    };
-    match (has(SEEN).await, has("HEAD").await) {
-        (false, _) => Ok(url),
+    match (rev(SEEN).await.is_some(), rev("HEAD").await.is_some()) {
+        (false, _) => Ok(()),
         // Nothing here yet, not even an untracked file, so taking the remote's loses nothing.
         (true, false) => git(dir, 10, &["reset", "-q", "--hard", SEEN])
             .await
-            .map(|_| url),
-        (true, true) if git(dir, 10, &["rebase", "-q", SEEN]).await.is_ok() => Ok(url),
+            .map(|_| ()),
+        (true, true) if git(dir, 10, &["rebase", "-q", SEEN]).await.is_ok() => Ok(()),
         (true, true) => {
             let _ = git(dir, 10, &["rebase", "--abort"]).await;
             Err(refuse(&fill(&TEXT.conflict, &[("dir", &dir.display())])))
         }
-    }
+    }?;
+    let now = if get { rev(SEEN).await } else { None };
+    let changed = now.is_some() && now != seen && tree != rev("HEAD^{tree}").await;
+    Ok((url, changed))
 }
 
 /// Commits the change just applied with `subject` and pushes it. A failed push drops the commit

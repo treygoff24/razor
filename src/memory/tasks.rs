@@ -38,6 +38,9 @@ pub(super) struct Edit {
     pub(super) own: bool,
     pub(super) comment: Option<String>,
     pub(super) close: Option<String>,
+    /// The parent settling a child's work; the report remains attributed to the child.
+    #[serde(skip)]
+    pub(super) closer: Option<String>,
     /// The due date a reminder went out for, so it goes out once. Never the model's to set.
     #[serde(skip)]
     pub(super) notified: Option<String>,
@@ -60,6 +63,12 @@ pub(super) struct Listing {
     pub(super) filter: Option<String>,
     pub(super) query: String,
     pub(super) parent: Option<u32>,
+    #[serde(skip)]
+    pub(super) viewer: (String, String),
+    #[serde(skip)]
+    pub(super) mine: bool,
+    #[serde(skip)]
+    pub(super) limit: Option<usize>,
 }
 
 /// A task as its file holds it: the header's lines in order, then its description. A closed
@@ -182,6 +191,7 @@ fn states(all: &[Task]) -> Vec<&'static str> {
 /// The `list` answer: the tasks `l` keeps, words matched as memory search matches them: ready and
 /// open by priority, due date and number, closed newest first.
 pub(super) fn list(dir: &Path, l: &Listing) -> Answer {
+    let viewer = &l.viewer;
     let filter = l.filter.as_deref().unwrap_or("ready");
     if !matches!(filter, "ready" | "open" | "closed") {
         return Err(refuse(&TEXT.filter));
@@ -192,23 +202,88 @@ pub(super) fn list(dir: &Path, l: &Listing) -> Answer {
         let text = format!("{} {}", t.get("title").unwrap_or_default(), t.text);
         let (held, wanted) = files::held(&text, &l.query);
         let part = parent.as_deref().is_none_or(|p| t.get("parent") == Some(p));
-        part && held == wanted && (filter == "open" && t.open || *state == filter)
+        let mine = filter != "closed"
+            || !l.mine
+            || t.get("closed-by")
+                .is_some_and(|by| ids(by) == (viewer.0.as_str(), viewer.1.as_str()));
+        part && mine && held == wanted && (filter == "open" && t.open || *state == filter)
     };
     let mut rows: Vec<_> = all.iter().zip(states(&all)).filter(taken).collect();
     match filter {
-        "closed" => {
-            rows.sort_by_key(|&(t, _)| Reverse((t.get("closed").and_then(|c| c.get(..10)), t.id)))
-        }
-        _ => rows.sort_by_key(|&(t, _)| (t.priority(), t.get("due").unwrap_or("~"), t.id)),
+        "closed" => rows.sort_by_key(|&(t, _)| {
+            let at = t.get("closed").and_then(|c| c.split_whitespace().next());
+            Reverse((at, t.id))
+        }),
+        _ => rows.sort_by_key(|&(t, _)| {
+            (
+                !held(t, viewer),
+                t.priority(),
+                t.get("due").unwrap_or("~"),
+                t.id,
+            )
+        }),
     }
-    let row = |(t, state): &(&Task, &str)| {
-        let parent = t.get("parent").and_then(|p| p.parse::<u32>().ok());
-        json!({"id": t.id, "title": t.get("title"), "priority": t.priority(), "state": state,
-            "claim": t.get("claim").map(shown), "due": t.get("due"), "parent": parent,
-            "blocked_by": t.blockers().collect::<Vec<_>>(), "closed": t.get("closed")})
+    let counts = |state: &str| rows.iter().filter(|(_, s)| *s == state).count();
+    let counts = json!({"ready": counts("ready"), "in progress": counts("in progress"),
+        "blocked": counts("blocked"), "open": counts("open")});
+    let limit = l.limit.unwrap_or(ROWS);
+    let more = rows.len().saturating_sub(limit);
+    let mut answer = json!({
+        "tasks": rows.iter().take(limit).map(|(t, s)| row(t, s, viewer)).collect::<Vec<_>>(),
+        "more": more
+    });
+    if filter == "open" {
+        answer["counts"] = counts;
+    }
+    Ok(answer)
+}
+
+fn held(t: &Task, (id, server): &(String, String)) -> bool {
+    t.holder(server) == Some(id.as_str())
+}
+
+fn row(t: &Task, state: &str, viewer: &(String, String)) -> serde_json::Value {
+    let parent = t.get("parent").and_then(|p| p.parse::<u32>().ok());
+    json!({"id": t.id, "title": t.get("title"), "priority": t.priority(), "state": state,
+        "claim": t.get("claim").map(shown), "claimant": t.get("claim").map(|c| ids(c).0),
+        "held": held(t, viewer), "due": t.get("due"), "parent": parent,
+        "blocked_by": t.blockers().collect::<Vec<_>>(), "closed": t.get("closed"),
+        "closed_by": t.get("closed-by").map(shown)})
+}
+
+/// A task with its description, related tasks and newest comments for a person's client.
+pub(super) fn detail(dir: &Path, id: u32, viewer: &(String, String)) -> Answer {
+    let all = scan(dir, true)?;
+    let states = states(&all);
+    let index = all
+        .binary_search_by_key(&id, |t| t.id)
+        .map_err(|_| missing(id))?;
+    let task = &all[index];
+    let related = |n: u32| {
+        all.binary_search_by_key(&n, |t| t.id)
+            .ok()
+            .map(|i| json!({"id": n, "title": all[i].get("title"), "state": states[i]}))
     };
-    let more = rows.len().saturating_sub(ROWS);
-    Ok(json!({"tasks": rows.iter().take(ROWS).map(row).collect::<Vec<_>>(), "more": more}))
+    let mut answer = row(task, states[index], viewer);
+    let comments = get(dir, id)?;
+    answer["text"] = json!(task.text);
+    answer["by"] = json!(task.get("by").map(shown));
+    answer["parent"] = json!(
+        task.get("parent")
+            .and_then(|p| p.parse().ok())
+            .and_then(related)
+    );
+    answer["blockers"] = json!(task.blockers().filter_map(related).collect::<Vec<_>>());
+    answer["parts"] = json!(
+        all.iter()
+            .filter(|t| t.get("parent") == Some(&id.to_string()))
+            .take(ROWS)
+            .filter_map(|t| related(t.id))
+            .collect::<Vec<_>>()
+    );
+    answer["comments"] = comments["comments"].clone();
+    answer["more"] = comments["more"].clone();
+    Ok(answer)
 }
 
 /// The `get` answer: task `id`'s file as it is written, open or closed, and its newest
@@ -284,7 +359,12 @@ pub(super) fn apply(dir: &Path, server: &str, who: &str, e: &Edit) -> Answer {
         return Err(refuse(&fill(&t.claimed, &with)));
     }
     let join = |ns: &Vec<u32>| ns.iter().map(u32::to_string).collect::<Vec<_>>().join(" ");
-    let closed = |why: &String| Some(format!("{} {why}", jiff::Zoned::now().date()));
+    let closed = |why: &String| {
+        Some(format!(
+            "{} {why}",
+            jiff::Zoned::now().strftime("%Y-%m-%dT%H:%M:%S%.3f")
+        ))
+    };
     for (key, value) in [
         ("by", e.id.is_none().then(|| Some(who.to_owned()))),
         ("title", e.title.clone().map(Some)),
@@ -295,6 +375,12 @@ pub(super) fn apply(dir: &Path, server: &str, who: &str, e: &Edit) -> Answer {
         ("claim", e.claim.map(|claim| claim.then(|| who.to_owned()))),
         ("notified", e.notified.clone().map(Some)),
         ("closed", e.close.as_ref().map(closed)),
+        (
+            "closed-by",
+            e.close
+                .as_ref()
+                .map(|_| Some(e.closer.as_deref().unwrap_or(who).to_owned())),
+        ),
         ("claim", e.close.as_ref().map(|_| None)),
     ] {
         if let Some(value) = value {

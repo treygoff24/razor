@@ -328,7 +328,7 @@ pub struct Server {
     /// Machine in plain words, independent of the display label.
     pub(crate) machine: String,
     pub(crate) realm: String,
-    /// Last contact when unavailable; None while reachable.
+    /// Last contact when unavailable, or when it said it was about to sleep; None while reachable.
     pub(crate) silent: Option<Millis>,
     /// Its `transcribe` is set, so it takes voice notes.
     pub(crate) transcribe: bool,
@@ -391,6 +391,23 @@ pub(crate) enum Login {
     Failed { error: String },
 }
 
+/// A bounded archive page in display order; next advances even across a filtered empty page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AgentPage {
+    pub(crate) agents: Vec<AgentView>,
+    pub(crate) next: Option<SessionId>,
+}
+
+/// One opened conversation's row and all direct helper cards, settled ones included.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AgentDetail {
+    #[serde(flatten)]
+    pub(crate) row: AgentView,
+    pub(crate) children: Vec<AgentView>,
+    #[serde(default)]
+    pub(crate) changed_files: Option<Vec<PathBuf>>,
+}
+
 /// One row replaces the previous row; absent facts are never invented as zero.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentView {
@@ -410,7 +427,8 @@ pub struct AgentView {
     pub(crate) headline: String,
     pub(crate) headline_at: Option<Millis>,
     pub(crate) last_activity: Millis,
-    /// Last person input from any device.
+    /// Last person input from any device; a root's start counts, since the person started it.
+    /// Resident homes and threads count only their person input.
     #[serde(default)]
     pub(crate) person_input_at: Option<Millis>,
     /// When the model last showed reply text in this session.
@@ -434,7 +452,10 @@ pub struct AgentView {
     pub(crate) window: Option<u64>,
     pub(crate) threshold: f64,
     pub(crate) branch: Option<String>,
-    pub(crate) changed_files: Vec<PathBuf>,
+    #[serde(default)]
+    pub(crate) changed_file_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) changed_file_first: Option<PathBuf>,
     /// Unresolved tool calls, running now.
     pub(crate) calls: Vec<EntryId>,
     /// The newest call while it is unresolved: its tool's name, what it acts on (as a recap
@@ -677,6 +698,12 @@ pub enum Live {
     Views(super::views::ViewsStatus),
     Agent(Box<AgentView>),
     Delivery(Box<Delivery>),
+    /// A project's task files changed; peers qualify the line with their name.
+    Tasks {
+        project: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server: Option<String>,
+    },
     /// A sentence about a plugin no record entry carries: a refused input, a failed observer.
     Plugin {
         text: String,
@@ -732,4 +759,15 @@ pub(crate) struct ResidentProject {
     /// Its newest chat's last activity, else the folder's last change.
     pub(crate) at: Millis,
     pub(crate) chats: usize,
+}
+
+impl AgentView {
+    /// Addresses this owner's native row and questions through a directly paired server.
+    pub(crate) fn qualify(&mut self, name: &str) {
+        self.session = self.session.on(name);
+        self.parent = self.parent.take().map(|p| p.on(name));
+        for ask in &mut self.asks {
+            ask.id.0 = ask.id.0.on(name);
+        }
+    }
 }

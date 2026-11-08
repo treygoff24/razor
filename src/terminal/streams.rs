@@ -19,21 +19,30 @@ impl App {
     /// Reads the session's newest page and its saved draft behind earlier writes, then streams on;
     /// the root's first entry, first.
     pub(super) fn open(&mut self, id: SessionId) {
+        super::tasks::read(self, &id);
+        self.conversations.entry(id.clone()).or_default().dirty = true;
         if self.root.as_ref() == Some(&id) {
             self.rooted(id.clone());
         }
         let at = self.queued + 1;
-        self.write(|api| async move {
+        let pending = id.clone();
+        if self.write(|api| async move {
             let read = async {
                 let page = api.page(&id, None, 256).await?;
                 Ok::<_, Error>((page, api.draft(&id, None).await?))
             };
-            let read = read.await;
-            move |app: &mut App| match read {
-                Ok(read) => app.opened(id, read, at),
-                Err(e) => app.say(&e.to_string()),
+            let (read, detail) = tokio::join!(read, api.agent(&id));
+            move |app: &mut App| {
+                children::received(app, &id, detail);
+                match read {
+                    Ok(read) => app.opened(id, read, at),
+                    Err(e) => app.say(&e.to_string()),
+                }
             }
-        });
+        }) {
+            let conversation = self.conversations.entry(pending).or_default();
+            (conversation.dirty, conversation.pending) = (false, true);
+        }
     }
 
     /// Reads the folder and model of `id`, the root, from its first entry, which a long session's
@@ -142,10 +151,20 @@ impl App {
         };
         match value {
             ApiEvent::Entry(entry) => {
+                let metadata = matches!(
+                    entry.body,
+                    Body::Child { .. } | Body::TurnEnd { closed: true, .. }
+                );
                 if !t.entry(*entry, keep.0) {
                     self.say(
                         "An entry exceeds the transcript buffer; use recall or --print for it.",
                     );
+                }
+                if metadata
+                    && shown
+                    && let Some(conversation) = self.conversations.get_mut(&id)
+                {
+                    conversation.dirty = true;
                 }
                 self.trim();
             }
@@ -174,6 +193,7 @@ impl App {
                 mut servers,
                 ..
             } => {
+                self.conversations.values_mut().for_each(|c| c.dirty = true);
                 self.agents.clear();
                 self.agent_bytes = 0;
                 if servers.is_empty() {
@@ -187,11 +207,6 @@ impl App {
                 self.servers = servers;
 
                 agents.into_iter().for_each(|row| self.agent(row));
-                self.previews.retain(|id, _| self.agents.contains_key(id));
-                let (root, focus, agents) = (&self.root, &self.focus, &self.agents);
-                let kept = |id: &SessionId| root.as_ref() == Some(id) || focus.as_ref() == Some(id);
-                self.transcripts
-                    .retain(|id, _| kept(id) || agents.contains_key(id));
             }
             Live::Views(status) => self.list.received(status),
             Live::Server(server) => {
@@ -201,8 +216,12 @@ impl App {
             }
             Live::Agent(row) => self.agent(*row),
             Live::Delivery(delivery) => self.delivery(*delivery),
+            Live::Tasks { project, server } => {
+                super::tasks::changed(self, &project, server.as_deref())
+            }
             _ => {}
         }
+        super::agents::earlier::sync(self);
         let ready = |s: &crate::protocol::Server| {
             let version = s.release_ready.as_ref()?;
             let machine = &s.machine;

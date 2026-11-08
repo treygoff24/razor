@@ -1,7 +1,7 @@
 //! What the person admits to the API: inputs and answers, each saved as the draft first and
 //! posted behind every earlier write, and earlier inputs recalled into the editor.
 use super::api::Api;
-use super::{App, Composer, Error, composer, error, fail, text::plural};
+use super::{App, Composer, Error, audio, composer, error, fail, text::plural};
 use crate::protocol::{Answer, Body, ClientInput, EntryId, Event as ApiEvent, MailId};
 use crate::protocol::{SessionId, State, now};
 use composer::completion;
@@ -9,7 +9,8 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use std::time::Duration;
 
-/// Admits the composer's words and images to the addressed session, or makes the session first.
+/// Admits the composer's words and images to the addressed session under a request id of their
+/// own, or makes the session first.
 pub fn send(app: &mut App) {
     if app.sending.is_some() || app.composer.is_empty() {
         return;
@@ -37,14 +38,14 @@ pub fn send(app: &mut App) {
         handover: i.and_then(|i| i.handover),
         from: i.and_then(|i| i.from.clone()),
         skill,
+        request: Some(request()),
         ..Default::default()
     };
     let body = serde_json::to_value(input).unwrap_or_default();
     // Queued only behind a turn already running: an input that starts its own is taken as it is
     // admitted, possibly before this session's stream attaches to hear it.
     let working = app
-        .agents
-        .get(&id)
+        .agent_row(&id)
         .is_some_and(|a| a.state == State::Working);
     admit(
         app,
@@ -52,10 +53,7 @@ pub fn send(app: &mut App) {
         (body, false),
         move |app, admitted| {
             let Some(entry) = admitted["entry"].as_u64().map(EntryId) else {
-                return app.say(match admitted["signed_in"] == true {
-                    true => "MCP sign-in completed.",
-                    false => "The server's admission answer had no entry id; check the transcript before sending again.",
-                });
+                return app.say("MCP sign-in completed.");
             };
             if working {
                 queue(app, &id, entry);
@@ -69,13 +67,8 @@ pub fn send(app: &mut App) {
 // Makes the session the new-session composer is aimed at, its words moved out of the editor
 // meanwhile; `created` sends them to it.
 fn create(app: &mut App) {
-    // One random request id until answered: sending again after a lost answer makes no second.
-    if app.request.is_none() {
-        let mut random = [0u8; 16];
-        // aws-lc's RAND_bytes aborts rather than fail, so `fill` cannot return an error.
-        let _ = aws_lc_rs::rand::fill(&mut random);
-        app.request = Some(format!("{:032x}", u128::from_be_bytes(random)));
-    }
+    // One request id until answered: sending again after a lost answer makes no second.
+    app.request.get_or_insert_with(request);
     let i = app.initial.as_ref();
     let body = json!({
         "cwd": app.cwd, "resident": app.resident, "request": app.request,
@@ -94,6 +87,14 @@ fn create(app: &mut App) {
     }) {
         app.sending = Some(std::mem::take(&mut app.composer));
     }
+}
+
+// A random request id, under which the server makes or admits once however often it is sent.
+fn request() -> String {
+    let mut random = [0u8; 16];
+    // aws-lc's RAND_bytes aborts rather than fail, so `fill` cannot return an error.
+    let _ = aws_lc_rs::rand::fill(&mut random);
+    format!("{:032x}", u128::from_be_bytes(random))
 }
 
 /// The route that makes the session the new-session composer is aimed at, on the server it names;
@@ -148,7 +149,7 @@ pub fn continue_all(app: &mut App) {
 /// through the draft, an open answer or a command. The admission clears the session's saved
 /// draft, so the draft read before it is saved again after.
 pub fn hand_back(app: &mut App, id: SessionId, name: String) {
-    let agent = app.agents.get(&id);
+    let agent = app.agent_row(&id);
     if !takes(agent) {
         return app.say(&format!(
             "That session has ended; {name} cannot go back to it."
@@ -275,15 +276,22 @@ pub fn admit_answer(app: &mut App, (id, ask): MailId, answer: Answer) {
 }
 
 // Saves the draft, or reads it when the composer has not, and then posts behind every earlier
-// write: the server clears a draft only when it admits the input, so refused or uncertain words
+// write: the server clears a draft only when it admits the input, so refused or unanswered words
 // survive, and a draft read here is saved again after and comes into the composer. The words
-// leave the editor meanwhile; refused, they come back ahead of anything typed since.
+// leave the editor meanwhile; refused, they come back ahead of anything typed since. Unanswered,
+// the outcome is unknown, so they stay out of it, and Enter admits the same body again
+// (`App.held`): an input's request id, or an ask's being answered, keeps the server from taking
+// it twice.
 fn admit<F>(app: &mut App, path: String, (body, keep): (Value, bool), then: F)
 where
     F: FnOnce(&mut App, Value) + Send + 'static,
 {
+    // Only Enter admitting held words again finds them waiting in `sending`: their draft was
+    // saved then, or is read again.
+    let again = app.sending.is_some();
     let text = app.drafting().then(|| app.composer.text.clone());
     let draft = app.focus.clone().map(|id| (id, text));
+    let draft = draft.filter(|(_, text)| !again || text.is_none());
     let queued = app.write(|api| async move {
         let admitted = async {
             let unread = match draft {
@@ -291,34 +299,43 @@ where
                 Some((id, None)) => Some((api.draft(&id, None).await?, id)),
                 None => None,
             };
-            let admitted = api.json(Method::POST, &path, Some(body)).await?;
-            if let Some((draft, id)) = unread.as_ref().filter(|(draft, _)| !draft.is_empty()) {
+            let admitted = api.json(Method::POST, &path, Some(body.clone())).await;
+            // Only an entry, or a completed sign-in, answers an admission.
+            let answered = |v: Value| (v["entry"].is_u64() || v["signed_in"] == true).then_some(v);
+            let admitted = admitted.and_then(|v| answered(v).ok_or_else(|| error(audio::INVALID)));
+            // Unless refused, an admission, answered or not, may have cleared the draft read.
+            let kept = admitted.as_ref().is_err_and(Error::refused);
+            if let Some((draft, id)) = unread.as_ref().filter(|(d, _)| !kept && !d.is_empty()) {
                 let _ = api.draft(id, Some(draft.clone())).await;
             }
             Ok::<_, Error>((admitted, unread))
         };
+        // Admitting it again, a draft read that failed leaves the outcome as unknown as before.
         let admitted = admitted.await;
-        move |app: &mut App| {
-            let sent = app.sending.take().unwrap_or_default();
-            match admitted {
-                Ok((v, unread)) => {
-                    if !sent.text.is_empty() {
-                        super::audio::dismiss_failure(app);
-                    }
-                    if let Some((draft, id)) = unread {
-                        app.take_draft(id, draft);
-                    }
-                    then(app, v);
+        let admitted = admitted.or_else(|e| if again { Ok((Err(e), None)) } else { Err(e) });
+        move |app: &mut App| match admitted {
+            Ok((Ok(v), unread)) => {
+                if app.sending.take().is_some_and(|sent| !sent.text.is_empty()) {
+                    audio::dismiss_failure(app);
                 }
-                Err(e) => {
-                    let typed = std::mem::replace(&mut app.composer, sent);
-                    merge(app, typed, Some(e));
+                if let Some((draft, id)) = unread {
+                    app.take_draft(id, draft);
                 }
+                then(app, v);
+            }
+            Ok((Err(e), _)) if !e.refused() => {
+                let resend = move |app: &mut App| admit(app, path, (body, keep), then);
+                app.held = Some((e.to_string(), Box::new(resend)));
+            }
+            Ok((Err(e), _)) | Err(e) => {
+                let sent = app.sending.take().unwrap_or_default();
+                let typed = std::mem::replace(&mut app.composer, sent);
+                merge(app, typed, Some(e));
             }
         }
     });
     // The person's own words come on screen whether or not a turn is running.
-    if queued {
+    if queued && !again {
         app.sending = Some(match keep {
             true => Composer::default(),
             false => std::mem::take(&mut app.composer),

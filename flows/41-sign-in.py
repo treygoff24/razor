@@ -58,6 +58,21 @@ with flow(replies, config=config) as f:
     assert result.returncode != 0 and rebuilds() == ["restart"] * 2, (result.stderr, rebuilds())
     assert ends[-2] == "done" and "error" in ends[-1], ends[-2:]
 
+# Usage windows belong to rows: a loaded row keeps them, an evicted row rebuilds without them.
+with flow([reply(text="ready")], config=config) as f:
+    (f.home / ".razor/usage.json").write_text(json.dumps({"observed_at": int(time.time()),
+        "accounts": {"work": {"flow-account": {"status": "ok", "limits": [fable]}}}}))
+    session = f.ask("Ready.")["session"]
+    events = server.send(f, "GET", f"/sessions/{session}/events?follow=true")
+    assert json.loads(events.readline())["kind"] == "attached"
+    server.post(f, f"/sessions/{session}/quit", {})
+    assert not server.listed(f, session)
+    assert json.load(server.send(f, "GET", f"/sessions/{session}/agent"))["usage"], "a loaded row lost its usage"
+    events.close()
+    for _ in range(2):
+        assert not server.listed(f, session)
+    assert not json.load(server.send(f, "GET", f"/sessions/{session}/agent"))["usage"], "an unloaded row was not evicted"
+
 # A subscription refusal invalidates this conversation's sign-in, not the server.
 refusal = Reply(b'{"type":"error","error":{"type":"permission_error","message":"Your organization has disabled Claude subscription access"}}', status=403)
 revoked = Reply(b'{"type":"error","error":{"type":"authentication_error","message":"Revoked"}}', status=401)

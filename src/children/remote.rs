@@ -219,7 +219,6 @@ impl Children {
                 }
             }
         }
-        controller.child_rows(&mut rows);
         rows
     }
 }
@@ -266,7 +265,6 @@ fn task_input(input: &mut Input, parent: &SessionId) -> Result<(), Error> {
 
 /// Overlays the source parent's facts; all live readings still belong to the peer.
 pub(crate) fn child_row(parent: &SessionId, fact: &ChildSummary, row: &mut AgentView) {
-    row.changed_files.clear();
     row.parent = Some(parent.clone());
     row.name = fact.child.name.clone();
     row.launched = Some(fact.child.launched);
@@ -338,14 +336,11 @@ pub(crate) async fn recover(
     server: &str,
     only: Option<&[SessionId]>,
 ) -> Result<(), Error> {
-    for (parent, fact) in controller.remote_children() {
-        let Some((session, owner)) = fact.session.address() else {
+    for (parent, child) in controller.remote_children() {
+        let Some((session, owner)) = child.address() else {
             continue;
         };
-        if owner != server
-            || !fact.working()
-            || only.is_some_and(|ids| !ids.contains(&fact.session))
-        {
+        if owner != server || only.is_some_and(|ids| !ids.contains(&child)) {
             continue;
         }
         let operation = ChildRequest::Report {
@@ -355,11 +350,7 @@ pub(crate) async fn recover(
         if !value.is_null() {
             let report: Input = parse(value)?;
             controller
-                .update_child(
-                    &parent,
-                    fact.session.clone(),
-                    ChildUpdate::Report(Box::new(report)),
-                )
+                .update_child(&parent, child, ChildUpdate::Report(Box::new(report)))
                 .await
                 .map_err(other("recovering the remote report"))?;
         }
@@ -578,7 +569,7 @@ pub(crate) async fn descendants(
     )
 }
 
-/// A foreign leaf contains only its parent's recorded child facts, with no invented live fields.
+/// A child row from its parent's recorded facts, with no invented live fields.
 pub(crate) fn child(parent: &SessionId, fact: &ChildSummary) -> AgentView {
     let mut row = AgentView {
         session: fact.session.clone(),
@@ -604,7 +595,8 @@ pub(crate) fn child(parent: &SessionId, fact: &ChildSummary) -> AgentView {
         window: None,
         threshold: 0.0,
         branch: None,
-        changed_files: Vec::new(),
+        changed_file_count: 0,
+        changed_file_first: None,
         calls: Vec::new(),
         doing: None,
         hour: None,

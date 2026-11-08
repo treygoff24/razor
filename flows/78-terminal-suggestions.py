@@ -110,10 +110,10 @@ with flow([response([message('Earlier77.')]), response([message(RAW.split('\n')[
     server.start(f)
     s, other = new(f), new(f)
     send(f, s, 'One77')
-    spoke = server.agents(f)[s]['spoke_at']
+    spoke = json.loads(server.send(f, 'GET', f'/sessions/{s}/agent').read())['spoke_at']
     send(f, s, 'Two77')
     send(f, other, 'Ask77')
-    row = server.agents(f)[s]
+    row = json.loads(server.send(f, 'GET', f'/sessions/{s}/agent').read())
     assert row['suggestion'] and (row['last_reply'], row['spoke_at']) == ('Earlier77.', spoke), row
     with Terminal(f, '--resume', s) as t:
         t.shown('Which build77?', 'Earlier77.', 'Two77', OFFER, HINT)

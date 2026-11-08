@@ -58,7 +58,8 @@ impl Controller {
     pub async fn store(&self, session: &SessionId, bytes: Vec<u8>) -> Result<Image, Error>;
     /// Opens against held directory descriptors without following symlinks; returns no path to reopen.
     pub async fn file(&self, session: &SessionId, name: &str) -> Result<tokio::fs::File, Error>;
-    /// One UTF-8 draft per session, at most 1 MiB; admitting person input clears it.
+    /// One UTF-8 draft per session, at most 1 MiB; admitting person input clears it. Saves and
+    /// clearings land in the order they took one controller-wide lock, held until the rename.
     pub async fn draft(&self, session: &SessionId) -> Result<String, Error>;
     pub async fn set_draft(&self, session: &SessionId, text: String) -> Result<(), Error>;
     /// Bounded fresh read; invalid edits keep the last good value and publish one status snapshot.

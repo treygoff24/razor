@@ -165,15 +165,17 @@ fn program(app: &mut App, bytes: &mut Vec<u8>) {
     if !app.program.answered {
         return;
     }
-    let (agents, mut live) = (&app.agents, BTreeMap::new());
+    let mut live = BTreeMap::new();
     let transcript = app.root.as_ref().and_then(|id| app.transcripts.get(id));
     let ended = transcript.and_then(|t| t.ended.as_ref());
-    let root = app.root.as_ref().and_then(|id| agents.get(id));
+    let root = app.root.as_ref().and_then(|id| app.agent_row(id));
     let mut stack = Vec::from_iter(root.map(|a| (a, String::new())));
     while let Some((a, id)) = stack.pop().filter(|_| live.len() < 64) {
         live.insert(id.clone(), pairs(a, ended.filter(|_| id.is_empty()), &id));
-        let child = |c: &&AgentView| c.parent.as_ref() == Some(&a.session) && c.settled.is_none();
-        let mut under: Vec<_> = agents.values().filter(child).collect();
+        let mut under: Vec<_> = app
+            .agent_children(&a.session)
+            .filter(|c| c.settled.is_none())
+            .collect();
         under.sort_by(|a, b| (b.launched, &b.name).cmp(&(a.launched, &a.name)));
         let sep = if id.is_empty() { ":id=" } else { "/" };
         for c in under {

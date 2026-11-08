@@ -69,8 +69,11 @@ pub fn key(app: &mut App, k: KeyEvent, action: &str) {
         ("goto.cancel", _) => app.goto = None,
         ("goto.search", _) => g.typing = true,
         ("goto.accept", _) => {
-            if let Some((id, _)) = g.selected.clone() {
+            if let Some((id, history)) = g.selected.clone() {
                 app.goto = None;
+                if history {
+                    app.list.toggled.insert("earlier".into());
+                }
                 go(app, id);
             }
         }
@@ -115,9 +118,9 @@ fn step(g: &mut Goto, forward: bool, group: bool) {
 /// as a click on its row does, so a descendant opens in its split.
 fn go(app: &mut App, id: SessionId) {
     let mut top = id.clone();
-    for _ in 0..app.agents.len() {
-        let parent = app.agents.get(&top).and_then(|a| a.parent.as_ref());
-        let live = parent.filter(|p| app.agents.get(*p).is_some_and(|a| a.settled.is_none()));
+    for _ in 0..1024 {
+        let parent = app.agent_row(&top).and_then(|a| a.parent.as_ref());
+        let live = parent.filter(|p| app.agent_row(p).is_some_and(|a| a.settled.is_none()));
         let Some(parent) = live else {
             break;
         };
@@ -225,7 +228,7 @@ fn agent_row(
     ]);
     let repo = a.repo.as_deref().unwrap_or(&a.project);
     let branch: String = a.branch.iter().map(|b| format!(" · {b}")).collect();
-    let n = a.changed_files.len();
+    let n = a.changed_file_count;
     let at = status::location(app, &a.session, columns / 2);
     let place = format!("{at} · {repo}{branch} · {n} changed");
     Row {

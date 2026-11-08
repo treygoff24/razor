@@ -1,4 +1,5 @@
 """Suggestions share the main request; projection never changes the native evidence.
+Suggestion values are read directly; membership in the once-per-second feed is independent.
 The stand-in establishes transport and parsing, not model quality or cache hits.
 """
 import json
@@ -69,7 +70,7 @@ for model, config, make in [('opus', '', lambda t: claude.reply(text=t)),
             with server.send(f, 'GET', f'/sessions/{session}/events?after=0' + ('&native=true' if native else '')) as stream:
                 replay = [json.loads(stream.readline()) for _ in range(len(record) + 1)]
             assert next(e for e in replay if e.get('id') == raw['id']) == (raw if native else projected)
-        assert server.agents(f)[session]['suggestion'] == raw['id']
+        assert json.load(server.send(f, 'GET', f'/sessions/{session}/agent'))['suggestion'] == raw['id']
         admitted = server.post(f, f'/sessions/{session}/input', {'text': 'AGENT77', 'from': 'flow'})['entry']
         server.until(f, session, lambda es: any(e['kind'] == 'turn_end' and admitted in e['inputs'] for e in es))
         path.write_text(off)
@@ -107,12 +108,12 @@ with wall_clock() as (_, env, advance):
     note = response([call('handover', json.dumps({'note': 'Idle note77.'}), 'call_idle77')])
     with flow([big, note], model='sol', config=PLAIN + ON + '[sessions]\nidle = 0\n', env=env) as f:
         session, _ = turn(f, 'Idle77')
-        offered = server.agents(f)[session]['suggestion']
-        assert offered, server.agents(f)[session]
+        offered = json.load(server.send(f, 'GET', f'/sessions/{session}/agent'))['suggestion']
+        assert offered, json.load(server.send(f, 'GET', f'/sessions/{session}/agent'))
         advance(3_000_001)
         server.until(f, session, lambda es: es[-1]['kind'] == 'turn_end' and any(e['kind'] == 'rebuild' for e in es))
         assert [e['trigger'] for e in f.record(session) if e['kind'] == 'rebuild'] == ['idle']
-        assert server.agents(f)[session].get('suggestion') == offered, server.agents(f)[session]
+        assert json.load(server.send(f, 'GET', f'/sessions/{session}/agent')).get('suggestion') == offered, json.load(server.send(f, 'GET', f'/sessions/{session}/agent'))
 
 
 # The trailer ends the last reply, yet work after it, a failed or closing turn, or its own open
@@ -137,7 +138,8 @@ for case, replies in [('continued', [response([message(RAW), call('bash', '{"com
         later = [e['kind'] for e in es if e['id'] > reply]
         assert later == (['call', 'job', 'job', 'result', 'response', 'turn_end'] if case == 'continued' else ['turn_end']), es
         assert ('error' in es[-1]['end'], es[-1].get('closed', False)) == (case == 'failed', case == 'closed'), es[-1]
-        assert not server.agents(f)[session].get('suggestion'), (case, server.agents(f)[session])
+        row = json.load(server.send(f, 'GET', f'/sessions/{session}/agent'))
+        assert not row.get('suggestion'), (case, row)
 
 
 # Complete entries and their live deltas: invalid metadata is ordinary answer text.
@@ -186,4 +188,4 @@ with flow([response([message(*pieces)], gap=0.002) for pieces, *_ in cases], mod
         live = ''.join(e['text'] for e in lines if e['kind'] == 'delta')
         assert live == (raw if deltas is None else deltas), (live, pieces)
         assert next(e for e in f.record(session) if e['kind'] == 'text')['text'] == raw
-        assert bool(server.agents(f)[session].get('suggestion')) == bool(suggestion)
+        assert bool(json.load(server.send(f, 'GET', f'/sessions/{session}/agent')).get('suggestion')) == bool(suggestion)

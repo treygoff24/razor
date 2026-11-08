@@ -165,6 +165,14 @@ class Terminal:
             "app never drew the expected screen:\n" + self.text()
         return self.frame_at
 
+    def quiet(self, gap=1.5, timeout=15):
+        """Whether `gap` seconds pass with no frame within timeout seconds, however many come first."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self.pump(gap, lambda _: True):
+                return True
+        return False
+
     def shown(self, *words, timeout=30):
         """Wait for a whole frame with every named phrase still visible."""
         return self.until(lambda t: all(word in t.text() for word in words), timeout)

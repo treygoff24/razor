@@ -1,7 +1,9 @@
 //! The API client: every request carries the device key, every body and page is bounded, and
 //! the NDJSON streams feed one bounded channel whose lines hold their bytes until folded.
 use super::{Error, error, fail};
-use crate::protocol::{BODY_BYTES, Delivery, Event, Live, Login, SessionId};
+use crate::protocol::{
+    AgentDetail, AgentPage, BODY_BYTES, Delivery, Event, Live, Login, SessionId,
+};
 use futures_util::StreamExt;
 use reqwest::{Method, RequestBuilder, Response, StatusCode, header};
 use serde::de::IgnoredAny;
@@ -110,19 +112,60 @@ impl Api {
             let body = serde_json::to_vec(&body).map_err(fail(
                 "The input could not be encoded; keep its unsent words and attachments.",
             ))?;
+            // Refused as the server would refuse it, unsent, so its words come back to be cut.
             if body.len() > BODY_BYTES {
-                let sentence = "The input exceeds the server's 32 MiB request limit; remove an image or shorten the words.";
-                return Err(error(sentence));
+                let (status, sentence) = (413, "The input exceeds the server's 32 MiB request limit; remove an image or shorten the words.".into());
+                return Err(Error::Refused { status, sentence });
             }
             request = request
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(body);
         }
-        let failed = "The API request failed; check the transcript before sending again.";
-        let response = Self::send(request, 30, failed).await?;
+        Self::json_response(request).await
+    }
+
+    /// Reads typed metadata with the same response bound as other API reads.
+    async fn json_response<T: serde::de::DeserializeOwned>(
+        request: RequestBuilder,
+    ) -> Result<T, Error> {
+        let response = Self::send(
+            request,
+            30,
+            "The API request failed; reconnect to the server.",
+        )
+        .await?;
         serde_json::from_slice(&read(response).await?).map_err(fail(
             "The API sent an invalid answer; reconnect to the server.",
         ))
+    }
+
+    pub async fn earlier(
+        &self,
+        server: &str,
+        view: &str,
+        after: Option<&SessionId>,
+    ) -> Result<AgentPage, Error> {
+        let mut query = vec![("view", view)];
+        query.extend((!server.is_empty()).then_some(("server", server)));
+        query.extend(after.map(|cursor| ("after", cursor.as_str())));
+        let request = self.request(Method::GET, "v1/agents")?.query(&query);
+        let mut page: AgentPage = Self::json_response(request).await?;
+        for agent in &mut page.agents {
+            agent.qualify(server);
+        }
+        Ok(page)
+    }
+
+    pub async fn agent(&self, id: &SessionId) -> Result<AgentDetail, Error> {
+        let request = self.request(Method::GET, &format!("v1/sessions/{id}/agent"))?;
+        let mut detail: AgentDetail = Self::json_response(request).await?;
+        if let Some((_, server)) = id.address() {
+            detail.row.qualify(server);
+            for child in &mut detail.children {
+                child.qualify(server);
+            }
+        }
+        Ok(detail)
     }
 
     /// Renames the addressed session; a refusal is the API's own sentence.
@@ -133,7 +176,10 @@ impl Api {
         read(Self::send(request, 30, failed).await?).await.map(drop)
     }
 
-    /// Reads the session's saved draft, or replaces it with `text` (empty removes it).
+    /// Reads the session's saved draft, or replaces it with `text` (empty removes it). Neither has
+    /// a deadline: a replacement given up on could still land after a newer one and put older
+    /// words back, so each ends only with the server's answer or the connection's failure, and
+    /// every write queued behind it waits.
     pub async fn draft(&self, session: &SessionId, text: Option<String>) -> Result<String, Error> {
         let path = format!("v1/sessions/{session}/draft");
         let request = match text {
@@ -141,7 +187,7 @@ impl Api {
             None => self.request(Method::GET, &path)?,
         };
         let failed = "The draft could not be saved or read; keep the unsent words and reconnect.";
-        let response = Self::send(request, 15, failed).await?;
+        let response = request.send().await.map_err(fail(failed))?;
         String::from_utf8(read(response).await?).map_err(fail(
             "The saved draft is not UTF-8; replace it through the API.",
         ))
@@ -415,9 +461,9 @@ async fn read(response: Response) -> Result<Vec<u8>, Error> {
         let interrupted = "The API answer was interrupted; reconnect to the server.";
         let chunk = chunk.map_err(fail(interrupted))?;
         if body.len() + chunk.len() > LINE {
-            return Err(error(
-                "The API answer exceeds the record's 64 MiB line cap; read a smaller page.",
-            ));
+            let sentence =
+                "The API answer exceeds the record's 64 MiB line cap; read a smaller page.";
+            return Err(error(sentence));
         }
         body.extend_from_slice(&chunk);
     }

@@ -21,7 +21,7 @@ const WINDOW: usize = 3200;
 const SILENT: &str = "The microphone gave no sound; check its device and permission.";
 const STOPPED: &str = "The microphone program stopped; check `capture` and try again.";
 const SAVING: &str = "Local audio could not be saved; check the temporary folder.";
-const INVALID: &str = "The server's answer is invalid; reconnect to a matching server.";
+pub(super) const INVALID: &str = "The server's answer is invalid; reconnect to a matching server.";
 const REMOTE: &str = "Over SSH, audio would play on {}, not your machine; pair Razor on yours.";
 const QUIT: &str = "QUITTING WILL DISCARD AUDIO. <composer.back> stays.";
 /// This process and its start, which name its private audio folder and its notes' request ids.

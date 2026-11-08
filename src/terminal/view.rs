@@ -1,10 +1,10 @@
 //! One frame: the bar, the gauge, the transcript, the band above the composer, the composer
 //! and the status pane, or the split while a child is addressed. Each click target is a hit.
 use super::{
-    App, children, composer, gauge, motion, panel, picker, questions, split, status, strip,
-    text::*, transcript,
+    App, bindings, children, composer, gauge, motion, panel, picker, questions, split, status,
+    strip, text::*, transcript,
 };
-use crate::protocol::{AgentView, Body, EntryId, Input, MailId, Quit, SessionId, State};
+use crate::protocol::{Body, EntryId, Input, MailId, Quit, SessionId, State};
 use composer::{completion, emoji, shortcodes};
 use ratatui::{
     buffer::Buffer,
@@ -30,6 +30,7 @@ pub(super) enum Action {
     Archive,
     Section(String),
     Agent(SessionId),
+    Earlier,
     /// The agents list's "+ New agent" row: opens the new-agent chooser.
     New,
     /// The agents list's right edge: a press starts widening or narrowing the list.
@@ -45,6 +46,10 @@ pub(super) enum Action {
     Choose(String, std::path::PathBuf),
     /// The inbox folded to its newest four, or opened at a page of fifteen from this offset.
     Inbox(Option<usize>),
+    /// The tasks pane folded, or opened at a page of fifteen open and closed tasks.
+    Tasks(Option<usize>),
+    /// Opens a task card in the tasks panel.
+    Task(u64),
     Delivery(SessionId, EntryId, Option<Arc<str>>),
     Option(MailId, usize),
     Call(SessionId, EntryId),
@@ -221,7 +226,7 @@ pub(super) fn normal(
         Rect::new(x, y + rows, width, band),
         Rect::new(x, y + rows + band, width, card),
     );
-    let agent = app.focus.as_ref().and_then(|id| app.agents.get(id));
+    let agent = app.focus.as_ref().and_then(|id| app.agent_row(id));
     super::topbar::draw(app, b, top, agent, tape == 0, now);
     if tape > 0 {
         let column = Rect::new(area.x, y, tape, mid);
@@ -364,10 +369,11 @@ pub(super) fn transcript(
     if app.focus.as_ref() == Some(id) && app.panel.is_some() {
         return panel::draw(app, b, r, now, hits);
     }
-    let agent = app.agents.get(id);
+    let agent = app.agent_row(id);
     let model = agent
         .map_or(app.model.as_str(), |a| a.model.as_str())
         .to_owned();
+    let identity = agent.map(|a| (a.window, a.name.clone()));
     let working = agent.is_some_and(|a| a.state == State::Working);
     let takes = super::inputs::takes(agent);
     let asks = agent.map_or_else(Vec::new, |a| a.asks.iter().map(|q| q.id.1).collect());
@@ -377,8 +383,8 @@ pub(super) fn transcript(
         .map(|w| w.resets_at)
         .filter(|at| at.is_none_or(|at| at > now))
         .max();
-    let names = (app.agents.values())
-        .filter(|a| a.parent.as_ref() == Some(id))
+    let names = app
+        .agent_children(id)
         .take(1024)
         .map(|a| {
             (
@@ -406,9 +412,9 @@ pub(super) fn transcript(
     if t.zone.is_none() {
         t.zone = app.zone.clone();
     }
-    if let Some(a) = app.agents.get(id) {
-        t.window = a.window;
-        t.name.clone_from(&a.name);
+    if let Some((window, name)) = identity {
+        t.window = window;
+        t.name = name;
     }
     t.motion(motion, app.presence);
     t.frame(app.pictures.cell, app.pictures.frame);
@@ -454,29 +460,35 @@ fn press(app: &App, id: &SessionId, action: transcript::Action) -> Action {
         }
         transcript::Action::Unfold(entry) => Action::Unfold(id, entry),
         transcript::Action::Toggle(entry) => {
-            let launched =
-                |a: &&AgentView| a.parent.as_ref() == Some(&id) && a.launched == Some(entry);
             let child = app
-                .agents
-                .values()
-                .find(launched)
+                .agent_children(&id)
+                .find(|a| a.launched == Some(entry))
                 .map(|a| a.session.clone());
             child.map_or(Action::Call(id, entry), Action::Child)
         }
     }
 }
 
+const HELD: &str = " · Quitting puts the unanswered words in the draft. If the server got them, the transcript shows them; send them again only if it doesn't.";
 const NEWER: &str =
     "Newer server: close this and run `razor --continue`. Part of the transcript may be missing.";
 
-// The band's rows under the notice: the new agents' words a quit would lose, then the voice
-// note and player, each wrapped whole.
+// The band's rows under the notice: the new agents' words a quit would lose, the input left
+// unanswered and, while a quit is armed, where its words go, then the voice note and player,
+// each wrapped whole.
 fn warned(app: &App, columns: usize) -> Vec<ratatui::text::Line<'static>> {
+    let held = app.held.as_ref().map_or_else(Vec::new, |(why, _)| {
+        let again = match app.quitting {
+            true => span(HELD, WHITE),
+            false => span(bindings::text(app, " · <composer.send> tries again"), GRAY),
+        };
+        inset(vec![span(format!("✗ {why}"), AMBER), again], columns)
+    });
     let (unsent, audio) = (
         super::start::unsent(app, columns),
         super::audio::band(app, columns),
     );
-    [unsent, audio].concat()
+    [unsent, held, audio].concat()
 }
 
 /// The band above the composer: a rule or the notice, the question, the inputs queued for the
@@ -647,7 +659,7 @@ fn waiting(
 // The person's newest message, when a turn ended after it with no reply and the session is
 // not working.
 fn unanswered(app: &App) -> Option<&str> {
-    let agent = app.agents.get(app.focus.as_ref()?);
+    let agent = app.agent_row(app.focus.as_ref()?);
     let working = agent.is_some_and(|a| a.state == State::Working);
     app.transcript()?.unanswered().filter(|_| !working)
 }

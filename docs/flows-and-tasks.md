@@ -110,7 +110,7 @@ Run them with `scripts/flows.sh` and flow numbers or names ([Contributing](contr
 
 - 48 Push alerts to a phone through Apple's service.
 - 50 Voice notes: transcribed before admission, kept with their words, refused with a sentence when the transcriber fails.
-- 51, 52, 53 Recording and playing in the terminal app, over SSH, and on quitting mid-recording.
+- 51, 52, 53 Recording and playing in the terminal app, over SSH, and on quitting mid-recording; 52 also sends a typed message whose answer is lost, and checks the server keeps one copy, that the words typed meanwhile become the draft, and that quitting first keeps the unanswered words in the draft.
 - 54 Video: a Gemini session watches it; any other session gets a watcher helper.
 - 55 The bundled ElevenLabs speech program.
 - 57 Agents' spoken notes, their limits and their settings.

@@ -95,7 +95,7 @@ impl Session {
             }
         }
         if person {
-            clear_draft(self.record.dir().to_path_buf()).await?;
+            self.c.write_draft(&self.id, String::new()).await?;
         }
         Ok(entry)
     }
@@ -162,7 +162,7 @@ impl Session {
         let entry = self
             .admit(Command::Done.input(DONE.replace("{state}", &state)))
             .await?;
-        clear_draft(self.record.dir().to_path_buf()).await?;
+        self.c.write_draft(&self.id, String::new()).await?;
         self.done = Some(entry);
         self.publish_row();
         Ok(entry)
@@ -364,9 +364,4 @@ fn news(input: &Input) -> bool {
 /// The person's words: a message, or an answer to the person's ask.
 fn person(input: &Input) -> bool {
     matches!(input.from, Origin::Person | Origin::Answer { .. })
-}
-
-/// Empties the person's saved draft.
-async fn clear_draft(dir: std::path::PathBuf) -> Result<(), Error> {
-    super::super::blocking(move || super::super::files::write(&dir, "draft", b"")).await
 }

@@ -605,7 +605,7 @@ with flow(replies) as f:
 # a parent, the bar follows the addressed agent, Ctrl-T opens the pane beside it, Esc stops the
 # addressed agent at any width, which stays addressed, and another session's ask takes its digit.
 kids, grand = [f"kid{n}" for n in (1, 3, 4, 5, 6)], [f"g{n}" for n in range(4)]
-start = lambda match, names: claude.reply(*[(None, "mcp__razor__agent", {"action": "start", "name": n, "brief": "Go.", "placement": "worktree"}) for n in names], match=match)
+start = lambda match, names: claude.reply(*[(None, "mcp__razor__agent", {"action": "start", "name": n, "brief": "Go.", "placement": "worktree", "effort": "high"}) for n in names], match=match)
 poll = 'until [ $(grep -l \'"turn_end"\' "$RAZOR_HOME"/sessions/*/record.jsonl | wc -l) -ge 10 ]; do sleep .1; done'
 replies = [start("KIDS", ["kid2"]), reply("KIDS", "Bash", {"command": "sleep 1.1"}), claude.reply((None, "mcp__razor__agent", {"action": "headline", "text": "kids-headline"}), match="KIDS"),
            start("KIDS", kids), reply("KIDS", "Bash", {"command": poll}), agent("KIDS", "stop", child="kid1"), agent("KIDS", "settle", child="kid1", decision="discard"),
@@ -634,8 +634,11 @@ with flow(replies, config='[ui.keys.goto]\nsearch = ["s"]\n[ui.keys.panel]\nsear
         t.send("\x1bOQ")
         kid = lambda t: [line[:52] for line in t.screen.display if re.search(r" kid\d ", line[:52])]
         kids = lambda t: len(kid(t)) == 3 and all("waiting for merge" in line for line in kid(t)) and "kid1" not in t.text()
-        # Slid fully open; kid1's stopped child leaves the list too.
-        t.until(lambda t: "✓ 2 done" in t.text() and t.screen.display[0][52] == "╮" and kids(t) and "EARLIER" not in t.text() and "1 AGENT" in t.text())
+        # Slid fully open; kid1's stopped child leaves the list too. Earlier remains folded
+        # without a total while its historical rows have not been requested.
+        t.until(lambda t: "✓ 2 done" in t.text() and t.screen.display[0][52] == "╮" and kids(t) and "EARLIER" in t.text() and "1 AGENT" in t.text())
+        earlier = next(line for line in t.screen.display if "EARLIER" in line)
+        assert "AGENT" not in earlier and "LOADED" not in earlier, earlier
         assert t.screen.display[0].startswith("╭─ RAZOR") and " move " in t.screen.display[-1][:52], t.text()
         # Go to a helper's helper, kid2's g1, with kid2 folded into the done line opens the line
         # and selects its row.
@@ -689,3 +692,8 @@ with flow(replies, config='[ui.keys.goto]\nsearch = ["s"]\n[ui.keys.panel]\nsear
         t.send("\x1b[D")  # From a helper, Left addresses its parent before changing views.
         opened(f, g1, False)
         opened(f, server.agents(f)[g1]["parent"], True)
+    server.stop(f)
+    server.start(f)
+    row = next(c for c in json.loads(server.send(f, "GET", f"/sessions/{root}/agent").read())["children"] if c["name"] == "kid1")
+    header = next(f.record(row["session"]))
+    assert row["settled"] == "discard" and (row["model"], row["effort"]) == (header["model"], header["effort"]) and row["effort"] == "high", row

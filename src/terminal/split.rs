@@ -106,10 +106,7 @@ pub fn draw(
         _ => 5,
     }
     .min(rest);
-    let children = app
-        .agents
-        .values()
-        .filter(|a| a.parent.as_ref() == Some(&focus));
+    let children = app.agent_children(&focus);
     let band = match children.count() as u16 {
         0 => 0,
         n => (1 + n.min(1024) * 2).min(right.height / 3),
@@ -178,7 +175,7 @@ fn frame(app: &mut App, b: &mut Buffer, area: Rect, now: u64, hits: &[Hit]) -> O
         edge(l, y, "│");
         edge(r, y, "│");
     }
-    let name = app.agents.get(&child).map_or("", |a| a.name.as_str());
+    let name = app.agent_row(&child).map_or("", |a| a.name.as_str());
     let title = within(area, [l + 2, t, r - 1, t + 1]);
     if title.height > 0 {
         let bold = bold(rgb(0xd6a0ff), GLASS);
@@ -207,14 +204,17 @@ fn divider(app: &mut App, b: &mut Buffer, area: Rect, x: u16, id: &SessionId, no
 // The child's light as its card draws it, lapping only with `lap`, and its end's flash or fray;
 // it asks for frames while it moves.
 fn light(app: &mut App, id: &SessionId, now: u64, lap: bool) -> Rim<'static> {
-    let Some(a) = app.agents.get(id) else {
+    let mut lights = std::mem::take(&mut app.lights);
+    let Some(a) = app.agent_row(id) else {
+        app.lights = lights;
         return Rim::default();
     };
     let (ended, motion) = (tools::child::ended(app, a), super::motion::on(app));
     let live = motion && ended.is_none() && a.state == State::Working;
     let mut rim = Rim::default();
     (rim.motion, rim.open) = (live && lap, 1.);
-    rim.pulse = app.lights.pulse(a, app.transcripts.get(id), now, live);
+    rim.pulse = lights.pulse(a, app.transcripts.get(id), now, live);
+    app.lights = lights;
     (rim.fray, rim.flash) = tools::rim::ending(ended, now, motion);
     if live || ended.is_some_and(|(at, _)| motion && now < at + 1400) {
         app.next.at(now + 83);
@@ -232,7 +232,7 @@ fn within(area: Rect, [left, top, right, bottom]: [i32; 4]) -> Rect {
 // Where the last frame drew `child`'s card, as outer edges: down the tallest run of its hits, and
 // across its cached top edge from its corner to its `╮`.
 fn card(app: &App, hits: &[Hit], child: &SessionId) -> Option<[i32; 4]> {
-    let agent = app.agents.get(child)?;
+    let agent = app.agent_row(child)?;
     let t = app.transcripts.get(agent.parent.as_ref()?)?;
     let rows = &t.children.get(&agent.launched?)?.0;
     let top = rows.get(1)?.words.to_string();
@@ -255,7 +255,7 @@ fn card(app: &App, hits: &[Hit], child: &SessionId) -> Option<[i32; 4]> {
 fn main(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit>) {
     let Some(id) = app.root.clone() else { return };
     let bar = Rect::new(r.x, r.y, r.width, r.height.min(4));
-    super::topbar::draw(app, b, bar, app.agents.get(&id), false, now);
+    super::topbar::draw(app, b, bar, app.agent_row(&id), false, now);
     if r.height < 7 {
         return;
     }
@@ -272,7 +272,7 @@ fn main(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit>) {
     let footer = Rect::new(body.x, r.bottom() - 1, body.width, 1);
     fill(b, footer, style(GRAY_DIM, RECESS));
     // Questions waiting on the main side are counted, in cyan.
-    let asks = app.agents.get(&id).map_or(0, |a| a.asks.len());
+    let asks = app.agent_row(&id).map_or(0, |a| a.asks.len());
     let more = match asks {
         0 => String::new(),
         n => format!("{n} for you · "),
@@ -291,9 +291,9 @@ fn main(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit>) {
 fn ancestry(app: &App, b: &mut Buffer, r: Rect, id: &SessionId, hits: &mut Vec<Hit>) {
     // Ancestry comes from the capped status snapshot, never a navigation stack.
     let mut chain = vec![id];
-    let parent = |id: &SessionId| app.agents.get(id)?.parent.as_ref();
+    let parent = |id: &SessionId| app.agent_row(id)?.parent.as_ref();
     while let Some(parent) = chain.last().and_then(|id| parent(id)) {
-        if chain.contains(&parent) || chain.len() >= app.agents.len() {
+        if chain.contains(&parent) || chain.len() >= 1024 {
             break;
         }
         chain.push(parent);
@@ -303,7 +303,7 @@ fn ancestry(app: &App, b: &mut Buffer, r: Rect, id: &SessionId, hits: &mut Vec<H
     }
     let (mut x, right) = (r.x, r.right());
     for (i, session) in chain.into_iter().rev().enumerate() {
-        let name = app.agents.get(session).map(|a| a.name.as_str());
+        let name = app.agent_row(session).map(|a| a.name.as_str());
         let name = name.filter(|n| !n.is_empty()).unwrap_or(session.as_str());
         let words = match (session == id, i) {
             (true, _) => bold(CYAN, GLASS),
@@ -326,7 +326,7 @@ fn identity(app: &App, b: &mut Buffer, r: Rect, id: &SessionId, now: u64, hits: 
         return;
     }
     ancestry(app, b, r, id, hits);
-    let Some(agent) = app.agents.get(id) else {
+    let Some(agent) = app.agent_row(id) else {
         return;
     };
     let head = cards::Card::of(app, agent, now);
@@ -344,10 +344,11 @@ fn identity(app: &App, b: &mut Buffer, r: Rect, id: &SessionId, now: u64, hits: 
     // The context in its zone's colour, the cache reused and the files changed, each only when
     // it has something to say.
     if r.height > 4 {
-        let files = &agent.changed_files;
-        let named = files.first().and_then(|f| f.file_name()).map(|name| {
-            let (s, more) = [("", ""), ("s", " …")][usize::from(files.len() > 1)];
-            format!("{} file{s} ({}{more})", files.len(), name.to_string_lossy())
+        let count = agent.changed_file_count;
+        let first = agent.changed_file_first.as_ref();
+        let named = first.and_then(|f| f.file_name()).map(|name| {
+            let (s, more) = [("", ""), ("s", " …")][usize::from(count > 1)];
+            format!("{count} file{s} ({}{more})", name.to_string_lossy())
         });
         let cache = agent.cache.filter(|c| *c > 0.);
         let facts = [
@@ -372,8 +373,7 @@ fn family(app: &App, b: &mut Buffer, r: Rect, id: &SessionId, now: u64, hits: &m
     if r.height < 3 {
         return;
     }
-    let mine = |a: &&crate::protocol::AgentView| a.parent.as_ref() == Some(id);
-    let all = (app.agents.values().filter(mine)).map(|a| cards::Card::of(app, a, now));
+    let all = app.agent_children(id).map(|a| cards::Card::of(app, a, now));
     let (kept, ended): (Vec<_>, Vec<_>) = all.partition(|c| c.kept(now));
     let total = kept.len() + ended.len();
     let working = kept.iter().filter(|c| c.agent.state == State::Working);

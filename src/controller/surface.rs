@@ -105,21 +105,15 @@ impl Controller {
                 Err(e) => return Err(e.into()),
             }
         }
-        self.summary(&session).await?;
+        self.seed(&session).await?;
         Ok(session)
     }
 
     /// The loaded fold, or a read-only snapshot, resumed for configured resident homes;
     /// never starts a session task.
     pub(crate) async fn summary(&self, session: &SessionId) -> Result<Summary, Error> {
-        // Holding this sender prevents unloading between the lookup and the queued read.
-        let task = lock(&self.inner.sessions).get(session).cloned();
-        if let Some(_task) = task {
-            return self
-                .ask(session, |s| {
-                    Box::pin(async move { Ok(s.record.summary().clone()) })
-                })
-                .await;
+        if let Some(summary) = self.loaded_summary(session).await? {
+            return Ok(summary);
         }
         let summary = self
             .inner
@@ -132,14 +126,134 @@ impl Controller {
                 }
                 Error::from(e)
             })?;
+        Ok(summary)
+    }
+
+    /// Reads only an already loaded task, holding its sender until the queued read completes.
+    pub(crate) async fn loaded_summary(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<Summary>, Error> {
+        let task = lock(&self.inner.sessions).get(session).cloned();
+        let Some(_task) = task else { return Ok(None) };
+        self.ask(session, |s| {
+            Box::pin(async move { Ok(Some(s.record.summary().clone())) })
+        })
+        .await
+    }
+
+    /// Admits a display row at creation and restart seeding, never from a historical read.
+    async fn seed(&self, session: &SessionId) -> Result<(), Error> {
+        let summary = self.summary(session).await?;
+        let row = self.row(&summary).await;
+        let mut status = lock(&self.inner.status);
+        status.row(row);
+        status.child_rows(&summary);
+        Ok(())
+    }
+
+    /// Seeds missing local display rows without loading session tasks.
+    pub(crate) async fn admit_rows(&self, ids: impl IntoIterator<Item = SessionId>) {
+        for id in ids {
+            if id.address().is_none() && !lock(&self.inner.status).agents.contains_key(&id) {
+                let _ = self.seed(&id).await;
+            }
+        }
+    }
+
+    /// Silently drops only candidates with no loaded task and no terminal.
+    pub(crate) fn evict<'a>(&self, candidates: impl Iterator<Item = &'a AgentView>) {
+        let sessions = lock(&self.inner.sessions);
+        let mut status = lock(&self.inner.status);
+        for row in candidates {
+            if !sessions.contains_key(&row.session)
+                && row.terminals == 0
+                && status.agents.get(&row.session) == Some(row)
+            {
+                status.agents.remove(&row.session);
+            }
+        }
+    }
+
+    async fn row(&self, summary: &Summary) -> AgentView {
+        if let Some(row) = lock(&self.inner.status)
+            .agents
+            .get(&summary.session)
+            .cloned()
+        {
+            return row;
+        }
         let config = self.inner.config.lock().await;
         let limits = crate::profiles::limits(&summary.model, &config.config, summary.window);
-        let mut status = lock(&self.inner.status);
-        if !status.agents.contains_key(session) {
-            let state = [State::NeedsYou, State::Done][usize::from(summary.done())];
-            status.record(&summary, state, None, false, limits);
+        let state = [State::NeedsYou, State::Done][usize::from(summary.done())];
+        lock(&self.inner.status).build(summary, state, None, false, limits)
+    }
+
+    /// One session's display row, without inserting it into the live status map.
+    pub(crate) async fn agent(&self, session: &SessionId) -> Result<AgentView, Error> {
+        let mut row = self.row(&self.summary(session).await?).await;
+        self.parent_row(&mut row).await?;
+        Ok(row)
+    }
+
+    /// All direct children, including settled helpers whose cards remain in the conversation.
+    pub(crate) async fn detail(
+        &self,
+        session: &SessionId,
+    ) -> Result<crate::protocol::AgentDetail, Error> {
+        let parent = self.summary(session).await?;
+        let mut row = self.row(&parent).await;
+        self.parent_row(&mut row).await?;
+        let mut rows = Vec::new();
+        for child in &parent.children {
+            let mut row = if child.settled.is_some() || child.session.address().is_some() {
+                let cached = lock(&self.inner.status).agents.get(&child.session).cloned();
+                if let Some(row) = cached {
+                    row
+                } else {
+                    let mut row = children::child(session, child);
+                    if child.session.address().is_none()
+                        && let Some(Body::Start {
+                            model, settings, ..
+                        }) = record::start(self.home(), &child.session).await
+                    {
+                        row.model = model;
+                        row.effort = settings.effort;
+                    }
+                    row
+                }
+            } else {
+                self.row(&self.summary(&child.session).await?).await
+            };
+            children::child_row(session, child, &mut row);
+            rows.push(row);
         }
-        Ok(summary)
+        Ok(crate::protocol::AgentDetail {
+            row,
+            children: rows,
+            changed_files: Some(parent.changed_files),
+        })
+    }
+
+    /// A row read through this server keeps the facts its locally stored parent owns.
+    pub(crate) async fn parent_row(&self, row: &mut AgentView) -> Result<(), Error> {
+        let Some(parent) = &row.parent else {
+            return Ok(());
+        };
+        let native = |s: &SessionId| s.address().map_or_else(|| s.clone(), |(id, _)| id);
+        let parent = match self.summary(&native(parent)).await {
+            Ok(parent) => parent,
+            Err(Error::NoSession(_)) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        if let Some(fact) = parent
+            .children
+            .iter()
+            .find(|c| native(&c.session) == native(&row.session))
+        {
+            children::child_row(&parent.session, fact, row);
+        }
+        Ok(())
     }
 
     /// The stored entry, read through the record's index.
@@ -368,20 +482,21 @@ impl Controller {
         Ok(text)
     }
 
-    /// Replaces the draft atomically, never writing through a symlink.
+    /// Replaces the draft atomically, never writing through a symlink, after every write that
+    /// reached the draft lock first, an admission's clearing included.
     pub(crate) async fn set_draft(&self, session: &SessionId, text: String) -> Result<(), Error> {
+        // Read before the lock: the session's task may be waiting for it in an admission.
         self.summary(session).await?;
         if text.len() > DRAFT {
             return invalid("The draft is larger than 1 MiB; shorten it.");
         }
-        let dir = self.dir(session);
-        blocking(move || files::write(&dir, "draft", text.as_bytes())).await
+        self.write_draft(session, text).await
     }
 
     /// A restart leaves idle sessions unloaded, and a row exists only for a loaded session or a
-    /// summary read. This reads the summaries of the roots whose records changed within `RECENT`
-    /// and of each resident's `THREADS` most recently changed threads, whatever their age, so the
-    /// agents list after a restart holds what it held before. No session task starts; a stat of
+    /// restart seed. This reads the summaries of the roots whose records changed within `RECENT`
+    /// and of each resident's `THREADS` most recently changed threads, whatever their age. The
+    /// publisher trims these candidates on its first pass. No session task starts; a stat of
     /// the record decides before any of it is folded.
     pub(super) async fn recent(&self) {
         let roots = record::list(&self.inner.home, None, None, false, usize::MAX).await;
@@ -395,14 +510,13 @@ impl Controller {
                 *n <= THREADS
             });
             if newest || changed.elapsed().is_ok_and(|age| age < RECENT) {
-                let _ = self.summary(&session).await;
+                let _ = self.seed(&session).await;
             }
         }
     }
 
     /// Roots newest first with their latest recorded model, effort, title and activity; with
-    /// `resident`, its threads, and fresh runs too when `jobs`. Each listed session's row joins
-    /// the status stream, as any summary read does.
+    /// `resident`, its threads, and fresh runs too when `jobs`; reading never registers a row.
     pub(crate) async fn list(
         &self,
         cwd: Option<PathBuf>,
@@ -431,30 +545,36 @@ impl Controller {
         if let Some(e) = records.failure {
             return invalid(&e.to_string());
         }
-        let mut status = lock(&self.inner.status);
+        let mut rows = Vec::new();
         for summary in &records.local {
-            status.child_rows(summary);
+            rows.push(self.row(summary).await);
         }
-        let mut rows: Vec<_> = records
-            .local
-            .iter()
-            .filter_map(|s| status.agents.get(&s.session).cloned())
-            .collect();
+        for summary in &records.local {
+            for child in &summary.children {
+                if let Some(row) = rows.iter_mut().find(|r| r.session == child.session) {
+                    children::child_row(&summary.session, child, row);
+                }
+            }
+        }
         rows.extend(records.remote.iter().map(|(p, c)| children::child(p, c)));
         Ok(rows)
     }
 
     /// Local parents' foreign child facts, copied without opening records.
-    pub(crate) fn remote_children(&self) -> Vec<(SessionId, record::ChildSummary)> {
-        lock(&self.inner.status).remote.values().cloned().collect()
+    pub(crate) fn remote_children(&self) -> Vec<(SessionId, SessionId)> {
+        lock(&self.inner.status)
+            .remote
+            .iter()
+            .map(|(child, parent)| (parent.clone(), child.clone()))
+            .collect()
     }
 
-    /// Fills foreign cards from their source parent's durable facts.
-    pub(crate) fn child_rows(&self, rows: &mut [AgentView]) {
+    /// Addresses outstanding foreign children's parents through their local records.
+    pub(crate) fn parent_rows(&self, rows: &mut [AgentView]) {
         let status = lock(&self.inner.status);
         for row in rows {
-            if let Some((parent, fact)) = status.remote.get(&row.session) {
-                children::child_row(parent, fact, row);
+            if let Some(parent) = status.remote.get(&row.session) {
+                row.parent = Some(parent.clone());
             }
         }
     }

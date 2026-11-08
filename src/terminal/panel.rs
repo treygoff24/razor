@@ -12,8 +12,8 @@ use std::collections::VecDeque;
 
 pub enum Panel {
     Status,
-    /// The addressed session's project's open tasks, a line each.
-    Tasks(Vec<Line<'static>>),
+    /// The addressed project's grouped task list and selected task card.
+    Tasks,
     Help,
     Keys,
     // Sign-in instructions are transient API output, at most 64 KiB in 128 lines.
@@ -27,12 +27,21 @@ pub enum Panel {
 
 /// Opens the panel `word` names (`/status`, `/help`, `/keys`, `/tasks` or `/login`); false for
 /// another command.
-pub fn command(app: &mut App, word: &str) -> bool {
+pub fn command(app: &mut App, word: &str, args: &str) -> bool {
     match word {
         "/status" => open(app, Panel::Status),
         "/help" => open(app, Panel::Help),
         "/keys" => open(app, Panel::Keys),
-        "/tasks" => tasks(app),
+        "/tasks" => {
+            (app.tasks.detail, app.tasks.pending) = (None, None);
+            open(app, Panel::Tasks);
+            if !args.is_empty() {
+                match args.parse() {
+                    Ok(id) => super::tasks::detail(app, id),
+                    Err(_) => app.say("Use /tasks <number> to open a task."),
+                }
+            }
+        }
         "/login" => start(app),
         _ => return false,
     }
@@ -45,7 +54,7 @@ pub fn open(app: &mut App, panel: Panel) {
 }
 
 fn searchable(app: &App) -> bool {
-    matches!(app.panel, Some(Panel::Keys | Panel::Help | Panel::Tasks(_)))
+    matches!(app.panel, Some(Panel::Keys | Panel::Help))
 }
 
 /// Starts the server's sign-in; Escape cancels it by dropping its stream.
@@ -103,6 +112,9 @@ fn show(app: &mut App, text: &str, ended: bool) {
 /// One key: an open `/mcp` takes it first, and what it leaves scrolls or closes the panel; while
 /// a search is typed, a character without Ctrl is its word.
 pub fn key(app: &mut App, key: KeyEvent) {
+    if matches!(app.panel, Some(Panel::Tasks)) && super::tasks::key(app, key) {
+        return;
+    }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     if matches!(app.panel, Some(Panel::Mcp(_))) && !ctrl && mcp::key(app, key) {
         return;
@@ -156,7 +168,7 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<vie
     let found = |rows| found(rows, app.panel_search.as_deref(), width);
     let (title, rows) = match &app.panel {
         Some(Panel::Status) => ("status", super::status::rows(app, width, now)),
-        Some(Panel::Tasks(rows)) => ("tasks", found(rows.clone())),
+        Some(Panel::Tasks) => return super::tasks::draw(app, b, r, hits),
         Some(Panel::Help) => ("help", found(super::composer::completion::help(width))),
         Some(Panel::Keys) => ("keys", found(super::bindings::rows(app))),
         Some(Panel::Login { lines, running, .. }) => {
@@ -227,28 +239,4 @@ pub fn scroll(app: &mut App, b: &mut Buffer, r: Rect, rows: &[Line<'_>]) {
     for (words, y) in rows.iter().skip(app.panel_scroll).zip(r.y..r.bottom()) {
         line(b, r, y, words, style(DATA, GLASS));
     }
-}
-
-/// `/tasks`: the addressed session's project's open tasks, as the server lists them, in a panel
-/// opened when they arrive.
-fn tasks(app: &mut App) {
-    let Some(id) = app.focus.clone().or_else(|| app.root.clone()) else {
-        return;
-    };
-    app.spawn(move |api| async move {
-        let path = format!("v1/sessions/{id}/tasks?filter=open");
-        let read = api.json(reqwest::Method::GET, &path, None).await;
-        let row = |t: &serde_json::Value| {
-            let [state, title, claim] = ["state", "title", "claim"].map(|k| t[k].as_str());
-            let due = t["due"].as_str().map(|d| format!("due {d}"));
-            let words = [state, title, claim, due.as_deref()].into_iter().flatten();
-            let line = format!("{}  {}", t["id"], words.collect::<Vec<_>>().join("  "));
-            Line::raw(screen_safe(&line).into_owned())
-        };
-        let rows = match read.map(|v| v["tasks"].as_array().cloned().unwrap_or_default()) {
-            Ok(tasks) => tasks.iter().map(row).collect(),
-            Err(e) => vec![Line::raw(e.to_string())],
-        };
-        move |app: &mut App| open(app, Panel::Tasks(rows))
-    });
 }

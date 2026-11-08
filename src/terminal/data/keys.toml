@@ -423,7 +423,7 @@
 "panel.page_down" = "Scroll the panel down one page"
 "panel.half_page_up" = "Scroll the panel up half a page"
 "panel.half_page_down" = "Scroll the panel down half a page"
-"panel.search" = "Search the key list, commands or tasks: show the rows holding every typed word"
+"panel.search" = "Search the key list or commands: show the rows holding every typed word"
 "panel.erase" = "Erase the last search character"
 "panel.top" = "Scroll to the panel beginning"
 "panel.bottom" = "Scroll to the panel end"

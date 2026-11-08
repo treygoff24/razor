@@ -404,7 +404,7 @@ pub fn helper(app: &App, a: &AgentView, now: u64) -> (Span<'static>, &'static st
 /// helper's, a space after each, then `✓N` for its finished ones.
 pub fn marks<'a>(app: &App, below: impl Iterator<Item = &'a ViewRow>, now: u64) -> Spans {
     let (mut out, mut done) = (Vec::new(), 0);
-    for (r, h) in below.filter_map(|r| Some((r, app.agents.get(&r.session)?))) {
+    for (r, h) in below.filter_map(|r| Some((r, app.agent_row(&r.session)?))) {
         let (mark, word) = helper(app, h, now);
         match r.folded || word == "finished" {
             true => done += 1,

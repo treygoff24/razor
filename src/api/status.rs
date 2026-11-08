@@ -2,6 +2,7 @@
 //! it comes, with what the server says of itself.
 
 use super::*;
+use crate::protocol::AgentView;
 
 /// The display label is shared by status, push and device enrollment.
 pub(super) fn label(server: &config::Server) -> String {
@@ -45,11 +46,12 @@ async fn server(app: &App) -> Server {
         release_ready: crate::residents::release_ready().await,
         residents: app.residents.days().await,
         views_version: Some(app.views.views.borrow().version),
+        silent: *app.asleep.borrow(),
         ..identity(app, &config)
     }
 }
 
-/// The agents snapshot, then local and peer lines; a lapped stream ends so the client reloads.
+/// The live snapshot, local changes and optional paired server metadata.
 pub(super) async fn status(
     State(app): State<App>,
     Extension(gone): Extension<Gone>,
@@ -63,13 +65,30 @@ pub(super) async fn status(
         heartbeat,
         app.views.published.subscribe(),
         app.views.views.subscribe(),
+        app.asleep.clone(),
+        app.views.retained.subscribe(),
         None,
+        std::collections::BTreeSet::new(),
         app,
         q,
         true,
     );
     let lines = stream::unfold(sources, |mut sources| async move {
-        let (local, deliveries, peers, beat, views, saved, previous, app, q, open) = &mut sources;
+        let (
+            local,
+            deliveries,
+            peers,
+            beat,
+            views,
+            saved,
+            asleep,
+            retained,
+            previous,
+            sent,
+            app,
+            q,
+            open,
+        ) = &mut sources;
         loop {
             let mut line = if std::mem::take(open) {
                 local.recv().await?
@@ -77,14 +96,31 @@ pub(super) async fn status(
                 tokio::select! {
                     line = views::next(views, previous), if q.views => return Some((line?, sources)),
                     _ = saved.changed(), if q.heartbeat => Live::Server(server(app).await.into()),
+                    Ok(()) = asleep.changed() => Live::Server(server(app).await.into()),
+                    Ok(()) = retained.changed() => {
+                        if sent.iter().eq(retained.borrow().iter().filter(|id| !q.local || id.address().is_none())) {
+                            continue;
+                        }
+                        *local = app.controller.status();
+                        local.recv().await?
+                    },
                     line = local.recv() => line?,
                     d = deliveries.recv() => Live::Delivery(d.ok()?.0.into()),
-                    peer = peers.recv(), if !q.local => match peer.ok()? {
+                    peer = peers.recv(), if !q.local || q.servers => match peer.ok()? {
+                        Live::Agent(_) | Live::Delivery(_) if q.local => continue,
+                        Live::Server(_) if q.local && !q.servers => continue,
                         Live::Server(s) if s.name.is_empty() => { *local = app.controller.status(); continue; },
                         line => line,
                     },
                     _ = beat.tick(), if q.heartbeat => Live::Server(server(app).await.into()),
                 }
+            };
+            let visible = |a: &AgentView| {
+                let retained = retained.borrow();
+                retained.contains(&a.session)
+                    || views::live(a, crate::protocol::now())
+                        && a.resident.is_none()
+                        && a.parent.as_ref().is_none_or(|p| retained.contains(p))
             };
             if let Live::Agents {
                 server: home,
@@ -94,11 +130,18 @@ pub(super) async fn status(
             } = &mut line
             {
                 **home = server(app).await;
-                *servers = if q.local {
+                *servers = if q.local && !q.servers {
                     vec![*home.clone()]
                 } else {
                     app.peers.extend(agents, *home.clone()).await
                 };
+                agents.retain(|a| visible(a) && (!q.local || a.session.address().is_none()));
+            }
+            if let Live::Agent(row) = &line {
+                if !sent.contains(&row.session) && !visible(row) {
+                    continue;
+                }
+                sent.insert(row.session.clone());
             }
             if !q.local {
                 let rows = match &mut line {
@@ -106,7 +149,10 @@ pub(super) async fn status(
                     Live::Agent(row) => std::slice::from_mut(&mut **row),
                     _ => &mut [],
                 };
-                app.controller.child_rows(rows);
+                app.controller.parent_rows(rows);
+            }
+            if let Live::Agents { agents, .. } = &line {
+                *sent = agents.iter().map(|a| a.session.clone()).collect();
             }
             return Some((line_of(&line)?, sources));
         }

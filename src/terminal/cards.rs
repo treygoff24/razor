@@ -435,9 +435,7 @@ pub fn detail(cards: &[&Card], columns: usize, size: Size) -> Detail {
 
 /// `parent`'s own children, oldest launch first.
 pub fn children<'a>(app: &'a App, parent: &SessionId) -> Vec<&'a AgentView> {
-    let mut all: Vec<_> = (app.agents.values())
-        .filter(|a| a.parent.as_ref() == Some(parent))
-        .collect();
+    let mut all: Vec<_> = app.agent_children(parent).collect();
     all.sort_by(|a, b| (a.launched, &a.name).cmp(&(b.launched, &b.name)));
     all
 }
@@ -454,7 +452,7 @@ pub fn descendants<'a>(
     let mut stack = vec![(root.clone(), 0)];
     while let Some((id, depth)) = stack.pop() {
         if depth > 0
-            && let Some(agent) = app.agents.get(&id)
+            && let Some(agent) = app.agent_row(&id)
         {
             all.push((depth, Card::of(app, agent, now)));
         }

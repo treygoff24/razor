@@ -68,7 +68,7 @@ A name is 1 to 32 lowercase letters, digits and hyphens. `razor devices` lists e
 | Mail across machines | Any agent can mail any other on a paired server, by name or session id. |
 | Shared settings | One server can keep the saved arrangements of the agents list (`/views`) and the voice settings for all of them: set `[server] shared` on the others to its id, the contents of `server.id` in its Razor home. |
 
-A server that stops answering keeps its last rows in the list, marked with how long since it was heard from. A paired server's key is a full key: it can do on this server anything this server's own terminal can, devices, settings and sign-ins included, so pair only machines you trust as you trust this one. Each pairing is direct: a server shows the servers it has paired, not their pairs.
+A server that stops answering keeps its last rows in the list, marked with how long since it was heard from. A Mac's server says it is going to sleep a second before the Mac sleeps, so the servers paired with it mark it at once instead of when their reads time out, and they list it answering again when it wakes. A paired server's key is a full key: it can do on this server anything this server's own terminal can, devices, settings and sign-ins included, so pair only machines you trust as you trust this one. Each pairing is direct: a server shows the servers it has paired, not their pairs.
 
 ## Use a terminal without a local server
 

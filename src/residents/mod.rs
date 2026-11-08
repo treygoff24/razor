@@ -87,7 +87,7 @@ pub struct Residents {
     inner: Arc<Inner>,
 }
 
-type Sort = (Option<SessionId>, Vec<SessionId>, BTreeSet<SessionId>);
+type Sort = (Option<SessionId>, Vec<SessionId>);
 
 struct Inner {
     controller: Controller,
@@ -137,12 +137,7 @@ impl Residents {
 
     /// Hand off a resolved snapshot without waiting for resident admission. One pending snapshot
     /// replaces the last while the single delivery task waits for queue space.
-    pub(crate) fn sort(
-        &self,
-        definition: Option<&Views>,
-        status: &ViewsStatus,
-        present: impl Iterator<Item = SessionId>,
-    ) {
+    pub(crate) fn sort(&self, definition: Option<&Views>, status: &ViewsStatus) {
         let auto = definition.and_then(|d| d.views.iter().find(|v| v.name == "Auto"));
         let wake = auto.and_then(|v| v.wake.clone());
         let roots = status
@@ -155,17 +150,14 @@ impl Residents {
             .filter(|r| r.depth == 0)
             .map(|r| r.session.clone())
             .collect();
-        self.inner
-            .sorting
-            .send_replace((wake, roots, present.collect()));
+        self.inner.sorting.send_replace((wake, roots));
     }
 
     async fn sorts(self, mut snapshots: watch::Receiver<Sort>) {
-        // Per-process deduplication, bounded by retained agents, independent of view edits.
+        // Per-process deduplication, independent of row eviction and view edits.
         let mut sorted = BTreeSet::new();
         while snapshots.changed().await.is_ok() {
-            let (wake, mut roots, present) = snapshots.borrow_and_update().clone();
-            sorted.retain(|id| present.contains(id));
+            let (wake, mut roots) = snapshots.borrow_and_update().clone();
             let Some(wake) = wake else {
                 continue;
             };

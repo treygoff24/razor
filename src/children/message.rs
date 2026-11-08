@@ -248,7 +248,7 @@ impl Children {
         Ok((path, file.map_err(other("opening the channel"))?))
     }
 
-    /// Every agent not done but the caller, here and on each paired server, newest activity
+    /// Live agents, residents and the caller's tree, except done agents and the caller, newest activity
     /// first, `tree` marking the caller's own tree; with `query`, only those whose id, name,
     /// project, repository or headline holds it in any case. At most 100 from each server, and
     /// `more` counts the rest; a server that does not answer in 2 seconds is named in `silent`.
@@ -277,7 +277,13 @@ impl Children {
                     "state": r.state, "headline": r.headline, "tree": tree}));
             }
         };
-        add(snapshot_here(controller).await, "");
+        let mut local = snapshot_here(controller).await;
+        for row in &tree {
+            if row.session.address().is_none() && !local.iter().any(|r| r.session == row.session) {
+                local.push(row.clone());
+            }
+        }
+        add(local, "");
         let servers = controller.devices().paired().await;
         let asked = servers
             .iter()
@@ -310,8 +316,8 @@ impl Children {
 /// Admits `mail` to the one agent on this server that `mail.to` names, and returns that agent
 /// and the input's entry. `server` is the paired device the mail came through, and the mail is
 /// from `<session>@<server>`; None from here.
-/// - Candidates are the status view's agents not in state done, the sender aside, in its tree
-///   or out of it. `to` matches a session id or a name exactly; only when none does, the
+/// - Exact local ids also resolve from their records. Names and projects resolve among current
+///   rows and the caller's tree, excluding done agents and the sender. Only when no name matches,
 ///   project of each session that is no child.
 /// - No candidate, or more than one: refused with one sentence naming up to ten by id;
 ///   nothing is admitted.
@@ -321,7 +327,22 @@ pub(crate) async fn receive(
     server: Option<&str>,
 ) -> Result<(SessionId, EntryId), Error> {
     let to = mail.to.as_str();
-    let rows = listed(snapshot_here(controller).await, &mail.id.0);
+    let mut rows = snapshot_here(controller).await;
+    if let Ok(id) = SessionId::try_from(to.to_owned())
+        && id.address().is_none()
+        && !rows.iter().any(|r| r.session == id)
+        && let Ok(row) = controller.agent(&id).await
+    {
+        rows.push(row);
+    }
+    if server.is_none() && !rows.iter().any(|r| r.session.as_str() == to) {
+        for row in controller.tree(&mail.id.0).await.unwrap_or_default() {
+            if row.session.address().is_none() && !rows.iter().any(|r| r.session == row.session) {
+                rows.push(row);
+            }
+        }
+    }
+    let rows = listed(rows, &mail.id.0);
     let exact = |r: &&AgentView| r.session.as_str() == to || (!to.is_empty() && r.name == to);
     let mut found: Vec<&AgentView> = rows.iter().filter(exact).collect();
     if found.is_empty() {

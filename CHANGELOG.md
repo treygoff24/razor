@@ -2,6 +2,33 @@
 
 What changed in each Razor release. [Configuration](docs/configuration.md) and the other pages in [docs](docs/README.md) describe each feature in full.
 
+## 0.3.0 (8 November 2026)
+
+### New
+
+- Tasks in the terminal app. The status pane's TASKS section shows the project of the session on screen: the tasks that session holds, then overdue ones, then the rest, with `▸ N more · ✓ k done this session` opening every open task fifteen to a page and then the ones this session closed. `/tasks` groups the project's tasks under held by this session, ready, in progress, blocked, with open parts, and done this session; a click on a task or `/tasks <number>` opens its card, with its blockers, parts, description and newest comments, and Esc goes back. Both follow changes from any session or paired server as they land ([Memory](docs/memory.md#tasks)).
+- Programs read tasks as a session sees them ([Scripting](docs/scripting.md#the-local-api)). `GET /v1/sessions/<id>/tasks` lists the tasks that session holds first, marks each `held`, names the claiming session as `claimant` and the closer as `closed_by`, gives the project's folder as `project` and, with `filter=open`, `counts` by state, and takes `q` for words, `limit` up to 200 and, with `filter=closed`, `mine=true` for the session's own closes. `GET /v1/sessions/<id>/tasks/<n>` gives one task whole, and the status stream sends `{"kind":"tasks","project":"<folder>"}` when a project's tasks change, here or in what a fetch of its shared list brought, and not for a read that changed nothing.
+- A Mac's server says it is going to sleep, holding sleep back a second for the line to go out, and its paired servers list it as not answering at once, instead of when their reads time out about 25 seconds later; when the Mac wakes they list it answering again. The Mac's server and its peers all need this release. The status stream's `server` line carries it as `silent` ([More machines](docs/machines.md#what-pairing-gives-you)).
+
+### Changed
+
+- The server no longer keeps a row in memory for every agent it has seen. It keeps the live agents list (agents at work, asking or stuck, idle ones with an unread delivery, your message in the last twelve hours, a terminal open on them or a reply you have not looked at, their helpers and the always-on agents) and the sessions it has loaded, and reads the rest from disk when they are asked for, so its memory no longer grows with your history. In a test, a restart that found 1,000 recent closed conversations used to keep a row for each; it now keeps none.
+- Earlier, in the agents list, opens without a total and reads up to 50 top-level agents at a time from each server, showing each server's as it answers, so a slow one holds up only its own; More reads older ones, a failed read says which server and offers Retry, and folding Earlier lets them go. Its count is of the rows it has read. A helper of an agent under Earlier is seen in that agent's conversation instead of beneath it in the list.
+- A helper whose parent is not in the agents list stands in the list by its own state, and moves back under its parent when the parent is shown.
+- **For scripts and apps reading the status stream:** its `agents` line holds the live list only, an `agent` line changes a row or adds one that joins it, and a whole new `agents` line replaces the list when one leaves. Older agents are read a page at a time from the new `GET /v1/agents?after=<session>`. Rows carry `changed_file_count` and `changed_file_first` instead of the full `changed_files` list, which `GET /v1/sessions/<id>/agent` gives with the session's row and `children`, a row for every direct helper, settled ones included; `GET /v1/sessions/<id>/children` is gone ([Scripting](docs/scripting.md#the-local-api)).
+- Mail by name reaches an agent in the live list, an always-on agent or one in the sender's own tree; an agent under Earlier is reached by its session id, which also wakes it if it has not ended. `message list` lists the same agents.
+- An agent's `status` of its tree gives a helper on a paired server the files it changed as that server records them, or `null` when that server does not answer, as one older than this release does not. A helper's card reads its model and effort from the server it runs on when the list does not carry them, and leaves them out while they are unknown.
+- `/` no longer searches `/tasks`; it still searches `/keys` and `/help`.
+- Releases ship Cua Driver 0.43.2, Cua's newest, in place of 0.41.3: it types text faster by sending key events in batches, retries reading the screen when its extension's lock is busy, and cleans up extension files a refused install left behind.
+
+### Fixed
+
+- A session started for you without a first message, such as one made with `POST /v1/sessions`, stays in the live agents list for twelve hours, as one you had written in does, instead of going under Earlier while idle.
+- A message the server took but whose answer never reached the terminal, because the connection dropped or a paired server failed partway, is no longer sent twice. The terminal keeps it out of the box and says what failed; Enter or the Send button sends the same message again, and the server, which recognises it, keeps one.
+- A draft save the server answers slowly can no longer land after a newer one and put your older words back, nor lose the newer words when you move to another agent: the terminal waits for each save's answer instead of giving up after 15 seconds, and saves after it only once it has. While eight saves wait on a slow server, the terminal no longer keeps a processor core busy.
+- A draft save the server was still writing when its connection dropped can no longer finish after a newer save and put the older words back: the server writes drafts, and clears them when it takes a message, one at a time in the order they reached it.
+- Quitting while a message waits unanswered now says where its words go, and keeps them: they are saved as the draft ahead of anything typed since, even when you sent before the terminal had read that session's draft. If the server got them, the transcript shows them, so send them again only if it doesn't.
+
 ## 0.2.2 (7 November 2026)
 
 ### New

@@ -66,10 +66,7 @@ fn identity(app: &App, b: &mut Buffer, r: Rect, agent: Option<&AgentView>, now: 
         || agent.and_then(|a| a.branch.as_deref()).unwrap_or(""),
         |f| &f.1,
     );
-    let changed = read.map_or_else(
-        || agent.map_or(0, |a| a.changed_files.len() as u64),
-        |f| f.2,
-    );
+    let changed = read.map_or_else(|| agent.map_or(0, |a| a.changed_file_count as u64), |f| f.2);
     let changed = match changed {
         0 => String::new(),
         n => format!(" · {n} changed"),

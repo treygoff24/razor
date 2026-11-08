@@ -1,6 +1,7 @@
 //! The agents view: the list beside the cockpit and the full-screen overview, their keys and
 //! commands; `sections` draws the list's rows from the server-resolved layout, and `overview`
 //! draws the same layout over the whole screen.
+pub(super) mod earlier;
 mod groups;
 mod overview;
 mod panel;
@@ -30,6 +31,7 @@ const LIST_KEYS: [&str; 6] = [
 /// Disposable selection, folding and layouts; layouts are bounded to 8 MiB by the server.
 #[derive(Default)]
 pub(super) struct List {
+    pub earlier: earlier::Earlier,
     pub open: bool,
     pub keys: bool,
     pub area: Option<Rect>,
@@ -74,7 +76,7 @@ impl List {
         let rows = || sections().flat_map(|s| &s.sessions);
         self.toggled.retain(|id| {
             let session = id.strip_prefix("finished/").unwrap_or(id);
-            let header = ["servers", "residents"].contains(&id.as_str());
+            let header = ["servers", "residents", "earlier"].contains(&id.as_str());
             header
                 || sections().any(|s| &s.id == id)
                 || rows().any(|r| r.session.as_str() == session)
@@ -146,7 +148,11 @@ pub(super) fn full(app: &mut App) {
 pub(super) fn press(app: &mut App, action: Action) {
     match action {
         // A heading's fold toggles.
-        Action::Section(id) => _ = app.list.toggled.remove(&id) || app.list.toggled.insert(id),
+        Action::Section(id) => {
+            _ = app.list.toggled.remove(&id) || app.list.toggled.insert(id.clone());
+            earlier::sync(app);
+        }
+        Action::Earlier => earlier::press(app),
         Action::New => super::start::open(app),
         Action::Thread(home) => thread(app, &home),
         Action::Agent(id) => {
@@ -194,6 +200,7 @@ pub(super) fn key(app: &mut App, action: &str) {
                 true => app.list.toggled.insert(id),
                 false => app.list.toggled.remove(&id),
             };
+            earlier::sync(app);
             app.list.selected = selected.as_ref().and_then(|a| into(app, a)).or(selected);
         }
         // An agent opened by `accept` takes the whole screen; `beside` keeps the list.
@@ -286,7 +293,7 @@ fn stop(app: &App, row: &Action) -> bool {
     let sections = (app.list.layout().into_iter()).flat_map(|l| &l.sections);
     let mut needs = sections.filter(|s| s.kind == SectionKind::NeedsYou);
     match row {
-        Action::Agent(id) if app.agents.get(id).is_some_and(|a| a.parent.is_some()) => {
+        Action::Agent(id) if app.agent_row(id).is_some_and(|a| a.parent.is_some()) => {
             needs.any(|s| s.sessions.iter().any(|r| &r.session == id))
         }
         Action::Section(id) => !id.starts_with("finished/"),
@@ -305,7 +312,7 @@ fn parent(app: &App, action: &Action) -> Option<Action> {
             let Some((at, _)) =
                 mine.max_by_key(|(_, s)| (s.kind != SectionKind::NeedsYou, s.depth))
             else {
-                return app.agents.get(id)?.parent.clone().map(Action::Agent);
+                return app.agent_row(id)?.parent.clone().map(Action::Agent);
             };
             let rows = &sections[at].sessions;
             let row = rows.iter().position(|r| &r.session == id)?;
@@ -416,7 +423,7 @@ fn aimed(app: &App) -> Option<SessionId> {
     let top = root(app, id.clone());
     let server = top.address().map_or("", |(_, server)| server);
     let home =
-        (app.agents.get(&top)?.resident.as_ref()).map_or_else(|| top.clone(), |r| r.on(server));
+        (app.agent_row(&top)?.resident.as_ref()).map_or_else(|| top.clone(), |r| r.on(server));
     homes(app).find(|h| *h == home)
 }
 /// Addresses the top-level agent, neither a resident's home nor its thread, the person last wrote
@@ -451,7 +458,7 @@ pub(super) fn unfold(app: &mut App, id: &SessionId) {
             if r.depth < depth {
                 depth = r.depth;
                 folds.extend((i < at).then(|| (r.session.to_string(), false)));
-                let finished = app.agents.get(&r.session).filter(|_| r.folded);
+                let finished = app.agent_row(&r.session).filter(|_| r.folded);
                 folds.extend(finished.map(|a| (sections::finished(a), true)));
             }
         }
@@ -462,6 +469,7 @@ pub(super) fn unfold(app: &mut App, id: &SessionId) {
             false => app.list.toggled.remove(&fold),
         };
     }
+    earlier::sync(app);
     app.list.reveal = true;
 }
 /// Aims the composer at a fresh thread with the resident whose home session is `home`.
@@ -471,7 +479,7 @@ fn thread(app: &mut App, home: &SessionId) {
     super::start::aim(app, server.into(), Default::default(), Some(name));
 }
 fn root(app: &App, mut id: SessionId) -> SessionId {
-    for _ in 0..app.agents.len() {
+    for _ in 0..1024 {
         let Some(Action::Agent(parent)) = parent(app, &Action::Agent(id.clone())) else {
             break;
         };
@@ -498,7 +506,8 @@ pub(super) fn command(app: &mut App, word: &str, args: &str) -> bool {
         "/view"
             if (app.list.status.as_ref()).is_some_and(|s| s.names.iter().any(|n| n == args)) =>
         {
-            app.list.view = Some(args.into())
+            app.list.view = Some(args.into());
+            earlier::sync(app);
         }
         "/view" => app.say("That view is unknown; use a name from /views."),
         "/views" => app.editing = Some(super::editor::Editing::Views),
@@ -605,7 +614,7 @@ fn draw(app: &mut App, b: &mut Buffer, list: Rect, wide: bool, now: u64, hits: &
 fn keys(app: &App, b: &mut Buffer, r: Rect, above: Option<bool>) {
     let (words, ink) = match above {
         Some(above) => {
-            let name = app.focus.as_ref().and_then(|id| app.agents.get(id));
+            let name = app.focus.as_ref().and_then(|id| app.agent_row(id));
             let name = name.map_or("", |a| a.name.as_str());
             let mark = ["▼", "▲"][usize::from(above)];
             (format!(" {mark} talking to {name}"), bold(CYAN, PANEL))

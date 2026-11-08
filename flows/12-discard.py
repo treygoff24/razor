@@ -1,10 +1,10 @@
 """A reviewer gets its own worktree and branch and the person's reviewer text after its contract;
 discard closes it, moves its uncommitted files to its session folder and removes its worktree,
-not its committed branch."""
+not its committed branch. Settled row facts are read directly after leaving the live feed."""
 import json
 from driver import flow
 from model import agent, reply, tool
-from server import agents
+from server import send
 
 root, child = "FLOW_ROOT_12", "You are oak12,"
 replies = [agent(root, "start", name="oak12", kind="reviewer", brief="Commit the discard marker."),
@@ -35,8 +35,8 @@ with flow(replies, config='[children]\nreviewer = "reviewer-12.md"\n') as f:
     assert f"Moved into {kept}, at their paths: `base`, `__pycache__/`." in said, said
     reports = [e for e in entries if e["kind"] == "input" and isinstance(e["from"], dict) and "report" in e["from"]]
     assert len(reports) == 1 and reports[0]["from"]["report"]["status"] == "partial", reports
-    rows = agents(f)
-    assert rows[sid]["settled"] == "discard", rows
+    row = json.load(send(f, "GET", f"/sessions/{sid}/agent"))
+    assert row["settled"] == "discard", row
 
     # A name used only under a settled helper is free again; a settled child's own name is not.
     elm, ash = "You are elm12,", "You are ash12,"

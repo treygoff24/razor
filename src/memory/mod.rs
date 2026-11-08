@@ -19,6 +19,16 @@ use std::sync::LazyLock;
 use std::sync::atomic::AtomicBool;
 use tasks::{Edit, Listing};
 
+/// A person's task list query; the path's session is its viewer.
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct TaskQuery {
+    pub(crate) filter: Option<String>,
+    pub(crate) q: String,
+    pub(crate) limit: Option<usize>,
+    pub(crate) mine: bool,
+}
+
 /// The most of the question a ruling answers that its page line shows, in bytes.
 const ASKED: usize = 300;
 /// The most bytes of a state note, written or shown.
@@ -315,13 +325,33 @@ impl Memory {
         index.unwrap_or_else(|e| e.to_string())
     }
 
-    /// The project's tasks for the person's clients, as `task list` answers them.
-    pub(crate) async fn tasks(&self, c: &Controller, cwd: &Path, filter: Option<String>) -> Answer {
-        let l = Listing {
-            filter,
-            ..Listing::default()
-        };
-        self.read(c, cwd, move |dir| tasks::list(dir, &l)).await
+    /// The project's tasks as seen by `session`, or one structured task when `id` is given.
+    pub(crate) async fn tasks(
+        &self,
+        c: &Controller,
+        cwd: &Path,
+        session: &SessionId,
+        q: TaskQuery,
+        id: Option<u32>,
+    ) -> Answer {
+        let session = session.to_string();
+        self.read(c, cwd, move |p| {
+            let l = Listing {
+                filter: q.filter,
+                query: q.q,
+                mine: q.mine,
+                limit: Some(q.limit.unwrap_or(50).clamp(1, 200)),
+                viewer: (session, p.server.clone()),
+                ..Listing::default()
+            };
+            let mut answer = match id {
+                Some(id) => tasks::detail(&p.tasks, id, &l.viewer),
+                None => tasks::list(&p.tasks, &l),
+            }?;
+            answer["project"] = serde_json::json!(p.root);
+            Ok(answer)
+        })
+        .await
     }
 
     /// A `task` call: a child may only claim or comment on an existing task; a list or a get
@@ -348,8 +378,18 @@ impl Memory {
                 }
                 self.edit(c, at.cwd, (at.session, &writer.name), edit).await
             }
-            TaskCall::List(l) => self.read(c, at.cwd, move |dir| tasks::list(dir, &l)).await,
-            TaskCall::Get { id } => self.read(c, at.cwd, move |dir| tasks::get(dir, id)).await,
+            TaskCall::List(mut l) => {
+                let session = at.session.to_string();
+                self.read(c, at.cwd, move |p| {
+                    l.viewer = (session, p.server.clone());
+                    tasks::list(&p.tasks, &l)
+                })
+                .await
+            }
+            TaskCall::Get { id } => {
+                self.read(c, at.cwd, move |p| tasks::get(&p.tasks, id))
+                    .await
+            }
         }
     }
 
@@ -357,16 +397,16 @@ impl Memory {
     /// is over 30 seconds old; a remote out of reach leaves them as they are.
     async fn read<F>(&self, c: &Controller, cwd: &Path, op: F) -> Answer
     where
-        F: FnOnce(&Path) -> Answer + Send + 'static,
+        F: FnOnce(&Project) -> Answer + Send + 'static,
     {
         let p = self.files(c, cwd, Ok).await?;
         if matches!(p.remote, Ok(Some(_))) && share::stale(&p.tasks).await {
             let held = self.lock.lock().await;
-            let (_, notes) = self.locked(&p, None).await;
+            let (_, notes) = self.locked(c, &p, None).await;
             drop(held);
             send(c, notes).await;
         }
-        blocking(move || op(&p.tasks)).await
+        blocking(move || op(&p)).await
     }
 
     /// One change, `edit`, to `cwd`'s tasks by session `by.0`, named `by.1`. On a shared project
@@ -376,8 +416,8 @@ impl Memory {
         let held = self.lock.lock().await;
         let p = self.files(c, cwd, Ok).await?;
         let (session, name) = by;
-        let who = format!("{session} {} {name} on {}", p.server, machine());
-        let (answer, notes) = self.locked(&p, Some((who, edit))).await;
+        let who = who(session, &p.server, name);
+        let (answer, notes) = self.locked(c, &p, Some((who, edit))).await;
         drop(held);
         send(c, notes).await;
         let claimed = answer.as_ref().ok().filter(|a| a["claimed"] == true);
@@ -393,10 +433,16 @@ impl Memory {
     /// counts, and run again from a fetch, at most twice more, when another machine pushed first
     /// or a refusal came from a view not just fetched.
     /// Its answer, and the notes owed for the tasks closed meanwhile, here or on the remote.
-    async fn locked(&self, p: &Project, change: Option<(String, Edit)>) -> (Answer, Vec<Note>) {
+    async fn locked(
+        &self,
+        c: &Controller,
+        p: &Project,
+        change: Option<(String, Edit)>,
+    ) -> (Answer, Vec<Note>) {
         let (dir, server) = (p.tasks.clone(), p.server.clone());
         let at = dir.clone();
         let before = blocking(move || tasks::scan(&at, false)).await;
+        let mut synced = false;
         let answer = async {
             let mut last: Answer = Ok(Value::Null);
             for round in 0..3 {
@@ -404,7 +450,11 @@ impl Memory {
                 // saves a refused push.
                 let fetch = round > 0 || share::stale(&dir).await;
                 let url = match &p.remote {
-                    Ok(Some(name)) => Some(share::fresh(&p.root, &dir, name, fetch).await?),
+                    Ok(Some(name)) => {
+                        let (url, changed) = share::fresh(&p.root, &dir, name, fetch).await?;
+                        synced |= changed;
+                        Some(url)
+                    }
                     Ok(None) => None,
                     Err(why) => return Err(refuse(&fill(&TEXT.settings, &[("why", why)]))),
                 };
@@ -430,6 +480,9 @@ impl Memory {
             last
         };
         let answer = answer.await;
+        if synced || change.is_some() && answer.is_ok() {
+            c.tasks_changed(p.root.clone());
+        }
         let closes = blocking(move || tasks::closes(&dir, &server, &before.unwrap_or_default()));
         (answer, closes.await.unwrap_or_default())
     }
@@ -540,6 +593,11 @@ fn project(home: &Path, settings: &crate::config::Settings, cwd: &Path) -> Resul
 
 /// A session making a task change, and its name.
 type By<'a> = (&'a SessionId, &'a str);
+
+/// A task writer's or closer's session and server ids, followed by its name and machine.
+fn who(session: impl fmt::Display, server: &str, name: &str) -> String {
+    format!("{session} {server} {name} on {}", machine())
+}
 
 /// Admits each note to its session, as from the program `razor`, while that session is open.
 async fn send(c: &Controller, notes: Vec<Note>) {

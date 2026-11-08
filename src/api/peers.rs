@@ -69,7 +69,7 @@ impl Peers {
             }
             servers.push(peer.server.clone());
             agents.extend(peer.agents.values().cloned().map(|mut row| {
-                qualify(&mut row, &peer.server.name);
+                row.qualify(&peer.server.name);
                 row
             }));
         }
@@ -88,6 +88,18 @@ impl Peers {
         rows.sort_by_key(|d| std::cmp::Reverse((d.at, d.session.clone(), d.entry)));
         rows.truncate(limit);
         rows
+    }
+
+    /// Each owner's own newest delivery window controls its membership.
+    pub(super) async fn unread(&self) -> std::collections::BTreeSet<SessionId> {
+        self.rows
+            .read()
+            .await
+            .values()
+            .flat_map(|p| p.deliveries.iter())
+            .filter(|d| !d.read && !d.archived)
+            .map(|d| d.session.clone())
+            .collect()
     }
 
     /// Direct enrollment and last reported definition version for the configured shared home.
@@ -109,7 +121,10 @@ impl Peers {
             return;
         };
         let was_silent = peer.server.silent.is_some();
-        peer.server.silent = line.is_none().then_some(peer.seen);
+        // Only a snapshot or a server line says whether the peer answers; a row after it said it sleeps leaves that standing.
+        if line.is_none() {
+            peer.server.silent = Some(peer.seen);
+        }
         if line.is_some() {
             peer.seen = now();
         }
@@ -121,7 +136,6 @@ impl Peers {
                 if server.machine.is_empty() {
                     server.machine = peer.server.machine.clone();
                 }
-                server.silent = None;
                 peer.server = *server;
                 peer.agents = agents.into_iter().map(|a| (a.session.clone(), a)).collect();
                 peer.recount();
@@ -148,7 +162,7 @@ impl Peers {
                 if old.is_none() {
                     peer.bytes += bytes(&row.session) + 2;
                 }
-                qualify(&mut row, name);
+                row.qualify(name);
                 Some(Live::Agent(row))
             }
             Some(Live::Delivery(mut d)) => {
@@ -169,6 +183,10 @@ impl Peers {
                 peer.bytes = peer.bytes.saturating_sub(evicted);
                 Some(Live::Delivery(d))
             }
+            Some(Live::Tasks { project, .. }) => Some(Live::Tasks {
+                project,
+                server: Some(name.into()),
+            }),
             None if was_silent => return,
             Some(_) if !was_silent => return,
             _ => None,
@@ -349,6 +367,22 @@ pub(super) async fn forward(
                 "That server is not paired; enroll it before addressing its sessions.".into(),
             ))?;
     let response = relay(&app, &device, request, &path).await?;
+    if decoded.starts_with("/v1/sessions/")
+        && decoded.ends_with("/agent")
+        && response.status().is_success()
+    {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 << 20)
+            .await
+            .map_err(other("Reading agent detail"))?;
+        let mut detail: crate::protocol::AgentDetail =
+            serde_json::from_slice(&bytes).map_err(other("Reading agent detail"))?;
+        detail.row.qualify(&name);
+        for child in &mut detail.children {
+            child.qualify(&name);
+        }
+        app.controller.parent_row(&mut detail.row).await?;
+        return Ok(Json(detail).into_response());
+    }
     Ok(response.map(|body| {
         Body::from_stream(body.into_data_stream().take_until(async move {
             tokio::select! { _ = gone.changed() => {}, _ = peer_gone.changed() => {} }
@@ -420,14 +454,6 @@ fn guard(path: &str, relayed: bool) -> Result<(), Refusal> {
             "Only a person's client can forward a directly paired session operation once.",
         )),
         false => Ok(()),
-    }
-}
-
-fn qualify(row: &mut AgentView, name: &str) {
-    row.session = row.session.on(name);
-    row.parent = row.parent.take().map(|p| p.on(name));
-    for ask in &mut row.asks {
-        ask.id.0 = ask.id.0.on(name);
     }
 }
 

@@ -1,7 +1,7 @@
 """The overview fits its agents, opens the selected session, and folds at once without motion or below 80 columns; the
 keys move between the list and a composer, past helpers. Parallel code-mode results leave the newest open call visible."""
 from dataclasses import replace
-import base64, json, os, re, signal, time
+import base64, json, os, re, select, signal, socket, socketserver, threading, time
 from clock import wall_clock
 from driver import flow
 from responses import done, message, response
@@ -10,7 +10,8 @@ from terminal import Terminal
 
 LEFT, RIGHT, UP, DOWN, BACKTAB = "\x1b[D", "\x1b[C", "\x1b[A", "\x1b[B", "\x1b[Z"
 names = ["older74", "middle74", "newest74"]
-source = "await Promise.all([" + ",".join(f'tools.{n}({{path:"{n}"}})' for n in names) + "]);"
+wait = 'async function wait(run) { let job = await run; while (!job.end) job = await tools.write_stdin({session_id:job.job, yield_time_ms:300000}); }'
+source = wait + "await Promise.all([" + ",".join(f'wait(tools.{n}({{path:"{n}"}}))' for n in names) + "]);"
 # The keyboard loop through bindings like Trey's pack; the defaults leave these actions unbound.
 keys = """[ui.keys.list]\nup = []\ndown = []\nleft = []\nright = []\naccept = ["a"]\nprevious_agent = ["Up", "k"]
 next_agent = ["Down", "j"]\noverview = ["Left", "h"]\nbeside = ["Enter", "Right", "l"]\n[ui.keys.line_start]\noutward = []
@@ -25,7 +26,7 @@ said = lambda words, match=None: replace(response([message(words)]), match=match
 replies = [said("answer-a74. transcript-a74"), cell('await tools.agent({action:"start",name:"kid74",brief:"Wait.",placement:"in_place"});', "start"),
            said("answer-b74. transcript-b74"), cell(source, "parallel"), done(), said("noted74", "Blocked74."), said("answer-loop74", "loop74"), said("answer-image74", "typed74"), cell('await tools.message({to:"parent",type:"question",text:"Pick74?",options:["x74","y74"]});', "ask74", "launch74"),
            said("answer-launch74", "launch74"),
-           cell('await tools.middle74({path:"kid74"}); await tools.agent({action:"finish",status:"blocked",report:"Blocked74."});', "kid", "You are kid74,"),
+           cell(wait + 'await wait(tools.middle74({path:"kid74"})); await tools.agent({action:"finish",status:"blocked",report:"Blocked74."});', "kid", "You are kid74,"),
            said("answer-c74.", "c74")]
 with flow(replies, model="sol", config=config) as f:
     def root(name):
@@ -81,7 +82,9 @@ with flow(replies, model="sol", config=config) as f:
         assert b"Left work74; it stays open." in t.output, t.output[-300:]
     order(b, a, work)
     time.sleep(1.1)  # the next layout, published at most once a second, leaves c out
-    with wall_clock() as (_, env, _), Terminal(replace(f, env={**f.env, **env}), "--resume", a, rows=20) as t:
+    with wall_clock() as (clock, env, advance), Terminal(replace(f, env={**f.env, **env}), "--resume", a, rows=20) as t:
+        # A real clock passes the minute boundary; a frozen one must start clear of it.
+        advance(-(int((clock / "now").read_text()) % 60000))
         t.shown("transcript-a74")
         t.send(LEFT)
         t.shown("AGENTS · WORK", "transcript-a74")
@@ -103,7 +106,7 @@ with flow(replies, model="sol", config=config) as f:
         framed()
         # At rest with motion off nothing turns faster than the minute: ages under one read `<1m`
         # and, with the wall clock still, the overview falls quiet once the rows have settled.
-        assert any(not t.pump(1.5, lambda _: True) for _ in range(5)) and " <1m " in t.text(), t.text()
+        assert t.quiet() and " <1m " in t.text(), t.text()
         for height in (13, 10, 9):
             t.resize(height, 120)
             t.until(lambda _: all(f" {n} " in t.text() for n in ("work74", "b74", "a74")))
@@ -332,6 +335,40 @@ with flow(replies, model="sol", config=config) as f:
         assert not t.pump(1) and "b74" in t.screen.display[2][41:], t.text()
         os.kill(pid, signal.SIGCONT)
         t.until(lambda _: "work74 · cwd" in t.screen.display[2] and "AGENTS" not in t.text())
+    # A save the server answers 17 seconds late is still waited for: a's old words land before
+    # the newer ones saved behind them as it is left, which stay its draft.
+    upstream, path = f.home / ".razor/upstream.sock", f.home / ".razor/server.sock"
+    path.rename(upstream)
+    held = threading.Event()
+
+    class Hold(socketserver.BaseRequestHandler):
+        def handle(self):
+            with socket.socket(socket.AF_UNIX) as up:
+                up.connect(str(upstream))
+                while True:
+                    for source in select.select([self.request, up], [], [], 1)[0]:
+                        if not (data := source.recv(65536)):
+                            return
+                        if source is self.request and data.endswith(b"old408"):
+                            held.set()
+                            time.sleep(17)
+                            up.sendall(data)
+                            source, data = up, up.recv(65536)
+                        (up if source is self.request else self.request).sendall(data)
+
+    threading.Thread(target=socketserver.ThreadingUnixStreamServer(str(path), Hold).serve_forever, daemon=True).start()
+    with Terminal(f, "--resume", a) as t:
+        t.shown("ans74late74")
+        t.send("\x15old408")
+        assert held.wait(10)
+        t.send(" new408" + BACKTAB)
+        t.shown("○ b74 ")
+        t.click("○ b74 ")
+        header("b74")
+        server.wait(lambda: server.send(f, "GET", f"/sessions/{a}/draft").read() == b"old408 new408")
+        # The header precedes its draft read; quit must see the loaded draft before clearing it.
+        t.shown("bdraft74acc74")
+    upstream.replace(path)
     (f.cwd / names[1]).touch()
     server.until(f, work, lambda es: es[-1]["kind"] == "turn_end")
     server.until(f, b, lambda es: es[-1]["kind"] == "turn_end" and any(e["kind"] == "input" and "Blocked74." in str(e) for e in es))

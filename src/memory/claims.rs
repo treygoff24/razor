@@ -21,7 +21,7 @@ impl Memory {
             let (c, s) = (c.clone(), s.clone());
             tokio::spawn(async move {
                 let by = (&s.session, s.name.as_str());
-                c.memory().release(&c, &s.cwd, by, None).await
+                c.memory().release(&c, &s.cwd, by, None, None).await
             });
         }
     }
@@ -65,7 +65,7 @@ impl Memory {
             report = Some((text, close));
         }
         let report = report.as_ref().map(|(text, close)| (text.as_str(), *close));
-        self.release(c, &parent.cwd, by, report).await;
+        self.release(c, &parent.cwd, by, report, Some(parent)).await;
         if child.session.address().is_none() {
             let Ok(s) = c.summary(&child.session).await else {
                 self.owed.store(true, Relaxed);
@@ -82,7 +82,7 @@ impl Memory {
                 self.owed.store(true, Relaxed);
             }
             if *cwd != parent.cwd {
-                self.release(c, cwd, by, report.map(|(text, _)| (text, None)))
+                self.release(c, cwd, by, report.map(|(text, _)| (text, None)), None)
                     .await;
             }
         }
@@ -127,7 +127,7 @@ impl Memory {
             let live = |n| tasks::open(&all, n);
             let waits = |t: &tasks::Task| t.holder(&p.server).is_some() && t.blockers().any(live);
             if matches!(p.remote, Ok(Some(_))) && all.iter().any(waits) {
-                notes.extend(self.locked(&p, None).await.1);
+                notes.extend(self.locked(c, &p, None).await.1);
             }
             let unsent = |t: &&tasks::Task| t.get("notified") != t.get("due");
             let due = |t: &&tasks::Task| unsent(t) && t.get("due").is_some_and(|d| *d < *today);
@@ -144,7 +144,7 @@ impl Memory {
                 let (mut edit, due) = (Edit::default(), t.get("due").unwrap_or_default());
                 (edit.id, edit.notified) = (Some(t.id), Some(due.into()));
                 edit.seen = Some(t.head.clone());
-                let (done, more) = self.locked(&p, Some((line.into(), edit))).await;
+                let (done, more) = self.locked(c, &p, Some((line.into(), edit))).await;
                 let title = t.get("title").unwrap_or_default();
                 let said: [(_, &dyn fmt::Display); 3] =
                     [("id", &t.id), ("title", &title), ("due", &due)];
@@ -164,7 +164,7 @@ impl Memory {
         let id = SessionId::try_from(id.to_owned()).ok()?;
         let s = c.summary(&id).await.ok()?;
         if s.closed && s.child.is_none() {
-            self.release(c, &s.cwd, (&id, &s.name), None).await;
+            self.release(c, &s.cwd, (&id, &s.name), None, None).await;
         }
         let parent = c.summary(&s.child?.parent).await.ok()?;
         let child = parent.children.iter().find(|k| k.session == id)?;
@@ -198,16 +198,18 @@ impl Memory {
         cwd: &Path,
         by: By<'_>,
         report: Option<(&str, Option<u32>)>,
+        closer: Option<&Summary>,
     ) {
         let me = by.0.to_string();
         let held = self.files(c, cwd, move |p| {
             let all = tasks::scan(&p.tasks, false)?;
             let held = all.into_iter().filter(|t| t.holder(&p.server) == Some(&me));
-            Ok(held.map(|t| (t.id, t.head)).collect::<Vec<_>>())
+            Ok((held.map(|t| (t.id, t.head)).collect::<Vec<_>>(), p.server))
         });
         let report = report.filter(|r| !r.0.trim().is_empty());
         let comment = report.map(|(text, _)| text[..text.floor_char_boundary(16 << 10)].to_owned());
-        for (id, seen) in held.await.unwrap_or_default() {
+        let (held, server) = held.await.unwrap_or_default();
+        for (id, seen) in held {
             let close = report
                 .filter(|r| r.1 == Some(id))
                 .and_then(|r| r.0.trim_start().lines().next());
@@ -216,6 +218,7 @@ impl Memory {
             (edit.id, edit.claim, edit.comment, edit.close) =
                 (Some(id), Some(false), comment.clone(), close.clone());
             edit.seen = Some(seen);
+            edit.closer = closer.map(|s| super::who(&s.session, &server, &s.name));
             if let Err(e) = self.edit(c, cwd, by, edit).await {
                 eprintln!("razor: releasing task {id} of {}: {e}", by.0);
                 self.owed.store(true, Relaxed);

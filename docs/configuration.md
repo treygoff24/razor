@@ -193,7 +193,7 @@ Each conversation keeps your unsent words, up to 1 MiB, as its draft on the serv
 
 ### Vim keys
 
-Panels such as `/keys`, `/help`, `/tasks` and `/status` scroll with `j`/`k`, by half a page with Ctrl-D/Ctrl-U, and to the top and end with `g`/`G`. In `/keys`, `/help` and `/tasks`, `/` starts a search: type words and only the rows holding all of them stay; Esc ends the search, and Esc again closes the panel. The model chooser also moves with `h`/`j`/`k`/`l`. With an empty draft, Ctrl-D and Ctrl-U scroll the transcript half a page; with words in the draft they keep their editing meaning. A letter typed into an empty draft is always typed, so `j` and `k` move only while browsing.
+Panels such as `/keys`, `/help`, `/tasks` and `/status` scroll with `j`/`k`, by half a page with Ctrl-D/Ctrl-U, and to the top and end with `g`/`G`. In `/keys` and `/help`, `/` starts a search: type words and only the rows holding all of them stay; Esc ends the search, and Esc again closes the panel. The model chooser also moves with `h`/`j`/`k`/`l`. With an empty draft, Ctrl-D and Ctrl-U scroll the transcript half a page; with words in the draft they keep their editing meaning. A letter typed into an empty draft is always typed, so `j` and `k` move only while browsing.
 
 ### Contexts
 

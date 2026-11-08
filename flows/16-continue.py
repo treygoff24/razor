@@ -2,7 +2,7 @@
 no model or effort runs on its parent's, not the config's defaults. A note sent to a child after
 its finishing batch's last request stays unanswered, and its continuation reads it. Each request
 of a twice-continued child starts with the one before, so its prompt cache is never written
-again from the middle."""
+again from the middle. Finished and fresh untouched rows are read directly outside the live feed."""
 import json
 import claude
 import server
@@ -48,7 +48,7 @@ with flow(replies, config='startup = ["razor", "~/parent.md"]\n'
                 agent(child, "finish", status="partial", report="Second report.")]
     f.ask("--resume", parent, "Continue the child.")
     after = list(f.record(sid))
-    assert server.agents(f)[sid]["speed"] == "fast"
+    assert json.load(server.send(f, "GET", f"/sessions/{sid}/agent"))["speed"] == "fast"
     assert after[:len(before)] == before, "continue rewrote history"
     assert len([e for e in after if e["kind"] == "start"]) == 1, after
     assert f.git("rev-parse", branch).strip() != tip, "continue made no new commit"
@@ -60,7 +60,7 @@ with flow(replies, config='startup = ["razor", "~/parent.md"]\n'
     output = json.loads(next(e["output"] for e in entries if e["kind"] == "result" and e["call"] == status["call"]))
     row = next(row for row in output["agents"] if row["session"] == sid)
     assert row["state"] == "done", "mail reopened a finished child without continue"
-    rows = server.agents(f)
+    rows = {s: json.load(server.send(f, "GET", f"/sessions/{s}/agent")) for s in (parent, sid)}
     assert rows[parent]["repo"] == rows[sid]["repo"] == "widget16", rows
     assert row["headline"] == "Committing the first marker.", row
     briefs = [e for e in after if e["kind"] == "input" and "CONTINUE_BRIEF_16" in e["text"]]
@@ -105,11 +105,10 @@ with flow(replies) as f:
     answered = [i for e in f.record(child_sid) if e["kind"] == "turn_end" for i in e["inputs"]]
     assert note in answered, "the continuation left the note unanswered"
     # With no origin remote, a session's repository is its main checkout's folder, a child's too.
-    rows = server.agents(f)
     linked = f.cwd.parent / "linked16"
     f.git("worktree", "add", "-q", "-b", "linked16", str(linked))
     made = server.post(f, "/sessions", {"cwd": str(linked)})["session"]
-    rows = server.agents(f)
+    rows = {s: json.load(server.send(f, "GET", f"/sessions/{s}/agent")) for s in (parent, child_sid, made)}
     assert rows[parent]["repo"] == rows[child_sid]["repo"] == rows[made]["repo"] == f.cwd.name, rows
     # A person's input to the finished, unsettled child continues it, as the parent's continue does.
     replies += [agent(child, "finish", status="finished", report="Heard the person."), reply(root, text="Heard.")]

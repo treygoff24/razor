@@ -1,7 +1,8 @@
 """Saved views (docs/design/agents-view.md): A stores definitions and B forwards edits to it.
 Both resolve layouts, send only changed views, reconnect whole and coalesce publications.
 The real terminal edits through $EDITOR, retains a stale save, opens and sends paired input.
-Earlier follows terminal presence and replies since a stream last read the session; list Escape
+Earlier pages follow terminal presence and replies since a stream last read the session;
+the streamed layout carries its empty heading, while archive membership is read on demand; list Escape
 stops nothing and duplicate shortcut rows cannot trap keyboard navigation. Both terminal lists
 follow the same saved view; B's list shows both servers, its own labelled, and A's resident, apart from the groups."""
 import json
@@ -183,10 +184,20 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
         assert not any(l["kind"] == "agents" for l in heartbeats), heartbeats
         assert any(l["kind"] == "server" and l.get("name") == "b" for l in heartbeats), heartbeats
 
-        # 4. No person input and no open terminal belongs to Earlier; opening it brings it live.
-        old = request(b, "POST", "/sessions", {"cwd": str(beta.cwd)})["session"]
-        earlier = layout(b, 3, lambda l: any(r["session"] == old for s in l["layouts"][0]["sections"] for r in s["sessions"]))["layouts"][0]["sections"]
-        assert old in [r["session"] for s in earlier if s["kind"] == "earlier" for r in s["sessions"]], earlier
+        # 4. A root started over 12 hours ago with no open terminal belongs to Earlier; opening it
+        # brings it live. Its record is a real root's first line, moved to B, renamed and backdated.
+        old = "20260101-000000-0056"
+        start = next(f.record(there)) | {"cwd": str(beta.cwd), "name": "expired56", "at": int(time.time() * 1000) - 13 * 3600_000}
+        (b / "sessions" / old).mkdir()
+        (b / "sessions" / old / "record.jsonl").write_text(json.dumps(start) + "\n")
+        def in_earlier(home, session):
+            native, _, owner = session.partition("@")
+            query = "?scope=earlier&view=Work" + (f"&server={owner}" if owner else "")
+            page = request(home, "GET", "/agents", query=query)
+            return any(r["session"] == native for r in page["agents"])
+        earlier = layout(b, 3)["layouts"][0]["sections"]
+        assert not any(s["sessions"] for s in earlier if s["kind"] == "earlier"), earlier
+        assert in_earlier(b, old), "unprompted root missing from Earlier page"
         names = {s["session"].split("@")[0]: s["name"] for s in json.loads(status(b).readline())["agents"]}
         request(b, "POST", f"/sessions/{here}/input", {"text": "WORK_56"})
         # An editor is a real child process: it asserts cooked mode and writes the actual file.
@@ -291,15 +302,12 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
             resume.touch()
             t.until(lambda t: t.frames > frames and "VIEWS WERE NOT SAVED" in t.text())
             assert os.path.exists(ready.read_text()) and request(a, "GET", "/views") == saved
-        def in_earlier(line, session=old):
-            return session in [r["session"] for section in line["layouts"][0]["sections"]
-                           if section["kind"] == "earlier" for r in section["sessions"]]
         with Terminal(beta, "--resume", old, columns=160, rows=50) as t:
             t.shown("Message the agent")
             t.send("/resume\r")
             t.shown("AGENTS ·")
-            assert not in_earlier(layout(b, saved["version"], lambda line: not in_earlier(line)))
-        assert in_earlier(layout(b, saved["version"], in_earlier))
+            assert not in_earlier(b, old)
+        assert wait(lambda: in_earlier(b, old))
         # Two changed publications on one connection stay at least one second apart.
         stream = status(a, "?views=true")
         next(l for l in map(json.loads, iter(stream.readline, b""))
@@ -314,7 +322,6 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
         assert received[1] - received[0] >= 0.9, received
         stream.close()
         # An asking child under Earlier has one flat NEEDS YOU shortcut; navigation reaches Earlier.
-        request(b, "PUT", f"/sessions/{old}/name", "old56")
         asker = request(b, "POST", "/sessions", {"cwd": str(loose.cwd)})["session"]
         request(b, "POST", f"/sessions/{asker}/input", {"text": "ASK_56"})
         request(b, "POST", "/mail", {"to": old, "id": [here, 1], "kind": "note", "from": "flow56", "project": "beta56", "text": "CHILD_56"})
@@ -324,15 +331,16 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
             rows = (r for l in map(json.loads, iter(agents.readline, b"")) for r in l.get("agents", [l]))
             next(r for r in rows if r.get("session") == old and r["state"] == "needs_you" and "spoke_at" in r)
         saved = request(a, "PUT", "/views", saved)
-        assert not in_earlier(layout(b, saved["version"]))
+        layout(b, saved["version"])
+        assert not in_earlier(b, old)
         with status(b, path=f"/v1/sessions/{old}/events") as read:
             assert json.loads(read.readline())["kind"] == "attached"
-        layout(b, saved["version"], in_earlier)
+        wait(lambda: in_earlier(b, old))
         resolved = layout(b, saved["version"], lambda l: any(r["session"] != asker for s in l["layouts"][0]["sections"] if s["kind"] == "needs_you" for r in s["sessions"]))
         sections = resolved["layouts"][0]["sections"]
         needed = next(s["sessions"] for s in sections if s["kind"] == "needs_you")
         assert len(needed) == 2 and all(r["depth"] == 0 and r["session"] != old for r in needed), sections
-        assert any(r["session"] == old for s in sections if s["kind"] == "earlier" for r in s["sessions"]), sections
+        assert in_earlier(b, old), "parent with an asking child missing from Earlier page"
         count = len(sections) + len({r["session"] for s in sections if s["kind"] != "earlier" for r in s["sessions"]})
         with Terminal(beta, "--resume", asker, columns=160, rows=50) as t:
             t.shown("Choose 56")
@@ -350,7 +358,7 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
             else:
                 raise AssertionError("Navigation never reached Earlier:\n" + t.text())
             t.send("\r")
-            t.shown("old56")
+            t.shown("expired56")
         # /quit addresses the next open row; a closed root leaves for Earlier despite its unread delivery.
         with Terminal(beta, "--resume", unclaimed, columns=160, rows=50) as t:
             t.shown("loose-visible")
@@ -358,9 +366,9 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
             t.shown("AGENTS")
             t.send("/quit\r")
             t.until(lambda t: "loose-visible" not in t.text() and "AGENTS" in t.text())
-            layout(b, saved["version"], lambda l: in_earlier(l, unclaimed))
+            wait(lambda: in_earlier(b, unclaimed))
             assert any(d["session"] == unclaimed and not d["read"] for d in request(b, "GET", "/deliveries"))
-            layout(a, saved["version"], lambda l: in_earlier(l, unclaimed + "@b"))
+            wait(lambda: in_earlier(a, unclaimed + "@b"))
         request(a, "POST", "/sessions/ember56/input", {"text": "RESIDENT_56"})
         kid = next(e["session"] for e in until(f, "ember56", lambda es: any(e["kind"] == "child" for e in es)) if e["kind"] == "child")
         until(f, kid, lambda es: es[-1]["kind"] == "turn_end")

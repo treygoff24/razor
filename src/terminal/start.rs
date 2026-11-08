@@ -205,6 +205,8 @@ fn reaim(app: &mut App, to: Destination) {
     let left = std::mem::take(&mut app.composer);
     app.drafted = None;
     let from = app.focus.take();
+    app.closing = None;
+    app.conversations.clear();
     put_away(app, left, from.is_some());
     if from.is_some() {
         app.back = from;

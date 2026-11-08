@@ -413,6 +413,24 @@ pub(crate) async fn list(
     .await?
 }
 
+/// Stored session ids without loading their records.
+pub(crate) async fn stored(home: &Path) -> Result<Vec<SessionId>, Error> {
+    let dir = home.join("sessions");
+    blocking(move || sessions_in(&dir)).await?
+}
+
+/// Read Start alone, without folding or loading the session's record.
+pub(crate) async fn start(home: &Path, id: &SessionId) -> Option<Body> {
+    let file = File::open(home.join("sessions").join(id.as_str()).join("record.jsonl"))
+        .await
+        .ok()?;
+    let line = BufReader::new(file).lines().next_line().await.ok()??;
+    match serde_json::from_str::<Entry>(&line).ok()?.body {
+        body @ Body::Start { .. } => Some(body),
+        _ => None,
+    }
+}
+
 /// Markers may be stale after a crash, never absent for a live session or one with idle
 /// maintenance due; the loaded session settles them.
 pub(crate) async fn live(home: &Path) -> Result<Vec<SessionId>, Error> {

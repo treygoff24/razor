@@ -61,11 +61,19 @@ fn group(app: &App, tree: &[Section], number: Option<usize>, w: usize, now: u64)
     let action = Action::Section(root.id.clone());
     let shut = folded(app, root);
     let roots = panel::rows(tree).filter(|r| r.depth == 0);
-    let census = panel::census(roots.filter_map(|r| app.agents.get(&r.session)));
+    let census = panel::census(roots.filter_map(|r| app.agent_row(&r.session)));
     let mut tags = panel::named(number, &root.name, tone);
     let needs = format!(" ◆ {} ", census[0] + census[1]);
     tags.extend((census[0] + census[1] > 0).then(|| on(needs, AMBER, tone.ground, true)));
-    let agents = panel::count(totals(tree).0, "AGENT");
+    let agents = if root.kind == SectionKind::Earlier {
+        if shut {
+            String::new()
+        } else {
+            format!("{} LOADED", root.sessions.len())
+        }
+    } else {
+        panel::count(totals(tree).0, "AGENT")
+    };
     if shut {
         let census = [0, census[1], census[2], census[3]];
         tags.extend(panel::counts(census, tone.ground));
@@ -108,6 +116,9 @@ fn group(app: &App, tree: &[Section], number: Option<usize>, w: usize, now: u64)
             out.extend(agent_rows(app, s.sessions.iter(), w, tone, now));
         }
     }
+    if root.kind == SectionKind::Earlier {
+        out.extend(super::earlier::controls(app, w, tone));
+    }
     let foot = panel::foot(w, true, number, [tone.frame, tone.soft, tone.ground]);
     out.push(row(foot.into(), None));
     out
@@ -128,7 +139,7 @@ fn heading(app: &App, tree: &[Section], shut: bool, w: usize, tone: Tone) -> Row
     let name = format!("{} ", s.name.to_uppercase());
     let name = on(name, mix(tone.hue, WHITE, 0.45), g, true);
     let roots = panel::rows(tree).filter(|r| r.depth == 0);
-    let census = panel::census(roots.filter_map(|r| app.agents.get(&r.session)));
+    let census = panel::census(roots.filter_map(|r| app.agent_row(&r.session)));
     let census = panel::counts(census, g);
     let used = width(&mark.content) + width(&name.content) + spans_width(&census);
     let rule = format!("{} ", "─".repeat(w.saturating_sub(5 + used)));
@@ -191,7 +202,7 @@ pub(super) fn finished(a: &AgentView) -> String {
 type Shown<'a> = (&'a ViewRow, Option<(String, bool)>, Option<usize>, bool);
 fn shown<'a>(app: &'a App, rows: impl Iterator<Item = &'a ViewRow>) -> Vec<Shown<'a>> {
     let rows: Vec<_> = rows
-        .filter(|r| app.agents.contains_key(&r.session))
+        .filter(|r| app.agent_row(&r.session).is_some())
         .collect();
     // Shut below this depth, and at it for folded rows while their finished line is shut.
     let (mut out, mut hidden) = (Vec::<Shown>::new(), None::<(u16, bool)>);
@@ -205,7 +216,7 @@ fn shown<'a>(app: &'a App, rows: impl Iterator<Item = &'a ViewRow>) -> Vec<Shown
         // A parent's folded finished children follow the others; the first heads their line.
         let previous = rows[..i].iter().rev().find(|p| p.depth <= r.depth);
         if r.folded && previous.is_none_or(|p| p.depth < r.depth || !p.folded) {
-            let id = finished(&app.agents[&r.session]);
+            let id = finished(app.agent_row(&r.session).unwrap());
             let siblings = rows[i..].iter().take_while(|n| n.depth >= r.depth);
             let count = siblings.filter(|n| n.depth == r.depth).count();
             let shut = !app.list.toggled.contains(&id);
@@ -242,7 +253,7 @@ where
     let (mut out, mut ground, mut edge) = (Vec::new(), tone.ground, tone.frame);
     let room = w.saturating_sub(4);
     for (at, (r, fold, count, here)) in shown.iter().enumerate() {
-        let a = &app.agents[&r.session];
+        let a = app.agent_row(&r.session).unwrap();
         let toggle = count
             .and(fold.as_ref())
             .map(|f| Action::Section(f.0.clone()));

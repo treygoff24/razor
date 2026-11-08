@@ -33,7 +33,7 @@ pub(in crate::api) async fn run(app: App) {
             _ => Vec::new(),
         };
         for id in ids.into_iter().filter(|id| id.address().is_none()) {
-            let Ok(summary) = app.controller.summary(&id).await else {
+            let Ok(Some(summary)) = app.controller.loaded_summary(&id).await else {
                 continue;
             };
             for m in summary

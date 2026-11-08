@@ -5,13 +5,26 @@ homes through a git remote named or given by URL; a list of one task's steps."""
 from dataclasses import replace
 import json
 import os
+import queue
 from pathlib import Path
 import shutil
 import subprocess
+import threading
 from claude import reply
 from driver import flow
 from model import tool
-from server import post, stop, until
+from server import post, send, stop, until
+
+def task_events(f):
+    stream = send(f, "GET", "/status")
+    stream.readline()
+    found = queue.Queue()
+    def collect():
+        for line in stream:
+            event = json.loads(line)
+            if event.get("kind") == "tasks": found.put(event)
+    threading.Thread(target=collect, daemon=True).start()
+    return found
 
 replies = []
 with flow(replies) as f:
@@ -85,7 +98,18 @@ with flow(replies) as f:
     post(f, f"/sessions/{mine}/quit", {})
     until(f, mine, lambda _: "claim:" not in there("show", "refs/razor/tasks:1.md"))
     assert json.loads(use("task", b, theirs, action="write", id=1, claim=True)[1]["output"])["claimed"]
+    events = task_events(f)
+    sync_project = str(f.cwd.resolve())
     use("task", b, theirs, action="write", id=1, close="Shipped.")
+    os.utime(next((f.home / ".razor/tasks").rglob("FETCH_HEAD")), (0, 0))
+    for _ in range(2): send(f, "GET", f"/sessions/{mine}/tasks?filter=open").read()
+    try: synced = events.get(timeout=2)
+    except queue.Empty: synced = None
+    os.utime(next((f.home / ".razor/tasks").rglob("FETCH_HEAD")), (0, 0))
+    send(f, "GET", f"/sessions/{mine}/tasks?filter=open").read()
+    try: extra = events.get(timeout=1)
+    except queue.Empty: extra = None
+    assert synced == {"kind": "tasks", "project": sync_project} and extra is None, (synced, extra)
     assert "Shipped." in there("show", "refs/razor/tasks:closed/1.md") and not there("show", "refs/razor/tasks:2.md")
     assert there("for-each-ref", "--format=%(refname)") == "refs/razor/tasks\n", "pushed more than the tasks ref"
     # A remote named by its path, read from the checkout, keeps the tasks there when origin moves; a
@@ -163,9 +187,61 @@ with flow(replies) as f:
     assert "claim:" not in task["file"] and "closed:" not in task["file"], task
     assert sorted(c["text"].strip() for c in task["comments"]) == ["Claimed by helper.", "Evidence from helper.", "Helper task evidence.\nKept in full."], task
     tasks = json.loads(results[-1]["output"])["tasks"]
-    assert [(t["title"], t["state"]) for t in tasks] == [("Helper work", "ready"), ("Unassigned work", "in progress")], tasks
+    assert [(t["title"], t["state"], t["held"]) for t in tasks] == [("Unassigned work", "in progress", True), ("Helper work", "ready", False)], tasks
     assigned = next(p for p in (f.home / ".razor/tasks").rglob("closed/2.md"))
     assert "claim:" not in assigned.read_text() and "Helper task evidence." in assigned.read_text(), assigned.read_text()
+    # The viewer's task list is bounded after held-first ordering, and detail is structured.
+    folder = assigned.parent.parent
+    server_id = (f.home / ".razor/server.id").read_text().strip()
+    for n in range(10, 216):
+        claim = f"claim: {parent} {server_id} viewer on flow\n" if n == 65 else ""
+        relation = "parent: 64\nblocked-by: 63\n" if n == 65 else "parent: 65\n" if n == 10 else ""
+        (folder / f"{n}.md").write_text(f"---\ntitle: Task {n}\npriority: 4\n{claim}{relation}---\nDescription {n}")
+    comments = folder / "comments/65"
+    comments.mkdir(parents=True)
+    for n in range(22):
+        (comments / f"20261108-{n:06}.md").write_text(f"---\nby: {parent} {server_id} viewer on flow\n---\nComment {n}")
+
+    def task_api(path):
+        response = send(f, "GET", f"/sessions/{parent}/tasks{path}")
+        data = response.read()
+        return response.status, json.loads(data)
+
+    _, opened = task_api("?filter=open")
+    replies.extend([tool("LIST_TASKS_24", "task", action="list", filter="open"), reply(text="listed", match="LIST_TASKS_24")])
+    f.ask("--resume", parent, "LIST_TASKS_24")
+    listed = json.loads([e for e in f.record(parent) if e["kind"] == "result"][-1]["output"])
+    assert listed == {k: opened[k] for k in ("tasks", "more", "counts")}, listed
+    _, search = task_api("?filter=open&q=Task&limit=1000")
+    _, done = task_api("?filter=closed&mine=true")
+    status, detail = task_api("/65")
+    failures = []
+    if f"closed-by: {parent} {server_id} " not in assigned.read_text(): failures.append("settlement closer")
+    if not any(t["id"] == 65 and t.get("held") for t in opened.get("tasks", [])) or any(a.get("held") is False and b.get("held") for a, b in zip(opened["tasks"], opened["tasks"][1:])): failures.append("held-first past 50")
+    if not any(t.get("id") == 65 and t.get("held") is True for t in search.get("tasks", [])) or any(t.get("held") is not False for t in search.get("tasks", []) if t["id"] != 65): failures.append("viewer holds")
+    if opened.get("project") != str(f.cwd.resolve()) or not opened.get("counts"): failures.append("project and counts")
+    if any(t.get("claimant") != (parent if t["id"] == 65 else None) for t in search.get("tasks", [])): failures.append("claimant")
+    if len(search.get("tasks", [])) != 200 or search.get("more") != 6: failures.append("query and limit")
+    if [t["id"] for t in done.get("tasks", [])] != [2] or not done["tasks"][0].get("closed_by"): failures.append("mine and closer")
+    if detail.get("project") != str(f.cwd.resolve()): failures.append("detail project")
+    if status != 200 or detail.get("text") != "Description 65" or len(detail.get("comments", [])) != 20 or detail.get("more") != 2: failures.append("detail and comments")
+    if status != 200 or (detail.get("parent") or {}).get("id") != 64 or [t["id"] for t in detail.get("blockers", [])] != [63] or [t["id"] for t in detail.get("parts", [])] != [10]: failures.append("detail relations")
+    lines = task_events(f)
+    task_api("?filter=open")
+    replies.extend([tool("CLOSE_TASK_24", "task", action="write", id=65, close="Complete."), tool("CLOSE_TASK_24", "task", action="write", id=10, close="Also complete."), reply(text="closed", match="CLOSE_TASK_24")])
+    f.ask("--resume", parent, "CLOSE_TASK_24")
+    task_api("?filter=open")
+    events = []
+    try:
+        while True:
+            events.append(lines.get(timeout=2))
+    except queue.Empty:
+        pass
+    if events != [{"kind": "tasks", "project": str(f.cwd.resolve())}] * 2: failures.append("one event per change and none on reads")
+    _, done = task_api("?filter=closed&mine=true")
+    if [t["id"] for t in done.get("tasks", [])[:2]] != [10, 65]: failures.append("same-day closes newest first")
+    if f"closed-by: {parent} {server_id} " not in (folder / "closed/65.md").read_text(): failures.append("writer closer")
+    assert not failures, failures
     other_task = next(p for p in (f.home / ".razor/tasks").rglob("1.md") if "title: Other work" in p.read_text())
     assert "claim:" not in other_task.read_text(), other_task.read_text()
     assert [p.read_text().split("---\n")[-1].strip() for p in other_task.parent.glob("comments/1/*.md")] == ["Other project report."]

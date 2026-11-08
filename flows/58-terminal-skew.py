@@ -1,5 +1,6 @@
 """A terminal meeting a line of an unknown kind (a proxy adds one) says so once and shows the rest;
-a paired server's status reader skips it and still hears the peer."""
+a paired server's status reader skips it and still hears the peer. A peer about to sleep says so on
+its own line; the home lists it silent until a line without it."""
 import json
 import select
 import socket
@@ -61,3 +62,23 @@ with flow([], config='[server]\naddress = "127.0.0.1:0"') as f:
     assert f.run('devices', 'add', 'stand', '--address', '127.0.0.1:%d' % peer.getsockname()[1]).returncode == 0
     server.wait(lambda: any(s['name'] == 'stand' and s['silent'] is None for s in json.loads(server.send(f, 'GET', '/status').readline())['servers']),
                 15, "the peer's unknown line kept it silent")
+
+    line, held = json.loads(server.send(f, 'GET', '/status').readline()), []
+    line['server'].update(id='s58z', silent=1); line['servers'] = []
+    sleepy = socket.create_server(('127.0.0.1', 0))
+
+    def doze():
+        while True:
+            conn = sleepy.accept()[0]
+            status = conn.recv(65536).startswith(b'GET /v1/status')
+            conn.sendall(b'HTTP/1.0 200 OK\r\n\r\n' + (json.dumps(line).encode() + b'\n' if status else b'[]'))
+            held.append(conn) if status else conn.close()
+
+    def listed():
+        return next((s['silent'] for s in json.loads(server.send(f, 'GET', '/status').readline())['servers'] if s['name'] == 'sleepy'), 0)
+
+    threading.Thread(target=doze, daemon=True).start()
+    assert f.run('devices', 'add', 'sleepy', '--address', '127.0.0.1:%d' % sleepy.getsockname()[1]).returncode == 0
+    server.wait(lambda: listed() == 1, 15, "the peer's own word that it is going to sleep was dropped")
+    held[-1].sendall(json.dumps({'kind': 'server', **line['server'], 'silent': None}).encode() + b'\n')
+    server.wait(lambda: listed() is None, 15, "a line without silent left the peer silent")

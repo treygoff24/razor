@@ -2,7 +2,7 @@
 project and not the caller; mail by name arrives under `<name> in <project>`, a reply by project
 comes back, a name that is also two roots' project reaches the root of that name, a project two
 roots share that is no session's name is refused with both named, and after a restart a new root
-takes no name a root of this week holds."""
+takes no name a root of this week holds. A closed row is read directly outside the live feed."""
 import json
 from dataclasses import replace
 from driver import flow
@@ -74,7 +74,7 @@ with flow(replies) as f:
     # A root the person closed reopens only for the person: mail to it is refused (Trey, 2026-11-01).
     server.post(f, f"/sessions/{third}/quit", {})
     closed = until(f, third, lambda es: es[-1].get("closed"))
-    assert closed[-1]["close_reason"] == "person" and server.agents(f)[third]["close_reason"] == "person", closed[-1]
+    assert closed[-1]["close_reason"] == "person" and json.load(server.send(f, "GET", f"/sessions/{third}/agent"))["close_reason"] == "person", closed[-1]
     replies += [message(b, "note", to=third, text="CLOSED_43"), reply(b, text="Refused.")]
     run(beta, "--resume", second, "Send to the closed root.")
     refused = [e for e in f.record(second) if e["kind"] == "result"][-1]
@@ -126,3 +126,21 @@ with flow(replies) as f:
     assert not any(e.get("text") == "BOTH_43" for s in (mine, theirs) for e in f.record(s)), "a refused send was admitted"
     for sid in (first, second):
         until(f, sid, lambda es: es[-1]["kind"] == "turn_end" and any("report" in e.get("from", "") for e in es))
+
+# An idle root outside the live feed remains reachable by its exact id after eviction.
+with flow([reply("WAKE_43", text="awake")]) as f:
+    server.start(f)
+    sid = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    sender = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    server.stop(f)
+    path = f.home / ".razor/sessions" / sid / "record.jsonl"
+    start = next(f.record(sid))
+    start["at"] -= 13 * 3600_000
+    path.write_text(json.dumps(start) + "\n")
+    server.start(f)
+    for _ in range(2):
+        assert not server.listed(f, sid)
+    answer = server.send(f, "POST", "/mail", {"to": sid, "id": [sender, 1], "kind": "note",
+        "from": "flow43", "project": "mail", "text": "WAKE_43"})
+    assert answer.status == 200, answer.read()
+    until(f, sid, lambda es: any(e.get("text") == "awake" for e in es))

@@ -1,4 +1,5 @@
-"""The API: enroll a key, list, read pages, attach and send, revoke (docs/design/api.md)."""
+"""The API: enroll a key, list, read pages, attach and send, revoke (docs/design/api.md).
+A root started with no message is live, as if the person had just written to it."""
 import http.client
 import json
 import resource
@@ -127,15 +128,22 @@ with flow([reply("Reply with the flow marker.", "Bash", {"command": "true"}),
         status, body = call(remote, "GET", f"/sessions/{session}/files/{name}", phone)
         assert status == refused and json.loads(body)["error"], (name, status, body)
 
-    # 7. Each status stream opens with every agent, with its newest turn's cache share; removing
-    # the phone ends its stream and its
-    # key, and no other device's.
-    watched = open_(remote, "GET", "/status", phone)
+    # 7. The stream carries live rows with their newest cache share; an idle row's membership
+    # coalesces within one second. Removing the phone ends its stream and key, no other device's.
+    watch = remote()
+    watched = open_(lambda: watch, "GET", "/status", phone)
     rows = lines(watched)
-    assert rows["kind"] == "agents" and session in [a["session"] for a in rows["agents"]], rows
+    assert rows["kind"] == "agents", rows
+    deadline = time.monotonic() + 2
+    row = next((a for a in rows["agents"] if a["session"] == session), None)
+    while row is None:
+        assert time.monotonic() < deadline, "live idle row never joined the stream"
+        watch.sock.settimeout(max(0.001, deadline - time.monotonic()))
+        line = lines(watched)
+        candidates = line.get("agents", [line] if line["kind"] == "agent" else [])
+        row = next((a for a in candidates if a["session"] == session), None)
     usage = [e for e in f.record(session) if e["kind"] == "turn_end"][-1]["usage"]
     share = usage["cache_read"] / (usage["input"] + usage["cache_read"] + usage["cache_write"])
-    row = next(a for a in rows["agents"] if a["session"] == session)
     assert share > 0 and row["cache"] == share, (usage, row)
     assert row.get("calls_made") == 2 and row["failed"] == 1 and row["calls"] == [], row
     mine = open_(local, "GET", "/status", key)
@@ -167,8 +175,9 @@ with flow([reply("Reply with the flow marker.", "Bash", {"command": "true"}),
     assert status == 200, (status, body)
     plain = json.loads(body)["session"]
     assert call(local, "GET", f"/sessions/{plain}/project", key) == (200, b"{}")
-    assert server.agents(f)[plain].get("calls_made") == 0
-    # 9. A reader's report of the last entry it saw sits on the row, with when, until a restart.
+    assert json.loads(server.send(f, "GET", f"/sessions/{plain}/agent").read()).get("calls_made") == 0
+    assert plain in server.agents(f) and server.listed(f, plain), "a root started with no message is not live"
+    # 9. A reader's report outlives its row until a restart.
     last, before = list(f.record(session))[-1]["id"], int(time.time() * 1000)
     assert call(local, "PUT", f"/sessions/{session}/seen?entry={last}", key) == (200, b"{}")
     row = server.agents(f)[session]
@@ -178,7 +187,37 @@ with flow([reply("Reply with the flow marker.", "Bash", {"command": "true"}),
     rows = server.agents(f)
     assert rows[session].get("calls_made") == 2 and rows[session]["failed"] == 1, rows[session]
     assert "seen" not in rows[session] and "looked_at" not in rows[session], rows[session]
-    assert rows[plain].get("calls_made") == 0, rows[plain]
+    assert json.loads(server.send(f, "GET", f"/sessions/{plain}/agent").read()).get("calls_made") == 0
+
+# Closing releases the row; looks and seen survive until restart, and records remain readable.
+with flow([]) as f:
+    server.start(f)
+    sid = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    row = lambda: json.load(server.send(f, "GET", f"/sessions/{sid}/agent"))
+    events = server.send(f, "GET", f"/sessions/{sid}/events?terminal=true")
+    assert lines(events)["kind"] == "attached"
+    server.send(f, "PUT", f"/sessions/{sid}/seen?entry=1").read()
+    before = row()
+    assert before["seen"] == 1 and before["looked_at"] and before["terminal"], before
+    followed = server.send(f, "GET", f"/sessions/{sid}/events?follow=true")
+    assert lines(followed)["kind"] == "attached"
+    events.close()
+    server.post(f, f"/sessions/{sid}/quit", {})
+    assert not server.listed(f, sid) and row().get("looked_at"), "a loaded quit root lost its readings"
+    before = row()
+    followed.close()
+    for _ in range(2):
+        assert not server.listed(f, sid)
+    after = row()
+    assert (after.get("seen"), after.get("looked_at")) == (before["seen"], before["looked_at"]) and not after["terminal"], after
+    assert after["name"] == before["name"] and after["headline"] == before["headline"] and after["close_reason"] == "person", after
+    server.send(f, "PUT", f"/sessions/{sid}/seen?entry=2").read()
+    assert row()["seen"] == 2, "an evicted row ignored its reader's last seen entry"
+    assert json.loads(server.send(f, "GET", f"/sessions/{sid}/entries?before=2").read())["kind"] == "start"
+    with server.send(f, "GET", f"/sessions/{sid}/events?terminal=true") as reopened:
+        assert lines(reopened)["kind"] == "attached"
+        assert row()["looked_at"] and row()["terminal"]
+        assert sid not in server.agents(f), "a quit root rejoined the live feed"
 
 # 10. A GPT response entry, about 100 KB of replay data on the sign-in, reaches a stream and a
 # page without `native` by default and whole with `native=true`.
@@ -226,3 +265,28 @@ for failure in ("parse", "read"):
             path.mkdir()
         result = f.run("serve", timeout=5)
         assert result.returncode != 0 and "devices.json" in result.stderr, result
+
+# A live row with an open terminal joins an existing stream; closed before any once-a-second
+# publication retained it, it still leaves that stream at the next publication.
+with flow([]) as f:
+    server.start(f)
+    watch = server.Local(f.home / ".razor/server.sock")
+    stream = open_(lambda: watch, "GET", "/status?views=true", (f.home / ".razor/device.key").read_text().strip())
+    listed = lambda line: {r["session"] for l in line["layouts"] for s in l["sections"] for r in s["sessions"]}
+    stay, leave = (server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"] for _ in range(2))
+    terminals = [server.send(f, "GET", f"/sessions/{stay}/events?terminal=true")]
+    # Its join's publication has just run, so the next one is a second away.
+    while not ((line := lines(stream))["kind"] == "views" and stay in listed(line)):
+        pass
+    terminals.append(server.send(f, "GET", f"/sessions/{leave}/events?terminal=true"))
+    while not ((line := lines(stream))["kind"] == "agent" and line["session"] == leave):
+        pass
+    server.post(f, f"/sessions/{leave}/quit", {})
+    deadline = time.monotonic() + 2
+    watch.sock.settimeout(2)
+    try:
+        while not ((line := lines(stream))["kind"] == "agents" and leave not in {a["session"] for a in line["agents"]}):
+            assert line["kind"] != "views" or leave not in listed(line), "published before it closed"
+            watch.sock.settimeout(max(0.001, deadline - time.monotonic()))
+    except TimeoutError:
+        raise AssertionError("the closed row stayed on its existing stream") from None

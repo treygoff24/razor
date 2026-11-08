@@ -69,7 +69,7 @@ impl Marks {
 /// Asks the session's marks route for `id`'s transcript, once while it is on screen at 120
 /// columns or more; until the route answers, or when it fails, the scrollbar stays.
 pub(in crate::terminal) fn show(app: &mut App, id: &SessionId) {
-    let child = app.agents.get(id).is_some_and(|a| a.parent.is_some());
+    let child = app.agent_row(id).is_some_and(|a| a.parent.is_some());
     let wanted = app.columns >= 120 && app.pending < 8;
     match app.transcripts.get_mut(id) {
         Some(t) if wanted && t.marks.is_none() => t.marks.insert(Marks::default()).child = child,

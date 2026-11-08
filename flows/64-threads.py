@@ -1,5 +1,5 @@
 """A resident's threads in the agents list (docs/design/agents-view.md): after a restart, its open
-threads and no fresh run, its closed ones in Earlier; one starts from the
+threads and no fresh run, its closed ones fetched when Earlier opens; one starts from the
 "+ New thread" row and from `n`, as the resident's (flow 56 starts one with `/thread`)."""
 import json
 import os
@@ -68,9 +68,8 @@ with flow(replies,
     # A fresh run's thread is renamed for its job at once.
     assert ask("/sessions?resident=ember&limit=1")[0]["name"].startswith("fresh · ")
     recent = post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
-    # A restart loads no idle session, yet the status holds the roots changed in the last twelve
-    # hours, and the twelve most recently changed threads whatever their age, among them the spare
-    # one made first, which changed after the others, but not the last.
+    # A restart loads the live list. Historical rows remain readable directly and Earlier
+    # fetches its roots only when opened, rather than publishing an age-based history window.
     oldest, *rest = sorted(spare)
     os.kill(pid, signal.SIGKILL)
     gone(pid)
@@ -86,12 +85,16 @@ with flow(replies,
         t.shown("+ New thread", "tc-five")
         # A closed thread leaves its resident for the folded Earlier, as a closed root does.
         assert not any(n in t.text() for n in (*named[:4], "fresh ·")), t.text()
-        # Closed sessions' rows arrive in the background after a restart; click once all are in.
-        # With them is the root nobody wrote to, which --agents therefore left unopened.
-        t.until(lambda t: any("EARLIER" in line and "5 AGENTS" in line for line in t.screen.display))
+        t.until(lambda t: any("EARLIER" in line for line in t.screen.display))
+        heading = next(line for line in t.screen.display if "EARLIER" in line)
+        assert "AGENT" not in heading and "LOADED" not in heading, heading
         t.click("EARLIER")
         t.shown(*named[:4])
-        assert {recent, oldest} <= set(agents := server.agents(f)) and not {old, rest[-1]} & set(agents)
+        page = ask("/agents")
+        t.until(lambda t: any("EARLIER" in line and f"{len(page['agents'])} LOADED" in line for line in t.screen.display))
+        assert set(threads[:4]).isdisjoint(server.agents(f)), "Earlier repopulated the live feed"
+        for session in (recent, oldest, old, rest[-1]):
+            assert ask(f"/sessions/{session}/agent")["session"] == session
 
         def start(how, n, name):
             """Aims the composer at a new thread of Ember's, sends turn `n`, and names the thread."""
@@ -162,7 +165,7 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"') as f:
         t.until(lambda t: "UNSENT WORDS" not in t.text())
         # Go to, opening the closed one, opens the folded Earlier to select its row.
         t.send("/goto\r/close-a")
-        t.shown("1 of")
+        t.shown("HISTORY · 1 found")
         t.send("\r")
         t.until(lambda t: "┌─ Go to" not in t.text() and any("❯" in row and "close-a" in row[:54] for row in t.screen.display))
         # Going to a thread in the open Residents keeps them open, its row selected.

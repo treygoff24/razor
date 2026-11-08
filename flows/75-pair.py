@@ -1,5 +1,6 @@
 """Discover real Razor servers through a Tailscale CLI stand-in, confirm pairing on both
-machines without carrying a key, refuse forged requests, and recover a late network bind."""
+machines without carrying a key, refuse forged requests, and recover a late network bind.
+A terminal keeps the churn fixture live while fresh snapshots race its row updates."""
 import http.client
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -132,11 +133,14 @@ with flow([], config='[server]\nname = "alpha"\naddress = "127.0.0.1:0"') as f, 
     assert send(second, "GET", "/devices", key=aa[0]["key"]).status == 200
     # Every status stream opens with the agents snapshot, even while a paired row keeps changing.
     remote_session = post(second, "/sessions", {"cwd": str(beta.cwd)})["session"]
+    watched = send(second, "GET", f"/sessions/{remote_session}/events?terminal=true")
+    assert json.loads(watched.readline())["kind"] == "attached"
     wait(lambda: remote_session in send(first, "GET", "/status").readline().decode(), why="peer row")
     churn = Thread(target=lambda: [send(second, "PUT", f"/sessions/{remote_session}/seen?entry={n % 2 * 99}").read() for n in range(3000)])
     churn.start()
     while churn.is_alive():
         assert json.loads(send(first, "GET", "/status").readline())["kind"] == "agents"
+    watched.close()
 
     stop(f)
     settings.write_text(settings.read_text().replace("127.0.0.1:0", "invalid-address"))

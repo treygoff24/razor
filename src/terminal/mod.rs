@@ -35,6 +35,7 @@ mod start;
 mod status;
 mod streams;
 mod strip;
+mod tasks;
 mod text;
 mod tools;
 mod topbar;
@@ -183,6 +184,7 @@ pub async fn run(
                 Some(done) = finished.recv() => {
                     app.pending = app.pending.saturating_sub(1);
                     done(&mut app);
+                    agents::earlier::sync(&mut app);
                     app.dirty = true;
                 }
                 written = terminal.backend_mut().writer_mut().drain(), if !idle => {
@@ -319,6 +321,8 @@ struct App {
     history: Option<(EntryId, Composer)>,
     history_loading: bool,
     transcripts: BTreeMap<SessionId, Transcript>,
+    // Only the shown root and focus: at most two responses under the API's 64 MiB cap.
+    conversations: BTreeMap<SessionId, children::Conversation>,
     // Wire rows whole, at most 1,024 of them and 8 MiB; a snapshot replaces the map.
     agents: BTreeMap<SessionId, AgentView>,
     agent_bytes: usize,
@@ -345,6 +349,7 @@ struct App {
     // The focused folder's branch (empty when detached) and uncommitted files, read by the
     // project route on a focus change and on the focused session's turn ends.
     folder: Option<(SessionId, String, u64)>,
+    tasks: tasks::Tasks,
     // The newest 256 deliveries, ordered by their original (at, session, entry).
     delivered: std::collections::VecDeque<crate::protocol::Delivery>,
     inbox: Option<usize>,
@@ -404,8 +409,10 @@ struct App {
     // The focused tape's last move: whose, the share it moved from and when (`gauge::tide`).
     tide: Option<(SessionId, f64, u64)>,
     busy_at: Option<u64>,
-    // The words of an input being admitted, moved out of the editor at Enter.
+    // The words of an input being admitted, moved out of the editor at Enter until it is answered;
+    // while no answer came, its failure and Enter's posting it again as it was sent.
     sending: Option<Composer>,
+    held: Option<(String, Done)>,
     loading_images: usize,
     output_loading: bool,
     copying: bool,
@@ -572,16 +579,17 @@ impl App {
 
     /// Ctrl-C: waits up to 30 seconds for the last draft save, then quits. Behind a pending
     /// admission or a draft not yet read, words typed since go after the server's draft: the sent
-    /// words, if refused. Effects still `finished` are dropped unapplied, freeing what they hold: a
-    /// read page holds the one page permit an open queued ahead of the save waits for.
+    /// words, if refused. A held send's words go ahead of them whether or not it landed, after
+    /// only a draft not yet read. Effects still `finished` are dropped unapplied, freeing what
+    /// they hold: a read page holds the one page permit an open queued ahead of the save waits for.
     async fn quit(&mut self, finished: mpsc::Receiver<Done>) -> Result<(), Error> {
         drop(finished);
-        let (pending, saved) = (
-            self.sending.is_some() || !self.drafting(),
-            self.focus.clone(),
-        );
-        let (api, writes) = (self.api.clone(), self.writes.take());
-        let mut text = self.composer.text.clone();
+        let held = self.held.as_ref().and(self.sending.as_ref());
+        let pending = (self.sending.is_some() && held.is_none()) || !self.drafting();
+        let mut words = vec![held.map_or("", |h| h.text.as_str()), &self.composer.text];
+        words.retain(|w| !w.is_empty());
+        let mut text = words.join("\n");
+        let (api, writes, saved) = (self.api.clone(), self.writes.take(), self.focus.clone());
         let (tx, rx) = oneshot::channel::<Result<(), Error>>();
         let job: Job = Box::pin(async move {
             let result = match (saved, api) {
@@ -615,12 +623,40 @@ impl App {
         saved.map_err(fail(late))?
     }
 
+    fn agent_row(&self, id: &SessionId) -> Option<&AgentView> {
+        self.agents
+            .get(id)
+            .or_else(|| self.conversations.get(id)?.detail.as_ref().map(|d| &d.row))
+            .or_else(|| {
+                self.conversations
+                    .values()
+                    .filter_map(|c| c.detail.as_ref())
+                    .flat_map(|d| &d.children)
+                    .find(|a| &a.session == id)
+            })
+            .or_else(|| self.list.earlier.row(id))
+    }
+
+    fn agent_children<'a>(&'a self, id: &SessionId) -> impl Iterator<Item = &'a AgentView> {
+        self.agents
+            .values()
+            .filter(move |a| a.parent.as_ref() == Some(id))
+            .chain(
+                self.conversations
+                    .get(id)
+                    .and_then(|c| c.detail.as_ref())
+                    .into_iter()
+                    .flat_map(|d| &d.children)
+                    .filter(|a| !self.agents.contains_key(&a.session)),
+            )
+    }
+
     /// The line left on the normal screen once the app has quit: the session shown, the addressed
     /// one beside the list, else the root, ended, or it stays open on the server and `--resume`
     /// reopens it; none before a session started.
     fn farewell(&self) -> Option<String> {
         let id = [&self.root, &self.focus][usize::from(self.list.open)].as_ref()?;
-        let row = self.agents.get(id);
+        let row = self.agent_row(id);
         let name = row.map_or("", |a| a.name.as_str());
         let name = if name.is_empty() { id.as_str() } else { name };
         let ended = row.is_some_and(|a| a.state == State::Done || a.settled.is_some());
@@ -655,8 +691,9 @@ impl App {
     }
 
     // The drawn screen's next change, paced; while anything works, the clocks' seconds, of the wall
-    // and of the focused turn, unless the overview covers them; a draft save and the notice's
-    // end; else the minute.
+    // and of the focused turn, unless the overview covers them; a draft save that `tick` can
+    // queue (past eight pending, a finished one wakes the loop) and the notice's end; else the
+    // minute.
     fn wake(&self, last_draw: Instant, drawable: bool) -> Instant {
         let now = now();
         let working =
@@ -677,9 +714,8 @@ impl App {
             wake = wake.min(last_draw + motion::pace(self.cost, moving));
         }
         let search = self.goto.as_ref().and_then(|g| g.due);
-        for at in [self.draft_at, search].into_iter().flatten() {
-            wake = wake.min(at);
-        }
+        let save = self.draft_at.filter(|_| self.pending < 8);
+        wake = [save, search].into_iter().flatten().fold(wake, Ord::min);
         if let Some((_, until)) = self.notice.as_ref().filter(|(_, until)| *until > now) {
             wake = wake.min(Instant::now() + Duration::from_millis(until - now));
         }
@@ -717,7 +753,7 @@ impl App {
     }
     /// The addressed session's status row.
     fn row(&self) -> Option<&AgentView> {
-        self.agents.get(self.focus.as_ref()?)
+        self.agent_row(self.focus.as_ref()?)
     }
     fn split(&self) -> bool {
         self.focus != self.root

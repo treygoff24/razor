@@ -61,7 +61,7 @@ const COMMANDS: [(&str, &str, Option<&str>); 36] = [
     ("fast", "pick the speed", Some("[on|off|fast|ultrafast]")),
     ("ultrafast", "use Ultrafast for the next input", None),
     ("status", "the session's status card", None),
-    ("tasks", "this project's open tasks", None),
+    ("tasks", "this project's tasks", Some("[number]")),
     ("resume", "the sessions list, to open another", None),
     ("pin", "pin the newest reply, or unpin it", None),
     ("unattach", "address the parent session again", None),

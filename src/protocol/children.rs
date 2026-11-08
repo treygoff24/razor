@@ -43,6 +43,12 @@ pub(crate) struct Report {
     pub(crate) entry: EntryId,
 }
 
+impl Report {
+    pub(crate) fn listed(&self) -> bool {
+        self.status != ReportStatus::Finished || !self.no_changes
+    }
+}
+
 /// Only the parent settles; `Merged` trusts its word and `Discard` keeps the branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

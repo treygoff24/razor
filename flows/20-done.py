@@ -2,6 +2,7 @@
 project's state note; an input still waiting when it ends ends stopped and reaches no model; the session's job is stopped, its row reads done, nothing keeps it live, and
 its next input reopens it, though an input hook rewrote the closing input and the server restarted.
 A session closed with `/quit` reads done after that restart too, and neither row's activity moves.
+Closed rows are read from their direct detail endpoint, outside the live feed.
 A second session in the same folder reads the note at its start, and its own `/done` replaces it
 (docs/design/done.md)."""
 import json
@@ -90,9 +91,9 @@ with flow(replies, config='[[plugins]]\nfile = "rewrite.py"\nbefore = ["input"]\
     server.start(f)
     for s in closed:
         assert server.send(f, "GET", f"/sessions/{s}/project").status == 200, s
-    rows = server.agents(f)
+    assert not set(closed) & server.agents(f).keys(), "closed rows remained in the live feed"
     for s, entries in closed.items():
-        row = rows[s]
+        row = json.loads(server.send(f, "GET", f"/sessions/{s}/agent").read())
         at = next(e["at"] for e in reversed(entries) if e.get("closed"))
         assert row["state"] == "done" and row["last_activity"] == at, row
         assert list(f.record(s)) == entries, f"the restart wrote to closed session {s}"

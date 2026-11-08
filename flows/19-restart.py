@@ -2,7 +2,7 @@
 the session resumes in a rebuilt context, the child is rebuilt and finishes and its report
 reaches the parent, and the job, still running, is taken back: its end is noticed. A server killed
 during `/done`'s closing turn still closes the session. Under systemd, stopping a service with
-the settings `razor install` writes does the same to a turn and its job."""
+the settings `razor install` writes does the same to a turn and its job. A closing row's final state is read directly after it leaves the live feed."""
 import json
 import os
 import signal
@@ -15,6 +15,25 @@ from driver import BINARY, REPLIES, Reply, flow
 import server
 from responses import PLAIN, reply as turn
 from terminal import Terminal
+
+# An unread delivery admits its owner even outside the restart's recent-record candidates.
+with flow([turn("DELIVERY_19", "deliver", line="Read this later.", url="https://example.org/"), turn("DELIVERY_19", "Delivered.")],
+          model="sol", config=PLAIN) as f:
+    server.start(f)
+    sid = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    server.post(f, f"/sessions/{sid}/input", {"text": "DELIVERY_19"})
+    server.until(f, sid, lambda es: any(e["kind"] == "turn_end" for e in es))
+    assert any(d["session"] == sid and not d["read"] for d in json.load(server.send(f, "GET", "/deliveries")))
+    server.stop(f)
+    path = f.home / ".razor/sessions" / sid / "record.jsonl"
+    entries = list(f.record(sid))
+    for entry in entries:
+        entry["at"] -= 13 * 3_600_000
+    path.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    old = time.time() - 13 * 3600
+    os.utime(path, (old, old))
+    server.start(f)
+    server.wait(lambda: sid in server.agents(f), 5, "unread delivery's old owner missing after restart")
 
 root, child = "FLOW_ROOT_19", "You are oak19,"
 done = Reply((REPLIES / "done.sse").read_bytes(), match=root)
@@ -132,7 +151,7 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
 
     def marked():  # the status rows follow the record's closing entries
         rows = server.agents(f)
-        return all(rows[s]["state"] == "needs_you" and rows[s].get("interrupted") for s in (parent, sid)) and rows
+        return all(rows.get(s, {}).get("state") == "needs_you" and rows[s].get("interrupted") for s in (parent, sid)) and rows
     held = server.wait(marked, 10, "the restart never marked both held turns interrupted")
     assert all((f.home / ".razor/live" / s).exists() for s in (parent, sid))
     (f.cwd / "release19").touch()
@@ -193,7 +212,7 @@ with flow([turn(None, "bash", command="until [ -e go ]; do sleep 0.05; done", wa
     server.start(f)
     end = lambda es: [e for e in es if e["kind"] == "turn_end" and done in e["inputs"]]
     assert end(server.until(f, sid, end))[0].get("closed"), "the crash lost the closing intent"
-    server.until(f, sid, lambda es: server.agents(f)[sid]["state"] == "done")
+    server.until(f, sid, lambda es: json.load(server.send(f, "GET", f"/sessions/{sid}/agent"))["state"] == "done")
 
 
 # The unit `razor install` writes, run by the user's systemd: its stop signals the server alone, so

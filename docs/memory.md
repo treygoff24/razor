@@ -73,10 +73,16 @@ Each Razor home keeps its own memory. Paired servers (Razor servers on two machi
 
 ## Tasks
 
-A project's tasks are the work still to do: each has a number, a title, a description and a priority (0, most urgent, to 4), and may have a parent task, tasks blocking it, a due date and a claim. Agents keep them with their `task` tool; anything owed, an agent's promises to itself included, is a task with a due date. You see a project's open tasks with `/tasks` in the terminal app.
+A project's tasks are the work still to do: each has a number, a title, a description and a priority (0, most urgent, to 4), and may have a parent task, tasks blocking it, a due date and a claim. Agents keep them with their `task` tool; anything owed, an agent's promises to itself included, is a task with a due date.
 
 - A **claim** says which session is on a task, and sets that session's headline to the task's title. It ends when the session closes with `/done` or `/quit`. A parent can start a helper on a task; when it settles the helper, the helper's report becomes a comment on the task, and merging a finished helper closes it. Helpers read tasks but do not write them.
-- When a task closes, each session holding a task it blocked gets a note. The day after a task's due date, the session holding it, or else the session that added it, gets one reminder if that session is open; a new due date allows a new reminder.
+- When a task closes, its header records `closed:` with the date, time and reason, and `closed-by:` with the closing session's id, server id, name and machine, in a claim's form. A close made by settling a helper names the parent that settled it; the report's comment names the helper. Older closed tasks may have no `closed-by:` line. Each session holding a task it blocked gets a note. The day after a task's due date, the session holding it, or else the session that added it, gets one reminder if that session is open; a new due date allows a new reminder.
+
+You see a project's tasks in the terminal app, read-only; to change one, tell an agent.
+
+- The status pane's TASKS section shows the project of the session on screen: the tasks that session holds, then overdue ones, then the rest, three at first, with `▸ N more · ✓ k done this session` under them. Clicking that line lists every open task, fifteen to a page, then the ones this session closed.
+- `/tasks` lists the same tasks grouped under headings: held by this session, ready, in progress, blocked, with open parts, and done this session. A click on a task, or `/tasks <number>`, opens its card: state, claim, priority and due date, the tasks blocking it, its parts, its description and its newest comments. Esc goes back to the list.
+- Both follow changes as they land, from any session or machine sharing the list; programs read the same lists through the API ([Scripting](scripting.md#the-local-api)).
 
 Each project's tasks are one folder in `~/.razor/tasks/`: a folder for each part of the project's path (with `%` written `%25`), then a folder named `%`, so a nested project's tasks never sit inside its parent's. An open task is `<number>.md`; a closed one moves to `closed/`; comments are files under `comments/<number>/`:
 

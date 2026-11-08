@@ -204,11 +204,11 @@ with wall_clock() as (clock, env, advance):
             blocks += [b for m in request["messages"] for b in m["content"] if isinstance(b, dict)]
             writes = [b["cache_control"] for b in blocks if "cache_control" in b]
             assert writes and all(w.get("ttl") == "1h" for w in writes), writes
-        activity = server.agents(f)[session]["last_activity"]
+        activity = json.loads(server.send(f, "GET", f"/sessions/{session}/agent").read())["last_activity"]
         advance(9_000_000)
         server.until(f, session, lambda es: any(e.get("close_reason") == "idle" for e in es))
         server.until(f, session, lambda es: any("settled" in e.get("event", {}) for e in es if e["kind"] == "child"))
-        assert server.agents(f)[session]["last_activity"] == activity, "idle close's child settlement moved activity"
+        assert json.loads(server.send(f, "GET", f"/sessions/{session}/agent").read())["last_activity"] == activity, "idle close's child settlement moved activity"
         resumed = f.run("--resume", session, "--print=json", "Continue the Claude conversation.")
         assert resumed.returncode == 0 and note in f.sent()[-1], resumed.stderr
 
@@ -341,7 +341,7 @@ key = {json.dumps(str(apns.key))}
         server.until(f, session, completed)
         server.post(f, "/sessions", {"resident": "ember18"})
         history = lambda: json.loads(server.send(f, "GET", "/sessions?resident=ember18").read())
-        activity = lambda: (history(), server.agents(f)[session]["last_activity"])
+        activity = lambda: (history(), json.loads(server.send(f, "GET", f"/sessions/{session}/agent").read())["last_activity"])
         original_activity = activity()
         advance(3_000_000)
         entries = server.until(f, session, lambda es: completed(es) and any(e["kind"] == "rebuild" for e in es))
@@ -367,7 +367,7 @@ key = {json.dumps(str(apns.key))}
         entries = server.until(f, session, lambda es: es[-1].get("close_reason") == "idle")
         assert entries[-1]["closed"] and entries[-1]["end"] == "done" and entries[-1]["inputs"] == [], entries[-1]
         assert [e for e in entries if e["kind"] == "input"] == inputs and requests() == before, "close opened a model turn"
-        assert activity() == original_activity and server.agents(f)[session]["close_reason"] == "idle"
+        assert activity() == original_activity and json.loads(server.send(f, "GET", f"/sessions/{session}/agent").read())["close_reason"] == "idle"
         assert server.listed(f, session), "idle close moved the recently used thread out of the list"
         report = server.until(f, "ember18", lambda es: completed(es) and any(e.get("text") == note for e in es))
         assert not any(e.get("closed") for e in report), "resident home closed"
@@ -379,7 +379,7 @@ key = {json.dumps(str(apns.key))}
         resumed = f.ask("--resume", session, "Continue our conversation.")
         last = f.sent()[-1]  # One request: the note and the person's input.
         assert resumed["session"] == session and note in last and "Continue our conversation." in last
-        assert [e["trigger"] for e in f.record(session) if e["kind"] == "rebuild"] == ["idle"] and "close_reason" not in server.agents(f)[session]
+        assert [e["trigger"] for e in f.record(session) if e["kind"] == "rebuild"] == ["idle"] and "close_reason" not in json.loads(server.send(f, "GET", f"/sessions/{session}/agent").read())
 
 # Both native routes preserve their structured overflow reason. The first failed request
 # rebuilds with the last note; two rejections pause with the rebuilt byte size, without a loop.

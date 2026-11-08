@@ -1,5 +1,5 @@
 """Audio refusal/retry, live machine settings, SSH, a fast capture limit and quitting in flight.
-Transport faults go through a proxy to the real server, which still owns transcription/admission.
+Notes' and typed inputs' transport faults go through a proxy to the real server, which owns transcription and admission.
 """
 import base64
 import json
@@ -78,14 +78,17 @@ class Proxy(socketserver.ThreadingUnixStreamServer):
                     while len(body) < length: body += self.request.recv(length - len(body))
                     proxy.inputs.append(json.loads(body))
                     assert len(proxy.inputs) <= 8
-                    if len(proxy.inputs) == 1:
-                        self.request.sendall(b'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+                    if len(proxy.inputs) == 1:  # A note's 502; a typed input's success naming no entry.
+                        self.request.sendall(b'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n' if proxy.inputs[0]['voice']
+                                             else b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}')
                         return
                     if len(proxy.inputs) == 2:
-                        # The real server starts its program; the client loses the answer.
+                        # The real server admits it, or starts its program; the client loses the answer.
                         with socket.socket(socket.AF_UNIX) as upstream:
                             upstream.connect(str(proxy.upstream))
                             upstream.sendall(headers + b'\r\n\r\n' + body)
+                            self.request.close()
+                            while upstream.recv(65536): pass
                         return
                 with socket.socket(socket.AF_UNIX) as upstream:
                     upstream.connect(str(proxy.upstream))
@@ -329,7 +332,7 @@ with flow([], config=config()) as f:
 mode.write_text('quiet')
 hold.touch()
 # Ctrl-C quits with words in the draft, which it would empty were the clear key bound.
-with flow([reply(text='late note admitted')], config=config() + '\n[ui.keys.composer]\nclear = []\n') as f:
+with flow([reply(text='late note admitted'), reply(text='typed admitted'), reply(text='held admitted')], config=config() + '\n[ui.keys.composer]\nclear = []\n') as f:
     server.start(f)
     session = server.post(f, '/sessions', {'cwd': str(f.cwd)})['session']
     proxy = Proxy(f)
@@ -356,6 +359,36 @@ with flow([reply(text='late note admitted')], config=config() + '\n[ui.keys.comp
         assert (draft.status, draft.read()) == (200, b'before latest')
         assert sum(e['kind'] == 'input' for e in f.record(session)) == 1
         assert not list((f.home / 'tmp').glob('razor-audio-*'))
+        # A typed input whose first answer names no entry and whose second is lost stays out of
+        # the editor under its request id; the empty editor's Send button, then Enter behind words
+        # typed since, send that request again, and the server admits it once.
+        proxy.inputs.clear()
+        with Terminal(f, '--resume', session) as t:
+            t.shown('before latest')
+            t.send('\x01\x7ftyped once\r')
+            t.shown('answer is invalid', 'Enter tries again')
+            t.click('Send ⏎')
+            t.shown('request failed', 'Enter tries again')
+            t.send('later\r')
+            t.shown('typed admitted', '❯ later')
+            # The admission cleared the draft; the words typed since are saved as any edit is.
+            saved = lambda: server.send(f, 'GET', f'/sessions/{session}/draft').read()
+            server.wait(lambda: saved() == b'later', why=t.text())
+        assert proxy.inputs[0]['request'] and proxy.inputs == proxy.inputs[:1] * 3, proxy.inputs
+        assert [e['text'] for e in f.record(session) if e['kind'] == 'input'] == ['words-from-the-note', 'typed once']
+        # Quitting while a send is held says where its words go, and puts them in the draft ahead
+        # of those typed since, though the server took them and cleared the draft.
+        proxy.inputs.clear()
+        with Terminal(f, '--resume', session) as t:
+            t.shown('❯ later')
+            t.send('\x01\x7fheld twice\r')
+            t.shown('answer is invalid', 'Enter tries again')
+            t.click('Send ⏎')
+            t.shown('request failed', 'Enter tries again')
+            server.until(f, session, lambda es: any(e['kind'] == 'input' and e['text'] == 'held twice' for e in es))
+            t.send('after')
+            t.quit('Quitting puts the unanswered words in the draft.')
+        assert saved() == b'held twice\nafter' and proxy.inputs == proxy.inputs[:1] * 2, (saved(), proxy.inputs)
     finally:
         proxy.shutdown()
         proxy.server_close()

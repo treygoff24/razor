@@ -21,16 +21,20 @@ pub(super) struct Kept {
     writing: Mutex<()>,
     pub(super) views: watch::Sender<Arc<Views>>,
     pub(super) published: watch::Sender<Arc<Published>>,
+    pub(super) retained: watch::Sender<BTreeSet<crate::protocol::SessionId>>,
+    pub(super) definition: watch::Sender<Option<Arc<Views>>>,
 }
 
 impl Kept {
     /// Reads `views.json`, at most 256 KiB; a missing or unreadable file is none.
     pub(super) async fn open(home: &Path) -> Self {
-        let views = Arc::new(super::load(home, "views.json", BYTES as u64).await);
+        let views: Arc<Views> = Arc::new(super::load(home, "views.json", BYTES as u64).await);
         Self {
             writing: Mutex::default(),
             views: watch::channel(views).0,
             published: watch::channel(Arc::new(encode(ViewsStatus::default()))).0,
+            retained: watch::channel(BTreeSet::new()).0,
+            definition: watch::channel(None).0,
         }
     }
 }
@@ -191,7 +195,16 @@ pub(super) async fn run(app: App) {
         tokio::select! {
             line = local.recv() => { if line.is_none() { return; } dirty = true; continue; }
             _ = peers.recv() => { dirty = true; continue; }
-            _ = deliveries.recv() => { delivered = None; dirty = true; continue; }
+            line = deliveries.recv() => {
+                delivered = if let Ok((d, _)) = line {
+                    if !d.read && !d.archived {
+                        app.controller.admit_rows([d.session]).await;
+                    }
+                    Some(app.deliveries.list(None, 256, &[]).await.unwrap_or_default())
+                } else { None };
+                dirty = true;
+                continue;
+            }
             _ = saved.changed() => { dirty = true; continue; }
             _ = clock.tick() => {}
         }
@@ -220,12 +233,22 @@ pub(super) async fn run(app: App) {
         } else if !remote {
             definition = Some(app.views.views.borrow().clone());
         }
+        app.views.definition.send_replace(definition.clone());
         if !dirty && crate::protocol::now() < next_expiry {
             continue;
         }
         if delivered.is_none() {
             let listed = app.deliveries.list(None, 256, &[]).await;
-            delivered = Some(listed.unwrap_or_default());
+            let listed = listed.unwrap_or_default();
+            app.controller
+                .admit_rows(
+                    listed
+                        .iter()
+                        .filter(|d| !d.read && !d.archived)
+                        .map(|d| d.session.clone()),
+                )
+                .await;
+            delivered = Some(listed);
         }
         next_expiry = publish(
             &app,
@@ -250,13 +273,14 @@ async fn publish(app: &App, definition: Option<&Views>, delivered: &[Delivery]) 
         .peers
         .extend(&mut rows, super::identity(app, &config))
         .await;
-    app.controller.child_rows(&mut rows);
-    let delivered = app.peers.deliveries(delivered.to_vec(), 256, &[]).await;
-    let unread = delivered
-        .iter()
-        .filter(|d| !d.read && !d.archived)
-        .map(|d| d.session.clone())
-        .collect();
+    app.controller.parent_rows(&mut rows);
+    let mut unread = app.peers.unread().await;
+    unread.extend(
+        delivered
+            .iter()
+            .filter(|d| !d.read && !d.archived)
+            .map(|d| d.session.clone()),
+    );
     let now = crate::protocol::now();
     let mut status = match definition {
         Some(d) => ViewsStatus {
@@ -269,9 +293,22 @@ async fn publish(app: &App, definition: Option<&Views>, delivered: &[Delivery]) 
             ..Default::default()
         },
     };
+    let retained = retained(&rows, &servers, &unread);
+    app.controller.evict(
+        rows.iter()
+            .filter(|r| r.session.address().is_none() && !retained.contains(&r.session)),
+    );
+    app.views.retained.send_replace(retained);
+    for section in status
+        .layouts
+        .iter_mut()
+        .flat_map(|l| &mut l.sections)
+        .filter(|s| s.kind == crate::protocol::views::SectionKind::Earlier)
+    {
+        section.sessions.clear();
+    }
     status.names = status.layouts.iter().map(|l| l.name.clone()).collect();
-    app.residents
-        .sort(definition, &status, rows.iter().map(|a| a.session.clone()));
+    app.residents.sort(definition, &status);
     let published = Arc::new(encode(status));
     if app.views.published.borrow().line != published.line {
         app.views.published.send_replace(published);
@@ -283,3 +320,25 @@ async fn publish(app: &App, definition: Option<&Views>, delivered: &[Delivery]) 
         .min()
         .unwrap_or(u64::MAX)
 }
+
+/// View-independent live membership, using the same placement rules as layouts.
+pub(super) fn retained(
+    rows: &[crate::protocol::AgentView],
+    servers: &[crate::protocol::Server],
+    unread: &BTreeSet<crate::protocol::SessionId>,
+) -> BTreeSet<crate::protocol::SessionId> {
+    layout::resolve(
+        &Views::default(),
+        rows,
+        servers,
+        unread,
+        crate::protocol::now(),
+    )
+    .into_iter()
+    .flat_map(|l| l.sections)
+    .filter(|s| s.kind != crate::protocol::views::SectionKind::Earlier)
+    .flat_map(|s| s.sessions.into_iter().map(|r| r.session))
+    .collect()
+}
+
+pub(super) use layout::{live, resolve};

@@ -1,8 +1,11 @@
 """A paired child keeps git on its owner and facts/cards on its parent: mail, wait, cap,
 continuation, stale-report rejection, local descendants/channels, stop, settle and restart recovery.
-The two real homes use reciprocal enrollment; only the model is a stand-in."""
+The two real homes use reciprocal enrollment; only the model is a stand-in.
+Completed foreign helpers leave the live feed; their parent-owned launch/report facts remain
+readable through the parent's children detail, and settled facts through direct detail."""
 import asyncio
 import json
+import queue
 import re
 import shutil
 import threading
@@ -28,17 +31,21 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     assert beta.run("devices").returncode == 0
     addresses = {h: json.loads((h / "server.json").read_text())["address"] for h in (local, other)}
     # Count recovery on the real peer connection, including ordinary status traffic.
-    recovery, listening, control, silent = [], [], [], [False]
+    recovery, details, listening, control, silent = [], [], [], [], [False]
 
     def proxy():
         async def pipe(reader, writer, count):
-            tail = b""
+            tail, requests = b"", b""
             try:
                 while data := await reader.read(65536):
                     if count:
                         joined = tail + data
                         recovery.extend([None] * joined.count(b'"action":"report"'))
                         tail = joined[-16:]
+                        joined = requests + data
+                        details.extend(m[1].decode() for m in re.finditer(
+                            rb"GET /v1/sessions/([^ /?]+)/agent[ ?]", joined) if m.end() > len(requests))
+                        requests = joined[-256:]
                     if not silent[0]:
                         writer.write(data)
                         await writer.drain()
@@ -101,22 +108,42 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
         first = next(e for e in entries if e["kind"] == "input")
         assert first["text"] == text and first["from"]["mail"]["id"][0] == origin, first
     assert not any(e["kind"] == "child" for e in f.record(initiator))
+    # A remote task is read through its owner and its change travels on the paired status stream.
+    remote_session = results[1]["session"].removesuffix("@b")
+    wait(lambda: any(s.get("name") == "b" and not s.get("silent") for s in request(f, "/status", method="GET")["servers"]))
+    task_stream = send(f, "GET", "/status")
+    task_stream.readline()
+    received = queue.Queue()
+    def collect_tasks():
+        for line in task_stream:
+            event = json.loads(line)
+            if event.get("kind") == "tasks": received.put(event)
+    threading.Thread(target=collect_tasks, daemon=True).start()
+    replies += [tool("REMOTE_TASK_49", "task", action="write", title="Remote task"), reply("REMOTE_TASK_49", text="Saved.")]
+    beta.ask("--resume", remote_session, "REMOTE_TASK_49")
+    task_list = send(f, "GET", f"/sessions/{remote_session}@b/tasks?filter=open")
+    rows = json.loads(task_list.read())
+    detail = send(f, "GET", f"/sessions/{remote_session}@b/tasks/1")
+    detail_status, item = detail.status, json.loads(detail.read())
+    try: event = received.get(timeout=2)
+    except queue.Empty: event = None
+    assert rows.get("tasks", [{}])[0].get("title") == "Remote task" and detail_status == 200 and item.get("title") == "Remote task" and event == {"kind": "tasks", "project": str(beta.cwd.resolve()), "server": "b"}, (rows, detail_status, item, event)
     # A paired helper may comment but cannot claim: its parent's settle owns another list.
     replies += [tool("TASK_OWNER_49", "task", action="write", title="Remote work"),
                 reply("TASK_OWNER_49")]
     assert beta.run("--print=json", "TASK_OWNER_49").returncode == 0
     # Shared files expand at the source; paths, worktrees and commits resolve at the target.
     (f.cwd / "brief49").write_text("SHARED_49")
-    replies += [agent(root, "start", server="b", name="oak49", cwd=str(beta.cwd), shared_brief="brief49", brief="Commit."),
+    replies += [agent(root, "start", server="b", name="oak49", cwd=str(beta.cwd), shared_brief="brief49", brief="Commit.", effort="medium"),
                 agent(root, "start", server="b", name="over49", cwd=str(beta.cwd), brief="Over cap."),
-                message(root, "note", to="oak49", text="PARENT_NOTE_49"), agent(root, "wait"), agent(root, "wait"), reply(root, text="First report."),
+                message(root, "note", to="oak49", text="PARENT_NOTE_49"), agent(root, "wait"), agent(root, "wait"), tool(root, "status"), reply(root, text="First report."),
                 agent(child, "start_top", cwd=str(beta.cwd), brief="Refuse child."),
                 reply(child, "Bash", {"command": "sleep 1; printf marker > marker49; git add -- marker49 && git -c user.name=Flow -c user.email=flow@example.invalid commit -m Marker"}),
                 message(child, "note", text="CHILD_NOTE_49"),
                 reply(child, "Bash", {"command": "sleep 60", "run_in_background": True}),
-                tool(child, "task", action="write", id=1, claim=True, comment="Must not land."),
-                tool(child, "task", action="write", id=1, claim=False),
-                tool(child, "task", action="write", id=1, comment="Remote evidence."),
+                tool(child, "task", action="write", id=2, claim=True, comment="Must not land."),
+                tool(child, "task", action="write", id=2, claim=False),
+                tool(child, "task", action="write", id=2, comment="Remote evidence."),
                 agent(child, "finish", status="finished", report="REMOTE_REPORT_49")]
     parent = f.ask(root)["session"]
     records = until(f, parent, lambda es: any(e.get("text") == "First report." for e in es))
@@ -129,10 +156,10 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     calls = {e["call"] for e in there if e["kind"] == "call" and e["name"] == "mcp__razor__task"}
     writes = [e for e in there if e["kind"] == "result" and e["call"] in calls]
     assert [e["outcome"] for e in writes] == ["error", "error", "success"], writes
-    task = next((other / "tasks").rglob("1.md"))
-    assert "claim:" not in task.read_text() and [p.read_text().split("---\n")[-1].strip() for p in task.parent.glob("comments/1/*.md")] == ["Remote evidence."]
+    task = next((other / "tasks").rglob("2.md"))
+    assert "title: Remote work\n" in task.read_text() and "claim:" not in task.read_text() and [p.read_text().split("---\n")[-1].strip() for p in task.parent.glob("comments/2/*.md")] == ["Remote evidence."]
     assert there[0]["child"]["parent"] == parent + "@a", there[0]
-    assert there[0]["child"]["worktree"]["origin"] == str(beta.cwd)
+    assert there[0]["child"]["worktree"]["origin"] == str(beta.cwd.resolve())
     first_input = next(e for e in there if e["kind"] == "input")
     assert first_input["child_task"] == started["id"] and "SHARED_49" in first_input["text"]
     assert any(e["kind"] == "result" and e["outcome"] == "error" and "children.max" in e["output"] for e in records)
@@ -145,9 +172,13 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
         "the report was not saved before closing the child's background job"
     assert any(e["kind"] == "input" and e["text"] == "PARENT_NOTE_49" and e["from"]["mail"]["id"][0] == parent + "@a" for e in there)
     assert any(e["kind"] == "input" and e["text"] == "CHILD_NOTE_49" and e["from"]["mail"]["id"][0] == qualified for e in records)
-    row = wait(lambda: next((r for r in request(local, "/status", method="GET")["agents"] if r["session"] == qualified), None))
+    row = wait(lambda: next((r for r in request(local, f"/sessions/{parent}/agent", method="GET")["children"] if r["session"] == qualified), None))
     assert row["parent"] == parent and row["launched"] == started["event"]["started"]["launched"]
-    assert row["report"]["entry"] == reports(parent)[0]["id"] and row["state"] == "done" and not row["changed_files"], row
+    assert row["report"]["entry"] == reports(parent)[0]["id"] and row["state"] == "done" and row["changed_file_count"] == 0, row
+    calls = {e["call"] for e in records if e["kind"] == "call" and e["name"].endswith("__status")}
+    board = next(json.loads(e["output"])["agents"] for e in records if e["kind"] == "result" and e["call"] in calls)
+    assert details.count(sid) == 1, details
+    assert next(r for r in board if r["session"] == qualified)["changed_files"] == ["marker49"], board
 
     # A paired child's OSC id must fit the terminal protocol and survive reattachment.
     with Terminal(f, "--resume", parent, status=True) as t:
@@ -160,9 +191,11 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
 
     # A continue fails while the child's server is down; the next one, once it is back, reaches it.
     stop(other)
-    replies += [agent(root, "continue", child="oak49", brief="SECOND_TASK_49"), reply(root, text="Not sent.")]
+    replies += [agent(root, "continue", child="oak49", brief="SECOND_TASK_49"), tool(root, "status"), reply(root, text="Not sent.")]
     assert f.run("--resume", parent, "--print=json", "Continue.").returncode == 0
-    assert "it may have run" in [e for e in f.record(parent) if e["kind"] == "result"][-1]["output"]
+    results = [e for e in f.record(parent) if e["kind"] == "result"]
+    assert "it may have run" in results[-2]["output"]
+    assert next(r for r in json.loads(results[-1]["output"])["agents"] if r["session"] == qualified)["changed_files"] is None
     assert beta.run("devices").returncode == 0
     # Hold the new task, then submit a real saved report from its older task through peer auth.
     release = beta.cwd / "release49"
@@ -189,6 +222,8 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     hold = next(e["session"].split("@")[0] for e in f.record(parent) if e["kind"] == "child" and isinstance(e["event"], dict)
                 and e["event"].get("started", {}).get("name") == "hold49")
     until(beta, hold, lambda es: any(e["kind"] == "call" and e["input"].get("command") == "sleep 60" for e in es))
+    row = wait(lambda: next((r for r in request(local, "/status", method="GET")["agents"] if r["session"] == hold + "@b"), None))
+    assert row["parent"] == parent and row["name"] == "hold49", row
     # The person reopens the remote child through its owning server, using the parent's fact id.
     replies += [agent(child, "start", server="a", name="third49", brief="Refuse the extra hop."),
                 message(child, "note", to="channel", text="TARGET_CHANNEL_49"),
@@ -221,7 +256,7 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
     go = beta.cwd / "recover49"
     replies += [agent(root, "continue", child="oak49", brief="RECOVER_TASK_49"), reply(root, text="Recovering."),
                 reply("RECOVER_TASK_49", "Bash", {"command": f"while [ ! -e {go} ]; do sleep 0.05; done"}),
-                agent("RECOVER_TASK_49", "finish", status="finished", report="RECOVER_REPORT_49")]
+                agent("RECOVER_TASK_49", "finish", status="partial", report="RECOVER_REPORT_49")]
     assert f.run("--resume", parent, "--print=json", "Recover.").returncode == 0
     until(beta, sid, lambda es: any(e["kind"] == "input" and e["text"] == "RECOVER_TASK_49" for e in es))
     stop(local)
@@ -247,9 +282,17 @@ with flow(replies, config='[server]\naddress = "127.0.0.1:0"\n[children]\nmax = 
         t.until(lambda t: osc_id not in t.records())
     assert (beta.cwd / "marker49").read_text() == "marker" and not (f.cwd / "marker49").exists()
     assert not (other / "sessions" / sid / "worktree").exists()
-    row = next(r for r in request(local, "/status", method="GET")["agents"] if r["session"] == qualified)
+    row = request(local, f"/sessions/{qualified}/agent", method="GET")
     assert row["settled"] == "merge", row
     assert not listed(other, sid), "a remotely settled helper stayed in its owner’s agents list"
+    reads = details.count(sid)
+    with Terminal(f, "--resume", parent) as t:
+        t.shown("Merged.")
+        t.send("\x1b[1;5H")  # Ctrl-Home brings the original launch card into view.
+        t.until(lambda t: any("oak49" in line and "Opus" in line and "medium" in line for line in t.screen.display))
+        t.send("\x1b[1;5F\x1b[1;5H")  # Drawing the card again retains the owner's facts.
+        t.until(lambda t: any("oak49" in line and "Opus" in line and "medium" in line for line in t.screen.display))
+    assert details.count(sid) == reads + 1, details
     request(local, "/children", {"action": "report", "session": sid}, status=400)
     request(other, "/children", {"action": "report", "session": qualified}, peer=True, status=400)
     # An idle child has no report; unrelated peer activity must not cause recovery per line.

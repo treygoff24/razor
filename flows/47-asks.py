@@ -149,7 +149,7 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN + '[server]\nname="box"\nre
         # With motion off a delivery under a minute old reads `<1m`, and once the reload and the
         # top bar's highlights have passed the screen falls quiet: nothing turns each second.
         (f.home / ".razor/config.toml").open("a").write("[ui]\nmotion = false\n")
-        assert any(not t.pump(1.5, lambda _: True) for _ in range(10)) and "<1m" in t.text(), t.text()
+        assert t.quiet() and "<1m" in t.text(), t.text()
         # At phone width the clock and the pane's picture draw in half blocks.
         t.resize(40, 40)
         t.until(lambda t: t.screen.display[0][39] == "┐")

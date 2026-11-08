@@ -4,7 +4,7 @@
 use super::{App, Error, cards::PULSE, fail, panel, panel::Panel, text::*, view};
 use crate::protocol::{Connection, McpRow, McpScope, Reference, now};
 use crate::terminal::bindings;
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{buffer::Buffer, layout::Rect, text::Line, text::Span};
 use reqwest::Method;
 use serde_json::{Map, Value, json};
@@ -288,14 +288,11 @@ pub fn captures(app: &App, key: KeyEvent) -> bool {
     matches!(&app.panel, Some(Panel::Mcp(mcp)) if key.code == KeyCode::Esc || if mcp.open { matches!(key.code, KeyCode::Char(_)) } else { true })
 }
 
-pub fn click(app: &mut App, m: MouseEvent) {
-    let at = (m.column, m.row).into();
-    let hit = app.hits.iter().rev().find(|(area, _)| area.contains(at));
-    let pressed = m.kind == MouseEventKind::Down(MouseButton::Left);
-    if let (true, Some((_, view::Action::Mcp(name)))) = (pressed, hit)
+pub fn click(app: &mut App, action: Option<view::Action>) {
+    if let Some(view::Action::Mcp(name)) = action
         && let Some(Panel::Mcp(mcp)) = &mut app.panel
     {
-        mcp.chosen = name.clone();
+        mcp.chosen = name;
         key(app, KeyCode::Enter.into());
     }
 }

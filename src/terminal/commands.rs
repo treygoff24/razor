@@ -17,7 +17,7 @@ pub fn run(app: &mut App) {
     // The list's and the panel's commands are no session's draft: they leave it before they run,
     // and words a new agent's composer brings back stay.
     let typed = std::mem::take(&mut app.composer);
-    if agents::command(app, word, args) || panel::command(app, word) {
+    if agents::command(app, word, args) || panel::command(app, word, args) {
         app.edited();
         return;
     }
@@ -179,6 +179,7 @@ pub(super) fn done(app: &mut App, route: &'static str) {
             .await;
         move |app: &mut App| match done {
             Ok(v) => {
+                app.conversations.entry(id.clone()).or_default().dirty = true;
                 if let Some(entry) = v["entry"].as_u64().filter(|_| working) {
                     inputs::queue(app, &id, EntryId(entry));
                 }
@@ -187,7 +188,9 @@ pub(super) fn done(app: &mut App, route: &'static str) {
                 }
                 let row = Action::Agent(id.clone());
                 let at = app.list.rows.iter().position(|a| *a == row);
-                app.closing = Some((id, at.unwrap_or(0)));
+                if app.focus.as_ref() == Some(&id) {
+                    app.closing = Some((id, at.unwrap_or(0)));
+                }
                 ended(app);
             }
             Err(e) => app.say(&e.to_string()),
@@ -201,9 +204,13 @@ pub(super) fn done(app: &mut App, route: &'static str) {
 /// to the root. A person who moved on while its last turn ran stays where they are (Trey,
 /// 2026-11-06: "It just switched me to a different agent, and I didn't want to").
 pub fn ended(app: &mut App) {
-    let closed = |id: &SessionId| app.agents.get(id).is_some_and(|a| a.state == State::Done);
+    let ended = app
+        .closing
+        .as_ref()
+        .is_some_and(|(id, _)| app.agent_row(id).is_some_and(|a| a.state == State::Done));
+    let closing = app.closing.take_if(|_| ended);
+    let closed = |id: &SessionId| app.agent_row(id).is_some_and(|a| a.state == State::Done);
     let shown = |id: &SessionId| app.focus.as_ref() == Some(id);
-    let closing = app.closing.take_if(|(id, _)| closed(id));
     let Some((id, at)) = closing.filter(|(id, _)| shown(id)) else {
         return;
     };
@@ -215,7 +222,7 @@ pub fn ended(app: &mut App) {
         Action::Agent(n) if app.list.open && top(n) => Some(n.clone()),
         _ => None,
     });
-    let parent = app.agents.get(&id).and_then(|a| a.parent.clone());
+    let parent = app.agent_row(&id).and_then(|a| a.parent.clone());
     match parent.or(next) {
         Some(next) => {
             app.list.selected = Some(Action::Agent(next.clone()));

@@ -12,13 +12,24 @@ use reqwest::Method;
 /// any other modal surface none.
 pub fn mouse(app: &mut App, m: MouseEvent, modal: bool) {
     let at = (m.column, m.row).into();
+    let action = app
+        .hits
+        .iter()
+        .rev()
+        .find(|(r, _)| r.contains(at))
+        .map(|(_, a)| a.clone());
     if app.panel.is_some() {
-        return mcp::click(app, m);
+        if m.kind == MouseEventKind::Down(MouseButton::Left) {
+            match action {
+                Some(a @ Action::Task(_)) => act(app, a),
+                other => mcp::click(app, other),
+            }
+        }
+        return;
     }
     if app.start.is_some() {
-        let hit = app.hits.iter().rev().find(|(r, _)| r.contains(at));
-        if let (Some((_, a @ Action::Choose(..))), MouseEventKind::Down(_)) = (hit, m.kind) {
-            act(app, a.clone())
+        if let (Some(a @ Action::Choose(..)), MouseEventKind::Down(_)) = (action, m.kind) {
+            act(app, a)
         }
         return;
     }
@@ -69,18 +80,16 @@ pub fn mouse(app: &mut App, m: MouseEvent, modal: bool) {
         }
         _ => {}
     }
-    let hit = app.hits.iter().rev().find(|(area, _)| area.contains(at));
-    let grid = matches!(hit, Some((_, Action::Grid(_) | Action::Emoji)));
+    let grid = matches!(action, Some(Action::Grid(_) | Action::Emoji));
     if let (Some(_), MouseEventKind::Down(_), false) = (&app.grid, m.kind, grid) {
         app.grid = None;
     }
-    if let (Some((_, Action::Grid(h))), MouseEventKind::Down(MouseButton::Right)) = (hit, m.kind) {
+    if let (Some(Action::Grid(h)), MouseEventKind::Down(MouseButton::Right)) = (&action, m.kind) {
         return emoji::click(app, *h, true);
     }
     if m.kind != MouseEventKind::Down(MouseButton::Left) {
         return;
     }
-    let action = hit.map(|(_, action)| action.clone());
     if !select::press(app, cell, action.clone()) {
         action.into_iter().for_each(|a| act(app, a));
     }
@@ -146,13 +155,17 @@ pub(super) fn act(app: &mut App, action: Action) {
         Action::Overview => super::agents::overview(app),
         Action::Close => super::agents::toggle(app),
         Action::Archive => app.archive = !app.archive,
-        a @ (Action::Section(_) | Action::Agent(_) | Action::New | Action::Thread(_)) => {
-            super::agents::press(app, a)
-        }
+        a @ (Action::Section(_)
+        | Action::Earlier
+        | Action::Agent(_)
+        | Action::New
+        | Action::Thread(_)) => super::agents::press(app, a),
         Action::Choose(server, cwd) => super::start::choose(app, Some((server, cwd))),
         Action::Inbox(offset) => {
             (app.inbox, app.pane_open, app.to_inbox) = (offset, Some(true), true)
         }
+        Action::Tasks(offset) => app.tasks.offset = offset,
+        Action::Task(id) => super::tasks::detail(app, id),
         Action::Delivery(session, entry, _) => delivery(app, session, entry),
         Action::Strip => app.strip = !app.strip,
         Action::Complete(n) => completion::click(app, n),
@@ -161,6 +174,7 @@ pub(super) fn act(app: &mut App, action: Action) {
         Action::Code(n) => shortcodes::click(app, n),
         Action::Model => picker::open(app, false),
         Action::Image => app.say("Paste or drop an image's file path to attach it."),
+        Action::Send if app.held.is_some() => super::keys::enter(app),
         Action::Send if app.composer.text.trim().is_empty() => app.say("Nothing to send yet."),
         Action::Send => super::keys::enter(app),
         Action::HandBack(session, name) => super::inputs::hand_back(app, session, name),

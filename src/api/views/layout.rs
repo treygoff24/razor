@@ -1,5 +1,5 @@
 //! Resolves bounded snapshots without changing saved definitions.
-use crate::protocol::{AgentView, CloseReason, Server, SessionId, State, views::*};
+use crate::protocol::{AgentView, CloseReason, Report, Server, SessionId, State, views::*};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn native(id: &SessionId) -> &str {
@@ -14,6 +14,15 @@ fn rank(a: &AgentView) -> u8 {
         // A closing turn and an idle close are invisible: the session keeps an idle one's place.
         _ => 3,
     }
+}
+/// The live facts on a row; unread deliveries are joined by the publisher.
+pub(in crate::api) fn live(a: &AgentView, now: u64) -> bool {
+    rank(a) < 3
+        || rank(a) == 3
+            && (a.terminals > 0
+                || a.looked_at.is_some_and(|at| a.spoke_at > Some(at))
+                || a.person_input_at
+                    .is_some_and(|at| now.saturating_sub(at) < 43_200_000))
 }
 /// Whether a resident's session stays under its home: all but a thread the person closed, which
 /// leaves for Earlier as a closed root does (Trey, 2026-11-04: threads "don't go away when closed").
@@ -91,7 +100,7 @@ fn fill(
     }
 }
 /// Roots are matched by specificity; descendants follow them and have their own attention shortcuts.
-pub(super) fn resolve(
+pub(in crate::api) fn resolve(
     saved: &Views,
     agents: &[AgentView],
     servers: &[Server],
@@ -103,9 +112,7 @@ pub(super) fn resolve(
         .filter(|a| {
             a.settled.is_none()
                 && !(a.parent.is_some() && a.state == State::Done && a.report.is_none())
-                && !a.report.as_ref().is_some_and(|r| {
-                    r.status == crate::protocol::ReportStatus::Finished && r.no_changes
-                })
+                && a.report.as_ref().is_none_or(Report::listed)
         })
         .map(|a| (&a.session, a))
         .collect();
@@ -114,15 +121,7 @@ pub(super) fn resolve(
         .collect();
     let live: BTreeSet<_> = rows
         .values()
-        .filter(|a| {
-            rank(a) < 3
-                || rank(a) == 3
-                    && (unread.contains(&a.session)
-                        || a.terminals > 0
-                        || a.looked_at.is_some_and(|at| a.spoke_at > Some(at))
-                        || a.person_input_at
-                            .is_some_and(|at| now.saturating_sub(at) < 43_200_000))
-        })
+        .filter(|a| live(a, now) || rank(a) == 3 && unread.contains(&a.session))
         .map(|a| a.session.clone())
         .collect();
     let mut children = BTreeMap::<_, Vec<_>>::new();
@@ -223,6 +222,9 @@ fn layout(
         let (order, key) = key.unwrap_or_default();
         placed.entry((index, order, key)).or_default().push(*a);
     }
+    placed
+        .entry((groups.len() + 4, 0, String::new()))
+        .or_default();
     // A group shows while it or one of its subgroups holds an agent (Trey, 2026-11-02).
     let mut ancestors = Vec::new();
     for (i, (_, depth)) in (3..).zip(&groups) {

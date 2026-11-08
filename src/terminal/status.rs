@@ -87,6 +87,20 @@ pub(super) fn location(app: &App, id: &SessionId, room: usize) -> String {
 
 /// The pane's rows, each with its press; child cards start in their mark column.
 type Rows = Vec<(Line<'static>, Option<Action>)>;
+type Page = (usize, usize, Option<(&'static str, Option<usize>)>, usize);
+
+pub(super) fn page(offset: Option<usize>, total: usize, folded: usize) -> Page {
+    let (at, shown) = offset.map_or((0, folded), |at| {
+        (at.min(total.saturating_sub(1) / 15 * 15), 15)
+    });
+    let previous = offset.map(|_| {
+        (
+            if at == 0 { "▴ fewer" } else { "↑ newer" },
+            at.checked_sub(15),
+        )
+    });
+    (at, shown, previous, total.saturating_sub(at + shown))
+}
 
 struct Status<'a> {
     app: &'a App,
@@ -166,8 +180,10 @@ impl Status<'_> {
     fn alerts(&mut self) {
         let app = self.app;
         let agent = app.row();
-        let mine = |a: &&AgentView| app.focus.is_some() && a.parent == app.focus;
-        let stuck: Vec<_> = (app.agents.values().filter(mine))
+        let stuck: Vec<_> = app
+            .focus
+            .iter()
+            .flat_map(|id| app.agent_children(id))
             .filter(|a| a.state == State::Stuck)
             .collect();
         let windows = agent.map_or(&[][..], |a| a.usage.as_slice());
@@ -335,12 +351,9 @@ impl Status<'_> {
         self.rule(&format!("INBOX · {unread} unread"), Some("▎ this session"));
         // Folded, the newest four, so the pane fits without scrolling; opened, pages of 15.
         let total = delivered.clone().count();
-        let (offset, shown) = app
-            .inbox
-            .map_or((0, 4), |at| (at.min((total - 1) / 15 * 15), 15));
-        if app.inbox.is_some() {
-            let words = ["↑ newer", "▴ fewer"][usize::from(offset == 0)];
-            self.action(span(words, GRAY), Action::Inbox(offset.checked_sub(15)));
+        let (offset, shown, previous, earlier) = page(app.inbox, total, 4);
+        if let Some((words, to)) = previous {
+            self.action(span(words, GRAY), Action::Inbox(to));
         }
         for d in delivered.clone().rev().skip(offset).take(shown) {
             let action =
@@ -378,7 +391,6 @@ impl Status<'_> {
                 self.action(wave.words, Action::Play(d.session.clone(), d.entry));
             }
         }
-        let earlier = total.saturating_sub(offset + shown);
         if earlier > 0 {
             let (words, ink, to) = match app.inbox {
                 None => (format!("▾ {earlier} more"), GRAY, 0),
@@ -518,6 +530,9 @@ fn sections(app: &App, width: usize, now: u64, card: bool) -> (Rows, usize) {
     status.alerts();
     status.usage();
     status.children();
+    for (line, action) in super::tasks::pane(app, width) {
+        status.rows.push((line, action));
+    }
     let inbox = status.rows.len();
     status.deliveries();
     status.contexts();

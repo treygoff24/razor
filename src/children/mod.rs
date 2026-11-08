@@ -23,7 +23,7 @@ use crate::protocol::{
     Body, EntryId, Input, Origin, ReportStatus, SessionId, Spoken, State, Worktree,
 };
 use crate::record::{ChildSummary, Summary};
-use futures_util::future::BoxFuture;
+use futures_util::future::{BoxFuture, join_all};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{LazyLock, OnceLock};
@@ -149,28 +149,50 @@ impl Children {
 }
 
 /// Every agent in the caller's tree but settled helpers; local working children have current
-/// changed files.
+/// changed files, remote helpers their owner's recorded paths or null when it cannot answer.
 async fn status(
     children: &Children,
     controller: &Controller,
     caller: &SessionId,
 ) -> Result<Value, Error> {
-    let mut rows = controller.tree(caller).await?;
-    for row in &mut rows {
+    let rows = children
+        .rows(controller, controller.tree(caller).await?)
+        .await;
+    let remote = join_all(rows.iter().map(|row| async move {
+        if let Some((id, server)) = row.session.address()
+            && let Some(device) = controller.devices().peer(server).await
+        {
+            controller
+                .devices()
+                .fetch::<crate::protocol::AgentDetail>(
+                    &device,
+                    &format!("/v1/sessions/{id}/agent"),
+                    &(),
+                    crate::protocol::BODY_BYTES,
+                )
+                .await
+                .and_then(|detail| detail.changed_files)
+        } else {
+            None
+        }
+    }))
+    .await;
+    let mut agents = Vec::new();
+    for (mut row, mut changed_files) in rows.into_iter().zip(remote) {
+        if row.session.address().is_none() {
+            changed_files = Some(controller.summary(&row.session).await?.changed_files);
+        } else {
+            controller.parent_row(&mut row).await?;
+        }
         if row.state != State::Done
             && row.session.address().is_none()
             && let Some(files) = files(controller, &row.session).await?
         {
-            row.changed_files = files;
+            changed_files = Some(files);
         }
+        agents.push(json!({"session": row.session, "parent": row.parent, "name": row.name, "headline": row.headline,
+            "state": row.state, "changed_files": changed_files, "branch": row.branch}));
     }
-    let rows = children.rows(controller, rows).await.into_iter();
-    let agents: Vec<Value> = rows
-        .map(|r| {
-            json!({"session": r.session, "parent": r.parent, "name": r.name, "headline": r.headline,
-                "state": r.state, "changed_files": r.changed_files, "branch": r.branch})
-        })
-        .collect();
     Ok(json!({ "agents": agents }))
 }
 

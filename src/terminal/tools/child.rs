@@ -62,8 +62,8 @@ pub(in crate::terminal) fn rows(
         false => rgb(0x22773c),
     };
     // Its own children, oldest launch first, with how each ended.
-    let mut subs: Vec<_> = (app.agents.values())
-        .filter(|a| a.parent.as_ref() == Some(&agent.session))
+    let mut subs: Vec<_> = app
+        .agent_children(&agent.session)
         .map(|a| (a, self::ended(app, a)))
         .collect();
     subs.sort_by_key(|(a, _)| a.launched);
@@ -243,7 +243,7 @@ impl Card<'_> {
             (kind.to_owned(), span(hint, GRAY_DIM))
         } else {
             let free = n.saturating_sub(width(&beat) + 10 + drops);
-            let (_, model, effort) = shed(free, "", &model(&agent.model), effort(agent.effort));
+            let (_, model, effort) = shed(free, "", agent);
             (joined(&[&model, &effort]), span(beat, tone))
         };
         let label = vec![span(label, GRAY)];
@@ -275,12 +275,7 @@ impl Card<'_> {
         };
         // Reserve 24 edge cells for stitches.
         let room = n.saturating_sub(width(&name.content) + width(&right) + 30);
-        let (task, model, effort) = shed(
-            room,
-            brief.lines().next().unwrap_or(""),
-            &model(&agent.model),
-            effort(agent.effort),
-        );
+        let (task, model, effort) = shed(room, brief.lines().next().unwrap_or(""), agent);
         let mut left = vec![name];
         for (words, ink) in [
             (joined(&[&model, &effort]), GRAY),
@@ -567,7 +562,7 @@ impl Card<'_> {
                 Some((_, true)) => ("✗ ", report.unwrap_or("stuck"), AMBER),
             };
             let model = match step {
-                10 => format!(" · {}", model(&sub.model)),
+                10 if !sub.model.is_empty() => format!(" · {}", model(&sub.model)),
                 _ => String::new(),
             };
             let hidden = self.subs.len() - subs.len();
@@ -661,7 +656,13 @@ fn secs(now: u64, at: u64) -> u64 {
 
 // The brief, model and effort while they fit `room` (each with its three cells of
 // separator), else the brief cut, else model and effort, else the model alone, else nothing.
-fn shed(room: usize, task: &str, model: &str, effort: &str) -> (String, String, String) {
+fn shed(room: usize, task: &str, agent: &AgentView) -> (String, String, String) {
+    let name = model(&agent.model);
+    let (model, effort) = if agent.model.is_empty() {
+        ("", "")
+    } else {
+        (name.as_str(), effort(agent.effort))
+    };
     let part = |s: &str| if s.is_empty() { 0 } else { width(s) + 3 };
     let (m, e) = (part(model), part(effort));
     if part(task) + m + e <= room {

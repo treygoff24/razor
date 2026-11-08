@@ -316,6 +316,22 @@ impl Deliveries {
         limit: usize,
         words: &[String],
     ) -> Result<Vec<Delivery>, Error> {
+        self.matching(before, limit, words, |_| true).await
+    }
+
+    /// Notes only, filtered before the bound; archived notes remain eligible.
+    pub(crate) async fn notes(&self, limit: usize) -> Result<Vec<Delivery>, Error> {
+        self.matching(None, limit, &[], |d| d.file.is_none() && d.url.is_none())
+            .await
+    }
+
+    async fn matching(
+        &self,
+        before: Option<(SessionId, EntryId)>,
+        limit: usize,
+        words: &[String],
+        include: impl Fn(&Delivery) -> bool,
+    ) -> Result<Vec<Delivery>, Error> {
         let before = match before {
             Some((session, entry)) => {
                 let delivery = self.get(&session, entry).await?;
@@ -332,6 +348,7 @@ impl Deliveries {
                 .as_ref()
                 .is_some_and(|(at, s, e)| key >= (*at, s, *e))
                 || !delivery.matches(words)
+                || !include(&delivery)
             {
                 continue;
             }

@@ -196,6 +196,12 @@ pub(super) async fn run(
             s.fail(&e).await;
         }
         if s.idle(&queue) {
+            {
+                let status = lock(&c.inner.status);
+                if let Some(row) = status.agents.get(&id) {
+                    let _ = status.lines.send(Live::Agent(Box::new(row.clone())));
+                }
+            }
             if let Err(e) = c.inner.summaries.unload(s.record).await {
                 eprintln!("razor: session {id}'s summary: {e}");
             }
@@ -224,6 +230,7 @@ impl Session {
         }
         self.publish_row();
         children::recover_loaded(self.c.clone(), self.record.summary());
+        lock(&self.c.inner.status).child_rows(self.record.summary());
         if let Some(parent) = &parent {
             lock(&self.c.inner.status).child_rows(parent);
         }
@@ -579,6 +586,9 @@ impl Session {
     fn unfinished(&self, answers: &[EntryId]) -> bool {
         let s = self.record.summary();
         s.unanswered.iter().any(|id| !answers.contains(id))
+            || s.meetings
+                .iter()
+                .any(|m| m.state != record::MeetingState::Closed)
             || !s.jobs.is_empty()
             || !self.actions.is_empty()
             || !self.notices.is_empty()

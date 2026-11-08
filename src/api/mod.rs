@@ -2,6 +2,7 @@
 //! and an optional tailnet address, every request carrying a device key. Also its client half (how
 //! a command reaches it, `--print`, `razor login`, `razor devices`) and `razor doctor`.
 
+mod agents;
 mod call;
 mod client;
 mod devices;
@@ -13,6 +14,8 @@ pub mod mcp;
 mod meetings;
 mod pair;
 mod peers;
+#[cfg(target_os = "macos")]
+mod power;
 mod project;
 mod push;
 mod ready;
@@ -28,7 +31,9 @@ mod voice;
 use crate::controller::{self, Controller};
 pub use crate::devices::Error;
 use crate::devices::{Devices, Gone, other};
-use crate::protocol::{BODY_BYTES, Delivery, EntryId, Live, Login, Mail, Server, SessionId};
+use crate::protocol::{
+    BODY_BYTES, Delivery, EntryId, Live, Login, Mail, Millis, Server, SessionId,
+};
 use crate::residents::{Deliveries, Error as ResidentError, Residents};
 use crate::responses::Responses;
 use crate::{config, profiles};
@@ -103,6 +108,8 @@ struct App {
     creations: Arc<Mutex<VecDeque<(String, SessionId)>>>,
     /// True once the server stops; each live call holds a receiver until it has ended.
     calls: Arc<watch::Sender<bool>>,
+    /// When this machine was about to sleep, until it wakes; None while awake (macOS).
+    asleep: watch::Receiver<Option<Millis>>,
 }
 
 /// `razor serve`: this home's one server, until SIGTERM.
@@ -196,6 +203,9 @@ async fn listen(
     tokio::fs::write(home.join("server.json"), found.to_string())
         .await
         .map_err(other("Writing server.json"))?;
+    let (_sleep, asleep) = watch::channel(None);
+    #[cfg(target_os = "macos")]
+    power::watch(_sleep);
     let app = App {
         home: Arc::new(home.clone()),
         peers: Arc::default(),
@@ -214,6 +224,7 @@ async fn listen(
         voice: Arc::default(),
         activity: Arc::default(),
         calls: Arc::new(watch::channel(false).0),
+        asleep,
     };
     let speaking = app.clone();
     app.controller
@@ -243,6 +254,7 @@ async fn listen(
 fn routes(app: &App) -> Router {
     Router::new()
         .merge(sessions::routes())
+        .route("/v1/agents", get(agents::page))
         .route("/v1/repos", get(repos::repos))
         .route("/v1/sessions/{id}/recap", post(recap::recap))
         .route("/v1/sessions/{id}/project", get(project::project))
@@ -573,6 +585,8 @@ struct Page {
     #[serde(default)]
     local: bool,
     #[serde(default)]
+    servers: bool,
+    #[serde(default)]
     heartbeat: bool,
     #[serde(default)]
     views: bool,
@@ -585,8 +599,8 @@ struct Page {
     /// A session's stream and pages: entries keep their `native`.
     #[serde(default)]
     native: bool,
-    filter: Option<String>,
     q: Option<String>,
+    kind: Option<String>,
 }
 
 /// Mail from a paired server, or a local program, to the one agent here its `to` names.
@@ -603,6 +617,9 @@ async fn mail(
 /// Newest first; cursors retain each delivery's original position when read.
 async fn delivery_list(State(app): State<App>, Query(q): Query<Page>) -> Reply<Vec<Delivery>> {
     let limit = q.limit.unwrap_or(50).clamp(1, 256);
+    if q.kind.as_deref() == Some("note") {
+        return Ok(Json(app.deliveries.notes(limit).await?));
+    }
     let words: Vec<_> =
         q.q.unwrap_or_default()
             .split_whitespace()

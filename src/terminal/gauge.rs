@@ -61,7 +61,7 @@ pub(super) fn share(row: &AgentView) -> Option<f64> {
 /// The tide a new status row starts: from the share its gauge shows at `now`, so a move during a
 /// tide continues it without a jump. `None` on the first reading, or when the share did not move.
 pub(super) fn tide(app: &App, row: &AgentView, now: u64) -> Option<(SessionId, f64, u64)> {
-    let old = app.agents.get(&row.session).and_then(share)?;
+    let old = app.agent_row(&row.session).and_then(share)?;
     let from = shown(app, &row.session, now).0?;
     (share(row)? != old).then(|| (row.session.clone(), from, now))
 }
@@ -69,7 +69,7 @@ pub(super) fn tide(app: &App, row: &AgentView, now: u64) -> Option<(SessionId, f
 // `id`'s share as its gauge shows it at `now`, rounded, and how far its tide has run (1 at rest):
 // rising over 400 ms or falling over 600 ms from the tide's share, eased out, with motion on.
 pub(super) fn shown(app: &App, id: &SessionId, now: u64) -> (Option<f64>, f64) {
-    let share = app.agents.get(id).and_then(share);
+    let share = app.agent_row(id).and_then(share);
     let (level, k) = match (&app.tide, share) {
         (Some((tide, from, at)), Some(to)) if tide == id && on(app) => {
             let k = progress(now, *at, if to >= *from { 400 } else { 600 });
@@ -92,7 +92,7 @@ pub(super) fn columns(app: &App) -> u16 {
 // run, and its rebuild line, in percent.
 fn reading(app: &App, id: Option<&SessionId>, now: u64) -> (Option<f64>, f64, f64) {
     let (pct, k) = id.map_or((Some(0.), 1.), |id| shown(app, id, now));
-    let agent = id.and_then(|id| app.agents.get(id));
+    let agent = id.and_then(|id| app.agent_row(id));
     (
         pct,
         k,
@@ -103,7 +103,7 @@ fn reading(app: &App, id: Option<&SessionId>, now: u64) -> (Option<f64>, f64, f6
 fn context(app: &App, id: Option<&SessionId>) -> Option<(u64, u64)> {
     match id {
         Some(id) => {
-            let agent = app.agents.get(id)?;
+            let agent = app.agent_row(id)?;
             agent.context.zip(agent.window.filter(|w| *w > 0))
         }
         None => Some((0, *app.models.as_ref()?.windows.get(app.choice().0)?)),

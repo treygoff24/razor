@@ -255,6 +255,10 @@ impl Summary {
     pub(super) fn live(&self) -> bool {
         let open = !self.closed && self.reported.is_none();
         !self.unanswered.is_empty()
+            || self
+                .meetings
+                .iter()
+                .any(|m| m.state != MeetingState::Closed)
             || !self.jobs.is_empty()
             || (open && self.children.iter().any(ChildSummary::working))
     }
@@ -334,6 +338,7 @@ impl Summary {
                 (self.cwd, self.model, self.settings) = (cwd.clone(), model.clone(), *settings);
                 self.profile_version = profile_version.clone();
                 self.started = entry.at;
+                self.person_input_at = (!name.is_empty() && thread.is_none()).then_some(entry.at);
                 self.child = child.clone();
                 self.thread = thread.as_deref().cloned();
                 self.name = match child {

@@ -106,8 +106,12 @@ The routes a script needs:
 | `POST /v1/sessions/<id>/quit` | | `{}`: what `/end` does. The session closes now, with no closing turn. |
 | `PUT /v1/sessions/<id>/name` | the new name, as plain text | `{}`. |
 | `GET /v1/sessions/<id>/files/<name>` | | A file in the session's folder, such as one an agent delivered, a command's saved output, or `startup.md`. |
-| `GET /v1/status` | | JSON lines: first `agents`, a row for every open session with its `state` (`working`, `needs_you`, `done` or `stuck`), `headline` and open questions (`asks`), then a replacement row each time one changes. |
-| `GET /v1/deliveries?limit=<n>` | | Your inbox, newest first: the files, links and notes agents sent you. 50 unless `limit` says otherwise, at most 256. |
+| `GET /v1/sessions/<id>/agent` | | The session's row as the status stream gives it, with `changed_files`, the paths it changed, and `children`, a row for each of its direct helpers, settled ones included. |
+| `GET /v1/sessions/<id>/tasks?filter=<ready, open or closed>` | | `{"project": "<folder>", "tasks": […], "more": <n>}`: the tasks of the session's project as that session sees them. 50 unless `limit` says otherwise, at most 200, and `more` counts the rest. `ready`, the default, and `open` list the tasks the session holds first, then by priority, due date and number, and `open` adds `counts` by state; `closed` lists the newest close first, and `mine=true` keeps the ones this session closed. `q=<words>` keeps the tasks whose title or description hold them. Each row has `id`, `title`, `priority`, `state`, `claim`, `claimant` (the claiming session's id), `held` (whether this session holds it), `due`, `parent`, `blocked_by`, `closed` and `closed_by`. |
+| `GET /v1/sessions/<id>/tasks/<n>` | | One task whole: its row with `project`, `text` (its description), `by` (who recorded it), `parent`, `blockers` and `parts` (the tasks naming it as their parent) as `{"id", "title", "state"}`, and its newest 20 comments, oldest first, with `more` counting the earlier ones. |
+| `GET /v1/status` | | JSON lines: first `agents`, the rows of the live agents list, each with its `state` (`working`, `needs_you`, `done` or `stuck`), `headline`, open questions (`asks`) and `changed_file_count`; then the other lines below as they happen. |
+| `GET /v1/agents?after=<session>` | | `{"agents": […], "next": "<session>"}`: this server's top-level sessions that have left the live list, newest first, at most 50 rows and 1 MiB to a page. Send `next` as `after` for the next page; it is `null` after the last. `view=<name>` keeps the ones that view puts under Earlier. |
+| `GET /v1/deliveries?limit=<n>` | | Your inbox, newest first: the files, links and notes agents sent you. 50 unless `limit` says otherwise, at most 256. `kind=note` lists notes only. |
 | `GET /v1/search?q=<words>` | | Past conversations holding every word, here and on paired servers ([Concepts](concepts.md#the-record)). |
 | `GET /v1/models` | | The models Razor can run, each one's efforts, and your defaults. |
 
@@ -116,6 +120,14 @@ Three optional fields of an input are for programs:
 - `from` names the program that sent it, such as `"nightly"`. The record then shows the input came from that program, not from you, and only your own words can become [rulings](memory.md#how-your-decisions-become-rulings).
 - `request` is your own id for the message, 1 to 64 letters, digits and hyphens. Sending the same id again within the session's newest 64 answers with the first message's entry and sends nothing, so a script can retry safely.
 - `images` is a list of pictures as plain base64, JPEG, PNG or WebP, at most 20 to a message and 10 MB of base64 each.
+
+The status stream carries the agents of the live list: the always-on agents, every session at work, asking or stuck, an idle one with an unread delivery, your input in the last twelve hours, a terminal open on it or a reply you have not looked at, and their helpers. The rest stay on disk, read a page at a time with `GET /v1/agents`. After the first line, the stream sends:
+
+- `agent`, one row, when an agent in the list changes or joins it;
+- `agents` again, whole, when one leaves the list: replace what you hold with it;
+- `delivery`, when an agent sends you something;
+- `server`, what this server or a paired one says of itself. Its `silent`, also on each server in the `agents` line's `servers`, is set while a server is not answering, to when it was last heard from, or after it said it was going to sleep: a Mac's server says so on this line a second before the Mac sleeps and clears it when it wakes, and its paired servers pass that on;
+- `tasks`, `{"kind":"tasks","project":"<folder>"}`, when a task in that project changes, here or in what a fetch of its shared list brought ([Memory](memory.md#tasks)); a paired server's adds its name as `server`. It carries no task, so read the project's tasks again.
 
 To answer a question, find it in `GET /v1/status`: each row's `asks` lists its open questions with their `text`, `options` and `id`, which is the session and the entry to put in the `asks` route. The always-on agents' routes are on [Always-on agents and schedules](always-on-agents.md#controlling-it-from-a-script), and the voice settings' on [Browser, voice and search](browser-voice-search.md#spoken-notes-from-agents). Every other route, the ones the terminal app and the phone client use, is described as it was designed in the [API design page](design/api.md).
 

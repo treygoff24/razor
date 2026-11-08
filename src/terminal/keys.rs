@@ -222,7 +222,7 @@ fn prefixed(app: &mut App, action: &str) {
                 None => act(app, super::status::press(app)),
             }
         }
-        "keys" => _ = panel::command(app, "/keys"),
+        "keys" => _ = panel::command(app, "/keys", ""),
         "detach" => app.leaving = true,
         "browse" => select(app, true, false),
         // The ring runs newest first, so the reply above is the next one along it.
@@ -522,6 +522,10 @@ pub(super) fn enter(app: &mut App) {
         app.composer.swap(end - 1..end, "\n");
         return app.edited();
     }
+    // An input left unanswered goes again first, while the write queue has room for it.
+    if let Some((_, again)) = app.held.take_if(|_| app.pending < 8) {
+        return again(app);
+    }
     if app.sending.is_some() {
         return app.say(&super::bindings::text(
             app,
@@ -653,10 +657,11 @@ fn refocus(app: &mut App, next: Option<SessionId>) {
             let parent = app
                 .focus
                 .as_ref()
-                .and_then(|id| app.agents.get(id)?.parent.clone());
+                .and_then(|id| app.agent_row(id)?.parent.clone());
             parent.or_else(|| app.root.clone())
         }
     };
+    app.closing = None;
     (app.selected, app.panel, app.history, app.initial) = (None, None, None, None);
     app.revision = app.revision.wrapping_add(1);
     // A session's words were saved above; a new agent's wait for its composer.

@@ -8,7 +8,8 @@ finishes; a repeated input and a repeated creation return the first answer, the 
 restart; each device's level and mutes filter what it gets, a root's note to the person pushes
 `notify`, a finish goes at `agents` only to the device that sent its input while it has no stream
 open, an alert's interruption level says whether the person is in the session, and a note too
-long for a lock screen is refused."""
+long for a lock screen is refused. Presence readings use direct row detail, including a fresh
+unprompted session outside the live feed."""
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 import json
@@ -170,7 +171,7 @@ key = {json.dumps(str(apns.key))}
         stuck = wait(lambda: [a for a in alerts() if razor(a)["session"] == failed])
         assert [razor(a)["kind"] for a in stuck] == ["stuck"], stuck
         assert len([a for a in alerts() if razor(a)["session"] == asking]) == 3, alerts()
-        row = server.agents(f)[failed]
+        row = json.loads(server.send(f, "GET", f"/sessions/{failed}/agent").read())
         assert row["error"] == why and "interrupted" not in row, row
         sessions = [razor(a)["session"] for a in alerts()]
         assert child not in sessions and parent in sessions, sessions
@@ -210,25 +211,27 @@ key = {json.dumps(str(apns.key))}
         assert api(f, "PUT", f"/sessions/{followed}/follow", pad, follow) == (200, {})
         watch = enroll("watch")[1]
         assert api(f, "PUT", f"/sessions/{followed}/follow", watch, dict(follow, token="ee77")) == (200, {})
+        offset = len(wait(lambda: activities("ff66")))
+        watch_offset = len(wait(lambda: activities("ee77")))
         restart(f)
         wait(lambda: [a["body"]["aps"]["event"] for a in activities("dd77")][-1:] == ["end"])
-        resent = wait(lambda: activities("ff66"))[0]
+        resent = wait(lambda: activities("ff66")[offset:])[0]
         headers, aps = resent["headers"], resent["body"]["aps"]
         assert (headers["apns-push-type"], headers["apns-topic"]) == (
             "liveactivity", "com.example.razor.push-type.liveactivity"), headers
         assert (aps["event"], aps["content-state"]["state"]) == ("update", "needs_you"), aps
         assert aps["stale-date"] - aps["timestamp"] == 900, aps
-        wait(lambda: activities("ee77"))
+        wait(lambda: activities("ee77")[watch_offset:])
         at = time.monotonic()
         server.post(f, f"/sessions/{followed}/input", {"text": "FOLLOW48"})
         server.until(f, followed, lambda es: any(e["kind"] == "job" for e in es))
         assert f.run("devices", "remove", "watch").returncode == 0
-        working = wait(lambda: activities("ff66")[1:])[0]
+        working = wait(lambda: activities("ff66")[offset + 1:])[0]
         assert time.monotonic() - at > 8 and working["headers"]["apns-priority"] == "5", working
-        assert len(activities("ee77")) == 1, activities("ee77")
+        assert len(activities("ee77")) == watch_offset + 1, activities("ee77")
         assert working["body"]["aps"]["content-state"]["state"] == "working", working
         (f.cwd / "go48").touch()
-        last = wait(lambda: activities("ff66")[2:])[0]
+        last = wait(lambda: activities("ff66")[offset + 2:])[0]
         assert last["body"]["aps"]["event"] == "end" and "dismissal-date" in last["body"]["aps"], last
         wait(lambda: not json.loads((state / "devices.json").read_text())[0].get("follows"))
 
@@ -295,17 +298,17 @@ key = {json.dumps(str(apns.key))}
         assert level("a1", replied) == ["active"], alerts("a1")
         # Following as a background view neither marks presence nor suppresses the sender's push.
         viewed = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
-        before = server.agents(f)[viewed]
+        before = json.loads(server.send(f, "GET", f"/sessions/{viewed}/agent").read())
         with server.send(f, "GET", f"/sessions/{viewed}/events?follow=true&terminal=true", key=one) as stream:
             assert json.loads(stream.readline())["kind"] == "attached"
-            during = server.agents(f)[viewed]
+            during = json.loads(server.send(f, "GET", f"/sessions/{viewed}/agent").read())
             assert (during.get("looked_at"), during.get("terminal", False)) == (before.get("looked_at"), before.get("terminal", False)), during
             assert api(f, "POST", f"/sessions/{viewed}/input", one, {"text": "VIEW48"})[0] == 200
             while json.loads(stream.readline())["kind"] != "turn_end":
                 pass
             wait(lambda: kinds("a1", viewed) == ["finished"])
             assert level("a1", viewed) == ["active"], alerts("a1")
-        after = server.agents(f)[viewed]
+        after = json.loads(server.send(f, "GET", f"/sessions/{viewed}/agent").read())
         assert (after.get("looked_at"), after.get("terminal", False)) == (before.get("looked_at"), before.get("terminal", False)), after
         watched = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
         with server.send(f, "GET", f"/sessions/{watched}/events", key=one) as stream:

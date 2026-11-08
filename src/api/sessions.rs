@@ -26,8 +26,10 @@ pub(super) fn routes() -> Router<App> {
         .route("/v1/sessions/{id}/asks/{entry}", post(answer))
         .route("/v1/sessions/{id}/events", get(events))
         .route("/v1/sessions/{id}/entries", get(entries))
-        .route("/v1/sessions/{id}/children", get(children))
+        .route("/v1/sessions/{id}/agent", get(agent))
+        .route("/v1/notifications/{id}", get(notification))
         .route("/v1/sessions/{id}/tasks", get(tasks))
+        .route("/v1/sessions/{id}/tasks/{n}", get(task))
         .route(
             "/v1/sessions/{id}/draft",
             (get(draft).put(set_draft)).layer(DefaultBodyLimit::max(1 << 20)),
@@ -92,11 +94,27 @@ async fn list(State(app): State<App>, Query(q): Query<Page>) -> Reply<Vec<Listed
     Ok(Json(listed.await?))
 }
 
-/// Immediate children not settled, retaining the controller's complete rows and remote facts.
-async fn children(State(app): State<App>, Path(id): Path<SessionId>) -> Reply {
-    let mut rows = app.controller.tree(&id).await?;
-    rows.retain(|row| row.parent.as_ref() == Some(&id));
-    Ok(Json(json!(rows)))
+async fn agent(State(app): State<App>, Path(id): Path<SessionId>) -> Reply {
+    Ok(Json(json!(app.controller.detail(&id).await?)))
+}
+
+/// One pushed row and the owner's open question ids; no other session detail is sent.
+async fn notification(State(app): State<App>, Path(id): Path<SessionId>) -> Reply {
+    let row = app.controller.agent(&id).await?;
+    let mut parent = None;
+    let mut open = Vec::new();
+    if let Some(Live::Agents { agents, .. }) = app.controller.status().recv().await {
+        parent = agents
+            .iter()
+            .find(|a| Some(&a.session) == row.parent.as_ref())
+            .map(|a| a.name.clone());
+        for ask in agents.into_iter().flat_map(|a| a.asks) {
+            open.push(json!({"session": ask.id.0, "entry": ask.id.1}));
+        }
+    }
+    Ok(Json(
+        json!({"agent": row, "parent_name": parent, "open": open}),
+    ))
 }
 
 #[derive(Default, Deserialize)]
@@ -385,11 +403,25 @@ async fn search(State(app): State<App>, Query(q): Query<Search>) -> Reply<Found>
     Ok(Json(crate::children::search(&app.controller, q).await?))
 }
 
-/// The session's project's tasks, as its `task list` answers them for `filter`.
-async fn tasks(State(app): State<App>, Path(id): Path<SessionId>, Query(q): Query<Page>) -> Reply {
+/// The session's project and tasks, with counts for open lists and the viewer's held tasks first.
+async fn tasks(
+    State(app): State<App>,
+    Path(id): Path<SessionId>,
+    Query(q): Query<crate::memory::TaskQuery>,
+) -> Reply {
     let (c, cwd) = (&app.controller, app.controller.summary(&id).await?.cwd);
-    let tasks = c.memory().tasks(c, &cwd, q.filter).await;
+    let tasks = c.memory().tasks(c, &cwd, &id, q, None).await;
     Ok(Json(tasks.map_err(|e| bad(e.to_string()))?))
+}
+
+/// One task whole in the session's project, with its related tasks and newest comments.
+async fn task(State(app): State<App>, Path((id, n)): Path<(SessionId, u32)>) -> Reply {
+    let (c, cwd) = (&app.controller, app.controller.summary(&id).await?.cwd);
+    let task = c
+        .memory()
+        .tasks(c, &cwd, &id, Default::default(), Some(n))
+        .await;
+    Ok(Json(task.map_err(|e| bad(e.to_string()))?))
 }
 
 /// The person's rename; the body is the new name.
@@ -398,7 +430,7 @@ async fn rename(State(app): State<App>, Path(id): Path<SessionId>, name: String)
     Ok(Json(json!({})))
 }
 
-/// The last entry a reader saw, at most the last recorded, on the status row in memory with when
+/// The last entry a reader saw, at most the last recorded, in the server's readings with when
 /// it was reported.
 async fn seen(State(app): State<App>, Path(id): Path<SessionId>, Query(q): Query<Page>) -> Reply {
     let entry = q

@@ -3,7 +3,7 @@ the person as a note through the notify command, or as an ask the status stream 
 model turn sends a note without a model tool call; a fresh run's thread is a root whose row names
 its resident, listed only among its resident's sessions; a resident's projects (one per request,
 renamed in place, never through a link) and its `sky` file, passed through on its row unless bad
-(docs/design/residents.md)."""
+(docs/design/residents.md). A fresh run's row is read directly outside the live feed."""
 import json
 import tempfile
 import time
@@ -82,8 +82,7 @@ with tempfile.TemporaryDirectory() as scratch:
         run = post(f, "/residents/ember/run/fresh", {})["entry"]
         thread = next(e for e in f.record("ember") if e["id"] == run)["session"]
         until(f, thread, lambda es: any(e["kind"] == "turn_end" for e in es))
-        with urllib.request.urlopen(status, timeout=10) as stream:
-            row = next(r for r in json.loads(stream.readline())["agents"] if r["session"] == thread)
+        row = json.load(send(f, "GET", f"/sessions/{thread}/agent"))
         assert row.get("resident") == "ember" and row["parent"] is None, row
         ask = lambda method, path, body=None: ((a := send(f, method, path, body)).status, json.loads(a.read()))
         assert thread not in [s["session"] for s in ask("GET", "/sessions")[1]], "a fresh run is listed"
