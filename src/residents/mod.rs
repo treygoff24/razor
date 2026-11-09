@@ -25,9 +25,7 @@ pub use updates::{selected_executable, update_release};
 use crate::config::{Config, Day, Deliver, Resident, Schedule, Time};
 use crate::controller::{self, Controller};
 use crate::protocol::views::{SectionKind, Views, ViewsStatus};
-use crate::protocol::{
-    Body, Effort, Entry, EntryId, Input, Millis, Origin, Run, SessionId, Thread, now,
-};
+use crate::protocol::{Body, Effort, EntryId, Input, Millis, Origin, Run, SessionId, Thread, now};
 use crate::record::Summary;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -396,21 +394,6 @@ impl Residents {
                 eprintln!("razor: resident {name}'s night: {e}");
             }
         }
-    }
-
-    /// The first line of a session's last reply among its newest entries.
-    async fn reply(&self, session: &SessionId) -> String {
-        let mut said = String::new();
-        if let Ok(mut page) = self.inner.controller.page(session, None, 64).await {
-            while let Some(Ok(line)) = page.next_line().await {
-                if let Ok(entry) = serde_json::from_str::<Entry>(&line)
-                    && let Body::Text { text } = entry.body
-                {
-                    said = crate::record::preview(crate::record::reply(&text).text);
-                }
-            }
-        }
-        said
     }
 
     /// Admit a schedule's input as when due: in the home session, or in a fresh thread named

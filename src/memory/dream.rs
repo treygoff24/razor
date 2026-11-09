@@ -138,6 +138,10 @@ impl Memory {
 
     pub(crate) async fn dream_input(&self, c: &Controller, cwd: &Path) -> String {
         let cites = self.citations(c, cwd).await;
+        let (mut cites, more) = files::fit(cites.lines().map(str::to_owned), (usize::MAX, 8 << 10));
+        if more > 0 {
+            cites += &format!("\n{}", TEXT.dream_omitted.replace("{n}", &more.to_string()));
+        }
         let scan = |p: Project| {
             let mut instructions = String::new();
             for folder in &p.memory.current {

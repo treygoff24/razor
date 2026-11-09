@@ -64,9 +64,16 @@ with flow(replies) as f:
 
 held, news = "ASK_HELD: sent while the batch waits.", "NEWS_34: mail the wait takes."
 replies = [reply(("toolu_handover", "mcp__razor__handover", {"note": note}),
-                 ("toolu_wait", "mcp__razor__agent", {"action": "wait", "timeout_ms": 30000})),
-           Reply(done), Reply(done)]
+                 ("toolu_wait", "mcp__razor__agent", {"action": "wait", "timeout_ms": 30000}),
+                 ("toolu_hold34", "Bash", {"command": "until [ -e held34go ]; do sleep 0.02; done"})),
+           Reply(done)]
 with flow(replies) as f:
+    skill34 = f.cwd / ".agents/skills/held34"
+    skill34.mkdir(parents=True)
+    (skill34 / "SKILL.md").write_text("held34 instructions")
+    withdrawn34 = skill34.with_name("withdrawn34")
+    withdrawn34.mkdir()
+    (withdrawn34 / "SKILL.md").write_text("withdrawn34 instructions")
     server.start(f)
     session, sender = (server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"] for _ in "ab")
     server.post(f, f"/sessions/{session}/input", {"text": asks[0]})
@@ -75,13 +82,21 @@ with flow(replies) as f:
     server.post(f, "/mail", {"to": session, "id": [sender, 1], "kind": "note", "from": "flow",
                              "project": "cwd", "text": news})
     server.until(f, session, lambda es: any(e.get("call") == "toolu_wait" and e["kind"] == "result" for e in es))
-    kept = server.post(f, f"/sessions/{session}/input", {"text": held})["entry"]
+    withdrawn = server.post(f, f"/sessions/{session}/input", {"text": "Withdraw this skill.", "skill": "withdrawn34"})["entry"]
+    server.send(f, "DELETE", f"/sessions/{session}/input/{withdrawn}").read()
+    kept = server.post(f, f"/sessions/{session}/input", {"text": held, "skill": "held34"})["entry"]
+    (f.cwd / "held34go").touch()
     entries = server.until(f, session, lambda es: any(e["kind"] == "turn_end" and kept in e["inputs"] for e in es))
     rebuild = next(e for e in entries if e["kind"] == "rebuild")
     assert held not in rebuild["context"] and news in rebuild["context"], rebuild["context"]
     last = json.dumps(json.loads(f.sent()[-1])["messages"])
     context = json.dumps(rebuild["context"][:200])[1:-1]
     assert last.count(held) == 1 and last.index(context) < last.index(held), last
+    assert kept in rebuild.get("held", []) and all(s["name"] != "held34" for s in rebuild.get("skills", [])), rebuild
+    assert last.count("held34 instructions") == 1, last
+    skills34 = server.agents(f)[session].get("skills", [])
+    assert "withdrawn34" not in rebuild["context"] and all(s["name"] != "withdrawn34" for s in rebuild.get("skills", [])), rebuild
+    assert len(skills34) == 1 and skills34[0]["name"] == "held34" and not skills34[0]["worn"], skills34
 
 gate = lambda name: call("bash", json.dumps({"command": f"while [ ! -e {name} ]; do sleep 0.02; done"}), name)
 replies = [response([gate("one"), gate("two")]), response([gate("three")]), responses.done(), responses.done()]

@@ -635,6 +635,7 @@ impl Status {
             changed_file_count: s.changed_files.len(),
             changed_file_first: s.changed_files.first().cloned(),
             calls: s.unresolved.iter().map(|(_, at, _)| *at).collect(),
+            skills: s.shown_skills(),
             doing: s.unresolved.last().map(|(.., doing)| doing.clone()),
             hour: s.hour,
             calls_made: s.calls_made,

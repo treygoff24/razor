@@ -408,6 +408,16 @@ pub(crate) struct AgentDetail {
     pub(crate) changed_files: Option<Vec<PathBuf>>,
 }
 
+/// One skill's latest load, in the server's first-load order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SkillState {
+    pub name: String,
+    pub entry: EntryId,
+    pub at: Millis,
+    pub how: super::SkillHow,
+    pub worn: Option<Millis>,
+}
+
 /// One row replaces the previous row; absent facts are never invented as zero.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentView {
@@ -458,6 +468,9 @@ pub struct AgentView {
     pub(crate) changed_file_first: Option<PathBuf>,
     /// Unresolved tool calls, running now.
     pub(crate) calls: Vec<EntryId>,
+    /// The newest 32 loaded skills, in first-load order.
+    #[serde(default)]
+    pub(crate) skills: Vec<SkillState>,
     /// The newest call while it is unresolved: its tool's name, what it acts on (as a recap
     /// names it) and when it started.
     #[serde(default, skip_serializing_if = "Option::is_none")]

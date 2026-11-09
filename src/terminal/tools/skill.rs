@@ -8,7 +8,6 @@ pub(super) const DIM: Color = rgb(0x8a7a4a);
 /// Display metadata decoded once with the result; at most 4,096 description characters, 1,024
 /// path characters and two icon columns per retained result (the entry cap bounds the count).
 pub(in crate::terminal) struct Info {
-    pub(in crate::terminal) name: String,
     description: String,
     pub(super) icon: String,
     source: String,
@@ -18,7 +17,7 @@ pub(in crate::terminal) struct Info {
 impl Info {
     /// Reads only a skill result's display fields; no filesystem access during a draw.
     pub(super) fn read(value: &Value) -> Option<Self> {
-        let name = value["name"].as_str()?;
+        value["name"].as_str()?;
         let dir = value["dir"].as_str()?;
         let text = value["output"].as_str()?;
         let front = text
@@ -28,7 +27,6 @@ impl Info {
         let description = front.map_or_else(String::new, |(s, _)| field(s, "description"));
         let bytes = front.map_or(text.len(), |(_, rest)| rest.trim_start_matches('\n').len());
         Some(Self {
-            name: name.chars().take(256).collect(),
             description,
             icon: icon(front.map_or("", |(s, _)| s)),
             source: dir.chars().take(1024).collect(),

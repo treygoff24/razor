@@ -302,15 +302,15 @@ fn browse(app: &mut App, k: KeyEvent) {
         // Alt and a digit opens that lamp's skill card, never typing the digit.
         KeyCode::Char(c @ '1'..='9') if k.modifiers == Mods::ALT => {
             let slot = usize::from(c as u8 - b'1');
-            let t = app.transcript_mut();
-            match t
-                .as_ref()
-                .and_then(|t| super::tools::lamps::slot_entry(t, slot))
-            {
-                Some(id) => t.into_iter().for_each(|t| t.toggle(id)),
+            let entry = app
+                .transcript()
+                .and_then(|t| super::tools::lamps::slot_entry(t, slot));
+            match app.focus.clone().zip(entry) {
+                Some((session, id)) => super::transcript::jump(app, &session, id, true),
                 None => app.say(&format!("No skill is lit in slot {c}.")),
             }
         }
+
         KeyCode::Char('o') if ctrl => {
             if let Some(said) = app.transcript_mut().map(|t| t.open_all()) {
                 app.say(said);
@@ -318,7 +318,7 @@ fn browse(app: &mut App, k: KeyEvent) {
         }
         KeyCode::Home if ctrl => {
             if let Some(id) = app.focus.clone() {
-                super::transcript::jump(app, &id, EntryId(1));
+                super::transcript::jump(app, &id, EntryId(1), false);
             }
         }
         KeyCode::End if ctrl => {

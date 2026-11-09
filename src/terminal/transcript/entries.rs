@@ -84,13 +84,6 @@ impl Transcript {
             Body::Result { call, output, .. } => {
                 self.results.insert(call.clone(), entry.id);
                 if let Some(decoded) = tools::Decoded::read(output) {
-                    // A skill that loaded takes the next lamp number, kept for this reading.
-                    let name = decoded.skill.as_ref().map(|s| &s.name);
-                    if let Some(name) =
-                        name.filter(|n| !self.skills.contains(n) && self.skills.len() < 64)
-                    {
-                        self.skills.push(name.clone());
-                    }
                     self.decoded.insert(entry.id, decoded);
                 }
             }

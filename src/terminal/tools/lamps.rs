@@ -1,72 +1,30 @@
 //! Skill lamps in the band.
 use super::skill::{DIM, HI};
 use super::*;
+use crate::protocol::SkillState;
 use crate::terminal::{
     App,
     transcript::Transcript,
     view::{Action, Hit},
 };
 use ratatui::style::Style;
-use std::collections::BTreeSet;
 
-struct Chip<'a> {
-    call: Call<'a>,
-    /// Its place in the order this reading saw skills first load: a skill keeps its number
-    /// while the terminal runs, worn off or not.
-    slot: usize,
-}
-
-// At most the transcript's 2,000 retained entries; only the current and preceding context.
-fn chips(t: &Transcript) -> Vec<Chip<'_>> {
-    let mut rebuilds = t
-        .entries
-        .values()
-        .rev()
-        .filter(|e| matches!(e.body, Body::Rebuild { .. }));
-    let since = rebuilds.nth(1).map(|e| e.id);
-    let mut out = Vec::new();
-    let mut seen = BTreeSet::new();
-    for entry in t
-        .entries
-        .values()
-        .rev()
-        .take_while(|e| since.is_none_or(|id| e.id > id))
-    {
-        let Body::Call { name, .. } = &entry.body else {
-            continue;
-        };
-        if super::kind(name) != "skill" {
-            continue;
-        }
-        let call = t.call(entry, None);
-        if call.outcome() != Some(Outcome::Success) {
-            continue;
-        }
-        if seen.insert(skill::name(&call)) {
-            out.push(Chip { call, slot: 0 });
-        }
-    }
-    out.reverse();
-    for chip in &mut out {
-        let name = skill::name(&chip.call);
-        chip.slot = (t.skills.iter())
-            .position(|n| n == name)
-            .unwrap_or(t.skills.len());
-    }
-    out
-}
-
-/// The skill call lit in slot `slot` (0 for the first), whose card Alt and its digit open.
+/// The server's skill slot, whose card Alt and its digit open.
 pub(in crate::terminal) fn slot_entry(t: &Transcript, slot: usize) -> Option<EntryId> {
-    chips(t)
-        .into_iter()
-        .find(|c| c.slot == slot)
-        .map(|c| c.call.entry.id)
+    t.skills.get(slot).map(|s| s.entry)
 }
 
-/// Reserves sparks and lamps when this context or its predecessor loaded a skill, else none.
+/// Reserve the lamp band whenever the server lists skills.
 pub(in crate::terminal) fn rows(t: Option<&Transcript>) -> u16 {
-    2 * u16::from(t.is_some_and(|t| !chips(t).is_empty()))
+    2 * u16::from(t.is_some_and(|t| !t.skills.is_empty()))
+}
+
+fn icon<'a>(t: &'a Transcript, state: &SkillState) -> &'a str {
+    t.entries
+        .get(&state.entry)
+        .and_then(|e| t.call(e, None).decoded)
+        .and_then(|d| d.skill.as_ref())
+        .map_or("🧩", |s| s.icon.as_str())
 }
 
 /// Draws only the focused session's lamps; asks for a 50 ms frame only while a visible lamp plays.
@@ -82,24 +40,24 @@ pub(in crate::terminal) fn draw(
     if r.height < 2 {
         return;
     }
-    let chips = chips(t);
+    let chips = &t.skills;
     if chips.is_empty() {
         return;
     }
     fill(b, r, style(DATA, RECESS));
     if r.width < 56 {
-        return compact(b, r, &chips);
+        return compact(b, r, chips);
     }
     let widths: Vec<_> = chips
         .iter()
-        .map(|c| {
-            let icon = skill::info(&c.call).map_or("🧩", |i| i.icon.as_str());
-            let icon = if c.call.worn.is_none() {
-                width(icon) + 1
-            } else {
+        .enumerate()
+        .map(|(slot_id, c)| {
+            let icon = if c.worn.is_some() {
                 0
+            } else {
+                width(icon(t, c)) + 1
             };
-            width(&slot(c.slot)) + 3 + icon + width(skill::name(&c.call))
+            width(&slot(slot_id)) + 3 + icon + width(&c.name)
         })
         .collect();
     let shown = fit(&widths, r.width.saturating_sub(2) as usize);
@@ -110,10 +68,10 @@ pub(in crate::terminal) fn draw(
             x += 3;
         }
         let start = x;
-        x = draw_chip(app, b, r, x, chip, now);
+        x = draw_chip(app, t, b, r, x, (i, chip), now);
         if let Some(id) = app.focus.clone() {
             let area = Rect::new(start, r.y, x.saturating_sub(start), 2);
-            hits.push((area, Action::Call(id, chip.call.entry.id)));
+            hits.push((area, Action::Call(id, chip.entry)));
         }
     }
     // The lamps that do not fit, counted.
@@ -136,15 +94,15 @@ fn slot(i: usize) -> String {
     }
 }
 
-fn compact(b: &mut Buffer, r: Rect, chips: &[Chip<'_>]) {
-    let active = chips.iter().filter(|c| c.call.worn.is_none()).count();
+fn compact(b: &mut Buffer, r: Rect, chips: &[SkillState]) {
+    let active = chips.iter().filter(|c| c.worn.is_none()).count();
     let count = format!(" ⚡{active}  ");
     let mut x = lamp(b, r, r.x, &count, bold(LAMP, RECESS));
     for c in chips {
         if x + 2 >= r.right() {
             break;
         }
-        let (glyph, ink) = if c.call.worn.is_none() {
+        let (glyph, ink) = if c.worn.is_none() {
             ("◉", LAMP)
         } else {
             ("○", GRAY_DIM)
@@ -167,33 +125,42 @@ fn fit(widths: &[usize], room: usize) -> usize {
     n
 }
 
-fn draw_chip(app: &App, b: &mut Buffer, r: Rect, x: u16, chip: &Chip<'_>, now: u64) -> u16 {
-    let (call, motion) = (&chip.call, crate::terminal::motion::on(app));
-    let arriving = skill::burst(now, call.entry.at, 1100, motion);
-    let wearing = call.worn.and_then(|at| skill::burst(now, at, 900, motion));
+fn draw_chip(
+    app: &App,
+    t: &Transcript,
+    b: &mut Buffer,
+    r: Rect,
+    x: u16,
+    (slot_id, chip): (usize, &SkillState),
+    now: u64,
+) -> u16 {
+    let motion = crate::terminal::motion::on(app);
+    let arriving = skill::burst(now, chip.at, 1100, motion);
+    let wearing = t
+        .worn_skill(&chip.name)
+        .and_then(|at| skill::burst(now, at, 900, motion));
     let age = wearing.or(arriving);
     let off = wearing.is_some();
     if age.is_some() {
         app.next.at(now.saturating_add(50));
     }
-    let (glyph, ink, glow) = phase(age, off, call.worn.is_some());
+    let (glyph, ink, glow) = phase(age, off, chip.worn.is_some());
     let ground = mix(RECESS, rgb(0x3a2d0f), glow);
-    let active = call.worn.is_none() || off;
+    let active = chip.worn.is_none() || off;
     let slot_ink = if active { GRAY } else { GRAY_DIM };
     let mut at = lamp(
         b,
         r,
         x,
-        &format!("{} ", slot(chip.slot)),
+        &format!("{} ", slot(slot_id)),
         style(slot_ink, ground),
     );
     at = lamp(b, r, at, &format!("{glyph} "), style(ink, ground));
     if active {
-        let icon = skill::info(call).map_or("🧩", |i| i.icon.as_str());
+        let icon = icon(t, chip);
         at = lamp(b, r, at, &format!("{icon} "), style(DATA, ground));
     }
-    // The name is lit, bold lamplight, while its card is open or the browse cursor is on it.
-    let id = call.entry.id;
+    let id = chip.entry;
     let open = app.transcript().is_some_and(|t| t.opened == Some(id));
     let chosen = matches!(&app.selected, Some(Action::Call(_, at)) if *at == id);
     let name = match (active, open || chosen) {
@@ -201,7 +168,7 @@ fn draw_chip(app: &App, b: &mut Buffer, r: Rect, x: u16, chip: &Chip<'_>, now: u
         (true, false) => style(DATA, ground),
         (false, _) => style(GRAY_DIM, ground),
     };
-    at = lamp(b, r, at, skill::name(call), name);
+    at = lamp(b, r, at, &chip.name, name);
     if let Some(age) = age {
         sparks(b, r, x, age, off);
     }

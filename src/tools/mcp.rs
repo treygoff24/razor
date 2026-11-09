@@ -565,7 +565,7 @@ async fn rich(tools: &Tools, at: EntryId, result: CallToolResult) -> Result<Valu
             .map_err(|e| other(e, "Could not save the MCP image."))?;
         images.push(json!({"path": path, "media_type": image.mime_type}));
     }
-    let (output, path) = tools.spill(at, text.join("\n")).await?;
+    let (output, path) = tools.spill(at, None, text.join("\n")).await?;
     let (structured, error) = (result.structured_content, result.is_error.unwrap_or(false));
     Ok(
         json!({"output": output, "path": path, "images": images, "structured": structured, "is_error": error}),

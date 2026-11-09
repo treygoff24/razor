@@ -39,6 +39,7 @@ pub(crate) fn interrupted(gap: Millis) -> Body {
 pub(super) fn context(
     trigger: Trigger,
     note: &str,
+    skills: String,
     files: String,
     asks: Vec<String>,
     calls: Vec<String>,
@@ -68,6 +69,7 @@ pub(super) fn context(
         include_str!("rebuild.md"),
         trigger = trigger,
         note = note,
+        skills = skills,
         files = files,
         asks = lines(asks),
         calls = lines(calls),
@@ -159,4 +161,29 @@ pub(super) fn call(
         None => "no result yet".into(),
     };
     format!("- #{} {name} {input}: {result}", id.0)
+}
+
+pub(super) fn restored_skills(skills: &[(crate::protocol::RestoredSkill, String)]) -> String {
+    use crate::protocol::RestoreOutcome;
+    let mut words = String::new();
+    let mut missing = Vec::new();
+    for (skill, block) in skills {
+        if !block.is_empty() {
+            words.push('\n');
+            words.push_str(block.trim_end());
+            words.push('\n');
+        }
+        match &skill.outcome {
+            RestoreOutcome::Restored { .. } => {}
+            RestoreOutcome::Missing(reason) => missing.push(format!("{} ({reason})", skill.name)),
+            RestoreOutcome::OverCap => missing.push(format!("{} (skill text limit)", skill.name)),
+        }
+    }
+    if !missing.is_empty() {
+        words.push_str(&format!(
+            "\nSkills not restored: {}; load them again with `skill`.\n",
+            missing.join(", ")
+        ));
+    }
+    words
 }

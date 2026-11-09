@@ -322,6 +322,10 @@ pub enum Body {
         trigger: Trigger,
         note: String,
         context: String,
+        #[serde(default)]
+        skills: Vec<RestoredSkill>,
+        #[serde(default)]
+        held: Vec<EntryId>,
         profile_version: String,
         cut: EntryId,
     },
@@ -428,6 +432,37 @@ pub struct Input {
     /// that command rather than Razor's text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) command: Option<Command>,
+}
+
+/// How the session loaded a skill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillHow {
+    Call,
+    Handed,
+}
+
+/// The rebuild's result for one skill in the context it replaced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RestoredSkill {
+    pub name: String,
+    pub how: SkillHow,
+    pub outcome: RestoreOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreOutcome {
+    Restored { from: RestoreSource },
+    Missing(String),
+    OverCap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreSource {
+    Disk,
+    Record,
 }
 
 /// A skill handed with an input, kept as the model received it.

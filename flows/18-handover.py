@@ -13,6 +13,96 @@ from mcp import PNG
 from responses import PLAIN, call, done, response
 import server
 
+# Skills are current text once per rebuilt context on Claude, Responses plain and code mode.
+from terminal import Terminal
+from itertools import count
+for model, code_mode in (("opus", False), ("sol", False), ("sol", True)):
+    ids18 = count()
+    def skill_step(*calls, text="skills18 ready"):
+        if model == "opus":
+            return reply(*[(None, "mcp__razor__" + name, args) for name, args in calls], text=text)
+        if code_mode and calls:
+            code = "\n".join(f"text(await tools.{name}({json.dumps(args)}));" for name, args in calls)
+            return response([{"type": "custom_tool_call", "id": "ct_skills18", "call_id": "skills18_" + str(next(ids18)), "name": "exec", "input": code}])
+        return response([call(name, json.dumps(args), "skills18_" + str(next(ids18))) for name, args in calls]) if calls else done()
+
+    note18 = "Continue checking restored skills."
+    replies18 = [skill_step(("skill", {"name": "kept18"}), ("skill", {"name": "gone18"})), skill_step(), skill_step(),
+                 skill_step(("handover", {"note": note18})), skill_step(),
+                 skill_step(("handover", {"note": note18})), skill_step()]
+    if model == "sol" and not code_mode:
+        replies18 += [response([call("read", json.dumps({"path": "tiny18"}), f"history18_{i}") for i in range(140)]), done()]
+    with flow(replies18, model=model, config="" if code_mode else PLAIN) as f:
+        root = f.cwd / ".agents/skills"
+        for name in ("kept18", "gone18", "handed18", "broken18"):
+            (root / name).mkdir(parents=True)
+            (root / name / "SKILL.md").write_text(f"---\ndescription: Flow skill.\n---\n{name} original instructions\n")
+        server.start(f)
+        sid = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+        path = f"/sessions/{sid}"
+        server.post(f, path + "/input", {"text": "Check skills18.", "skill": "handed18"})
+        server.until(f, sid, lambda es: es[-1]["kind"] == "turn_end")
+        handed18 = server.post(f, path + "/input", {"text": "Check broken18.", "skill": "broken18"})["entry"]
+        server.until(f, sid, lambda es: es[-1]["kind"] == "turn_end" and handed18 in es[-1]["inputs"])
+        (root / "broken18/SKILL.md").write_bytes(b"\xff\xfe")
+        (root / "kept18/SKILL.md").write_text("kept18 updated instructions")
+        (root / "gone18").rename(root / "gone18-away")
+        (root / "handed18").rename(root / "handed18-away")
+        failures18 = []
+        for turn18 in (1, 2):
+            asked18 = server.post(f, path + "/handover", {})["entry"]
+            entries18 = server.until(f, sid, lambda es: es[-1]["kind"] == "turn_end" and asked18 in es[-1]["inputs"])
+            rebuild18 = [e for e in entries18 if e["kind"] == "rebuild"][-1]
+            context18 = rebuild18["context"]
+            request18 = str(json.loads(f.sent()[-1]))
+            row18 = json.loads(server.send(f, "GET", path + "/agent").read())
+            states18 = {s["name"]: s for s in row18.get("skills", [])}
+            checks18 = {
+                "current disk skill in rebuild and provider request": all(context18.count(t) == 1 and t in request18 for t in ('<skill name="kept18">', 'kept18 updated instructions')),
+                "handed fallback appears once": context18.count('<skill name="handed18">') == 1 and "handed18 original instructions" in context18 and '<skill name="handed18">' in request18 and context18.index('<skill name="handed18">') < context18.index("## The latest asks") and any(s["name"] == "handed18" and s["how"] == "handed" for s in rebuild18.get("skills", [])),
+                "restore sources recorded": {s["name"]: s["outcome"] for s in rebuild18.get("skills", []) if s["name"] in ("kept18", "handed18")} == {"kept18": {"restored": {"from": "disk"}}, "handed18": {"restored": {"from": "record"}}},
+                "skill spacing in captured request": note18 + '\n\n<skill' in context18 and '</skill>\n\n<skill' in context18 and json.dumps(context18)[1:-1] in f.sent()[-1],
+                "feed retains worn for one rebuild": list(states18) == (["handed18", "kept18", "gone18", "broken18"] if turn18 == 1 else ["handed18", "kept18"]) and states18["kept18"]["worn"] is None and states18["handed18"]["worn"] is None and (states18["gone18"]["worn"] == rebuild18["at"] if turn18 == 1 else "gone18" not in states18),
+                "unreadable handed file never falls back": '<skill name="broken18">' not in context18 and (states18.get("broken18", {}).get("worn") == rebuild18["at"] and any(s["name"] == "broken18" and isinstance(s["outcome"], dict) and "missing" in s["outcome"] and str(root / "broken18/SKILL.md") in s["outcome"]["missing"] for s in rebuild18.get("skills", [])) if turn18 == 1 else "broken18" not in states18 and all(s["name"] != "broken18" for s in rebuild18.get("skills", []))),
+                "missing never restores or retries": '<skill name="gone18">' not in context18 and ("There is no skill named `gone18`" in context18 if turn18 == 1 else all(s["name"] != "gone18" for s in rebuild18.get("skills", []))),
+            }
+            failures18.extend(f"{model} code={code_mode} rebuild={turn18}: {name}" for name, passed in checks18.items() if not passed)
+        assert not failures18, failures18
+        if model == "sol" and not code_mode:
+            (f.cwd / "tiny18").write_text("tiny")
+            f.ask("--resume", sid, "Fill the recent history so the skill source needs paging.")
+        with Terminal(f, "--resume", sid, rows=40, columns=120) as t:
+            t.until(lambda _: "◉" in t.text() and "○ gone18" not in t.text())
+            t.shown("kept18", "handed18")
+            assert "worn off" not in next(line for line in t.text().splitlines() if "kept18" in line), t.text()
+            t.send("\x1b2")
+            t.until(lambda _: any("kept18" in line and "in context" in line for line in t.text().splitlines()))
+
+# Each large skill uses its own spill file; the total keeps the newest skills and never retries the rest.
+large18 = {f"large18-{i}": f"begin {i}\n" + "é" * 31_000 + f"\nend {i}" for i in range(5)}
+with flow([response([call("skill", json.dumps({"name": name}), f"large18_{i}") for i, name in enumerate(large18)]), done(),
+           response([call("skill", json.dumps({"name": "large18-0"}), "large18_reload")]), done(),
+           response([call("handover", json.dumps({"note": "large skills"}), "large18_note")]), done()], model="sol", config=PLAIN) as f:
+    for name, text in large18.items():
+        where18 = f.cwd / ".agents/skills" / name
+        where18.mkdir(parents=True)
+        (where18 / "SKILL.md").write_text(text)
+    sid = f.ask("Check large18 skill bounds.")["session"]
+    f.ask("--resume", sid, "Reload large18-0 so the cap keeps its latest load.")
+    (f.cwd / ".agents/skills/large18-1/SKILL.md").write_bytes(b"\xff\xfe")  # over cap: never read
+    asked18 = server.post(f, f"/sessions/{sid}/handover", {})["entry"]
+    entries18 = server.until(f, sid, lambda es: es[-1]["kind"] == "turn_end" and asked18 in es[-1]["inputs"])
+    rebuild18 = next(e for e in entries18 if e["kind"] == "rebuild")
+    outcomes18 = {s["name"]: s["outcome"] for s in rebuild18.get("skills", [])}
+    assert list(outcomes18.values()) == [{"restored": {"from": "disk"}}, "over_cap", "over_cap"] + [{"restored": {"from": "disk"}}] * 2, outcomes18
+    assert len(rebuild18["context"]) < 4 * 30_000 + 4_000 and "skill text limit" in rebuild18["context"], len(rebuild18["context"])
+    kept18 = ["large18-0", "large18-3", "large18-4"]
+    for name in kept18:
+        spilled18 = Path(f.env["RAZOR_HOME"]) / "sessions" / sid / "spill" / str(rebuild18["id"]) / name
+        assert str(spilled18) in rebuild18["context"] and spilled18.read_text() == large18[name], spilled18
+    assert [s["worn"] is not None for s in server.agents(f)[sid]["skills"]] == [False, True, True, False, False]
+    assert sorted(p.name for p in spilled18.parent.iterdir()) == kept18, list(spilled18.parent.iterdir())
+
 ask = "Keep this ask verbatim: the silver kingfisher visits at 06:43."
 first_note = "Preserve the user's exact ask; recall entry 2 next."
 handover = reply(("toolu_changed", "Bash", {"command": "printf kingfisher > kingfisher.txt"}),
@@ -27,6 +117,7 @@ with flow([handover] + [Reply((REPLIES / f"{name}.sse").read_bytes()) for name i
     assert len(rebuilds) == 1 and rebuilds[0]["trigger"] == "handover", rebuilds
     assert ask in rebuilds[0]["context"], rebuilds[0]
     assert "?? kingfisher.txt" in rebuilds[0]["context"], rebuilds[0]["context"]
+    assert first_note + "\n\n## Files changed on disk" in rebuilds[0]["context"], rebuilds[0]["context"]
     assert rebuilds[0]["note"] == first_note, rebuilds[0]
     calls = [e for e in entries if e["kind"] == "call"]
     assert [e["call"] for e in calls] == ["toolu_changed", "toolu_handover", "toolu_recall"], calls

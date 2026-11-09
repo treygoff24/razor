@@ -93,8 +93,8 @@ pub(super) enum Direction {
     Older,
     Newer,
     Newest,
-    // The page holding this entry alone, in the window's place; paging goes on from there.
-    At(EntryId),
+    // A page starting at this entry, with whether to open its card once it lands.
+    At(EntryId, bool),
 }
 
 #[derive(Default)]
@@ -196,8 +196,8 @@ pub(super) struct Transcript {
     stops: String,
     // The session can take an input: neither done nor settled, so a worn skill can go back.
     takes: bool,
-    /// Skill names in the order this reading first saw each load, which numbers the lamps.
-    pub(super) skills: Vec<String>,
+    /// The server's ordered skill list supplies both lamps and worn marks.
+    pub(super) skills: Vec<crate::protocol::SkillState>,
     // The session's open asks, as its status row lists them.
     asks: Vec<EntryId>,
     // The open ask the band shows, when it is this session's: it alone takes the two-row form.
@@ -272,6 +272,16 @@ impl Transcript {
         let (rows, cell, _) = self.room;
         let known = &self.pictures;
         pictures::Room { known, rows, cell }
+    }
+    pub(super) fn skills(&mut self, skills: Vec<crate::protocol::SkillState>) {
+        self.dirty = true;
+        self.skills = skills;
+    }
+    pub(super) fn worn_skill(&self, name: &str) -> Option<u64> {
+        self.skills
+            .iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.worn)
     }
     pub(super) fn takes(&mut self, takes: bool) {
         self.dirty |= self.takes != takes;
@@ -468,7 +478,7 @@ impl Transcript {
         }
     }
 
-    /// Borrows one retained call and its decoded result; skills include their first rebuild.
+    /// Borrows a retained call and its result, using the server's skill state for worn marks.
     pub(super) fn call<'a>(
         &'a self,
         entry: &'a Entry,
@@ -480,13 +490,12 @@ impl Transcript {
             None => self.jobs.iter().find(|(_, state)| state.call == entry.id),
         }
         .map(|(id, state)| (*id, state));
-        let worn = matches!(&entry.body, Body::Call { name, .. } if tools::kind(name) == "skill")
-            .then(|| {
-                self.entries
-                    .range(entry.id..)
-                    .find_map(|(_, e)| matches!(e.body, Body::Rebuild { .. }).then_some(e.at))
-            })
-            .flatten();
+        let worn = match &entry.body {
+            Body::Call { name, input, .. } if tools::kind(name) == "skill" => input["name"]
+                .as_str()
+                .and_then(|name| self.worn_skill(name)),
+            _ => None,
+        };
         let mut place = place.cloned().unwrap_or_default();
         // A run the reader unfolded draws each of its calls.
         place.run = place.run.filter(|run| !self.expanded.contains(&run.first));

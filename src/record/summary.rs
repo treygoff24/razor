@@ -77,6 +77,8 @@ pub(crate) struct Summary {
     pub(crate) voice_calls_left_out: usize,
     /// The newest 16 meetings started, in the order they started.
     pub(crate) meetings: Vec<Meeting>,
+    /// At most SKILLS entries, first-load order; bodies stay in their indexed entries.
+    pub(crate) skills: Vec<(EntryId, SkillState)>,
     /// Each call no Result answers yet, oldest first, with its tool's name, `target` and when it
     /// started: the newest of them is what the agent is doing.
     pub(crate) unresolved: Vec<(CallId, EntryId, (String, String, Millis))>,
@@ -201,6 +203,7 @@ impl Summary {
             voice_calls: Vec::new(),
             voice_calls_left_out: 0,
             meetings: Vec::new(),
+            skills: Vec::new(),
             unresolved: Vec::new(),
             cells: Vec::new(),
             waits: Vec::new(),
@@ -379,6 +382,7 @@ impl Summary {
                     ids.retain(|id| !inputs.contains(id));
                 }
                 self.videos.retain(|(id, _)| !inputs.contains(id));
+                self.skills.retain(|(_, s)| !inputs.contains(&s.entry));
                 if inputs.contains(&self.title_input) {
                     self.title.clear();
                     self.title_input = EntryId(0);
@@ -389,8 +393,9 @@ impl Summary {
                 call,
                 outcome,
                 inputs,
+                output,
                 ..
-            } => self.result(call, *outcome, inputs),
+            } => self.result(call, *outcome, inputs, output),
             Body::Job(event @ JobEvent::Started { job, .. }) => {
                 self.next_job = JobId(self.next_job.0.max(job.0 + 1));
                 self.jobs.push(event.clone());
@@ -426,8 +431,22 @@ impl Summary {
             Body::Rebuild {
                 profile_version,
                 cut,
+                skills,
+                held,
                 ..
             } => {
+                self.skills.retain(|(_, skill)| skill.worn.is_none());
+                for (_, skill) in &mut self.skills {
+                    if skill.entry <= *cut
+                        && !held.contains(&skill.entry)
+                        && !skills.iter().any(|r| {
+                            r.name == skill.name
+                                && matches!(r.outcome, RestoreOutcome::Restored { .. })
+                        })
+                    {
+                        skill.worn = Some(entry.at);
+                    }
+                }
                 self.profile_version = profile_version.clone();
                 (self.cut, self.handover) = (*cut, false);
                 self.native = None;
@@ -555,7 +574,15 @@ impl Summary {
     /// A call's Result: it answers the inputs it delivered, a successful upkeep write ends the
     /// reminders, a failed question is no longer open, and an unknown outcome leaves its call
     /// for the turn's end to judge.
-    fn result(&mut self, call: &CallId, outcome: Outcome, inputs: &[EntryId]) {
+    fn result(&mut self, call: &CallId, outcome: Outcome, inputs: &[EntryId], output: &str) {
+        if outcome == Outcome::Success
+            && let Some((_, id, (name, _, at))) = self.unresolved.iter().find(|(c, ..)| c == call)
+            && action(name) == "skill"
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(output)
+            && let Some(name) = value["name"].as_str()
+        {
+            self.loaded_skill(name, *id, *at, SkillHow::Call);
+        }
         if let Some(at) = self.upkeep_writes.iter().position(|id| id == call) {
             self.upkeep_writes.remove(at);
             if outcome == Outcome::Success {
@@ -646,6 +673,9 @@ impl Summary {
     }
 
     fn input(&mut self, id: EntryId, input: &Input) {
+        if let Some(skill) = &input.skill {
+            self.loaded_skill(&skill.name, id, self.at, SkillHow::Handed);
+        }
         if let Some(task) = input.child_task {
             self.child_task = Some(task);
             self.reported = None;

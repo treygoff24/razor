@@ -112,21 +112,34 @@ with flow([done(), done(), done(), done()], model="sol", config="[ui]\nmotion = 
 
 # Hand-back sends only the skill; both the visible draft and its saved copy survive admission.
 import claude
-with flow([claude.reply((None, "mcp__razor__handover", {"note": "hand85"})),
-           claude.reply(text="rebuilt85"), claude.reply(text="handed85")]) as f:
-    path = f.cwd / ".agents/skills/plan"
-    path.mkdir(parents=True)
-    (path / "SKILL.md").write_text("---\ndescription: Plans.\n---\nplan85\n")
-    server.start(f)
-    sid = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
-    server.post(f, f"/sessions/{sid}/input", {"text": "", "skill": "plan"})
-    server.until(f, sid, lambda es: es[-1]["kind"] == "turn_end")
-    with Terminal(f, "--resume", sid, rows=60) as t:
-        t.shown("rebuilt85", "hand it back")
-        t.send("unfinished85")
-        t.shown("unfinished85")
-        draft = lambda: server.send(f, "GET", f"/sessions/{sid}/draft").read()
-        server.wait(lambda: draft() == b"unfinished85")
-        t.click("hand it back")
-        t.shown("handed85", "unfinished85")
-        assert draft() == b"unfinished85", "hand-back discarded the saved draft"
+for handed85 in (False, True):
+    replies85 = ([] if handed85 else [claude.reply((None, "mcp__razor__skill", {"name": "plan"}))])
+    replies85 += [claude.reply(text="loaded85"), claude.reply((None, "mcp__razor__handover", {"note": "hand85"})),
+                  claude.reply(text="rebuilt85"), claude.reply(text="handed85")]
+    with flow(replies85) as f:
+        path = f.cwd / ".agents/skills/plan"
+        path.mkdir(parents=True)
+        (path / "SKILL.md").write_text("---\ndescription: Plans.\n---\nplan85\n")
+        server.start(f)
+        sid = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+        server.post(f, f"/sessions/{sid}/input", {"text": "Load plan.", **({"skill": "plan"} if handed85 else {})})
+        server.until(f, sid, lambda es: es[-1]["kind"] == "turn_end")
+        (path / "SKILL.md").write_bytes(b"\xff\xfe")
+        asked85 = server.post(f, f"/sessions/{sid}/handover", {})["entry"]
+        server.until(f, sid, lambda es: es[-1]["kind"] == "turn_end" and asked85 in es[-1]["inputs"])
+        (path / "SKILL.md").write_text("plan85 restored")
+        with Terminal(f, "--resume", sid, rows=60) as t:
+            t.shown("rebuilt85")
+            if not handed85:
+                t.send("\x1b1")
+            t.shown("hand it back")
+            t.send("unfinished85")
+            t.shown("unfinished85")
+            draft = lambda: server.send(f, "GET", f"/sessions/{sid}/draft").read()
+            server.wait(lambda: draft() == b"unfinished85")
+            t.click("hand it back")
+            t.send("\x1b")
+            t.shown("handed85", "unfinished85")
+            assert draft() == b"unfinished85", "hand-back discarded the saved draft"
+            loaded85 = server.agents(f)[sid]["skills"]
+            assert len(loaded85) == 1 and loaded85[0]["how"] == "handed" and loaded85[0]["worn"] is None, loaded85

@@ -299,3 +299,32 @@ with flow([]) as f:
             watch.sock.settimeout(max(0.001, deadline - time.monotonic()))
     except TimeoutError:
         raise AssertionError("the closed row stayed on its existing stream") from None
+
+# The feed owns skill order, latest-load links and worn state, including after recovery.
+from claude import reply as skill_reply
+with flow([skill_reply(*[(None, "mcp__razor__skill", {"name": f"feed25-{i}"}) for i in range(33)]),
+           skill_reply(text="loaded25"), skill_reply((None, "mcp__razor__handover", {"note": "feed25 note"})),
+           skill_reply(text="rebuilt25"), skill_reply((None, "mcp__razor__skill", {"name": "feed25-1"})),
+           skill_reply(text="reloaded25")]) as f:
+    root = f.cwd / ".agents/skills"
+    for i in range(33):
+        (root / f"feed25-{i}").mkdir(parents=True)
+        (root / f"feed25-{i}/SKILL.md").write_text(f"feed25 instructions {i}")
+    sid = f.ask("Load feed25 skills.")["session"]
+    skills25 = lambda: server.agents(f)[sid].get("skills", [])
+    initial25 = skills25()
+    checks25 = {"newest 32 in first-load order": [s["name"] for s in initial25] == [f"feed25-{i}" for i in range(1, 33)]}
+    checks25["load source and time"] = bool(initial25) and all(s["how"] == "call" and not s["worn"] and s["entry"] > 0 and s["at"] > 0 for s in initial25)
+    (root / "feed25-1").rename(root / "feed25-away")
+    asked25 = server.post(f, f"/sessions/{sid}/handover", {})["entry"]
+    entries25 = server.until(f, sid, lambda es: es[-1]["kind"] == "turn_end" and asked25 in es[-1]["inputs"])
+    worn25 = skills25()
+    checks25["missing worn with original source"] = bool(worn25) and worn25[0]["worn"] == next(e["at"] for e in entries25 if e["kind"] == "rebuild") and worn25[0]["entry"] == initial25[0]["entry"] and not any(s["worn"] for s in worn25[1:])
+    (root / "feed25-away").rename(root / "feed25-1")
+    f.ask("--resume", sid, "Reload feed25-1.")
+    latest25 = skills25()
+    checks25["repeat load keeps slot and clears worn"] = bool(latest25) and [s["name"] for s in latest25] == [s["name"] for s in initial25] and not latest25[0]["worn"] and latest25[0]["entry"] > initial25[0]["entry"]
+    server.stop(f)
+    server.start(f)
+    checks25["state recovered from record"] = bool(latest25) and skills25() == latest25
+    assert all(checks25.values()), [name for name, passed in checks25.items() if not passed]

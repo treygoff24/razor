@@ -148,7 +148,7 @@ pub(super) fn act(app: &mut App, action: Action) {
         Action::Option(_, _) if fresh(app) => {}
         Action::Option(id, n) => super::inputs::admit_answer(app, id, Answer::Option(n)),
         Action::Cut => app.say(CUT),
-        Action::Call(session, id) => held(app, &session, |t| t.toggle(id)),
+        Action::Call(session, id) => super::transcript::jump(app, &session, id, true),
         Action::Chip(at) => app.composer.chosen = Some(at),
         Action::Unfold(session, id) => held(app, &session, |t| t.expand([id], true)),
         Action::Back => focus(app, None),
@@ -192,7 +192,7 @@ pub(super) fn act(app: &mut App, action: Action) {
         Action::TakeBack(input) => super::inputs::take_back(app, input),
         Action::Quote => select::quote(app),
         Action::Jump(session, id) => {
-            super::transcript::jump(app, &session, id);
+            super::transcript::jump(app, &session, id, false);
             app.say(&bindings::text(
                 app,
                 "Jumped in transcript · <transcript.bottom> for latest.",

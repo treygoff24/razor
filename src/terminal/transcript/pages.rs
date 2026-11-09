@@ -22,7 +22,7 @@ impl Transcript {
                     .filter(|(id, _)| **id < self.cursor)?
                     .0,
             ),
-            Direction::Newest | Direction::At(_) => None,
+            Direction::Newest | Direction::At(..) => None,
             _ => return None,
         };
         Some((self.wanted?, at))
@@ -31,7 +31,7 @@ impl Transcript {
     // Before a page folds: the held view keeps the reader's place across it, even when admitting
     // an older page evicts this window's newest end.
     pub(in crate::terminal) fn prepare_page(&mut self, direction: Direction) {
-        if matches!(direction, Direction::Newest | Direction::At(_)) {
+        if matches!(direction, Direction::Newest | Direction::At(..)) {
             self.retain_older = false;
             while !self.entries.is_empty() {
                 self.evict();
@@ -77,7 +77,7 @@ pub(in crate::terminal) fn read_visible(app: &mut App) {
                 Direction::Older => api.page(&id, at.map(|id| id.0), 256).await,
                 Direction::Newer => newer(&api, &id, at.unwrap_or_default()).await,
                 Direction::Newest => api.page(&id, None, 256).await,
-                Direction::At(at) => api.page(&id, Some(at.0 + 1), 1).await,
+                Direction::At(at, _) => newer(&api, &id, EntryId(at.0.saturating_sub(1))).await,
             }
         };
         let timeout = "Reading transcript history timed out; try its page again.";
@@ -144,24 +144,35 @@ fn paged(
     }
     if let Some(t) = app.transcripts.get_mut(&id) {
         t.read_past_metadata();
-        if let Direction::At(at) = direction {
+        if let Direction::At(at, card) = direction {
             (t.wanted, t.held) = (Some(Direction::Older), Some((at, 0)));
+            if card {
+                t.toggle(at);
+            }
         }
     }
 }
 
-/// Jumps `session`'s transcript to entry `id`: a retained one is mounted and held at once;
-/// otherwise the entry is read alone into the window's place, the addressed transcript only.
-pub(in crate::terminal) fn jump(app: &mut App, session: &crate::protocol::SessionId, id: EntryId) {
+/// Jump to an entry, optionally opening its card, using the same paging as history and search.
+pub(in crate::terminal) fn jump(
+    app: &mut App,
+    session: &crate::protocol::SessionId,
+    id: EntryId,
+    card: bool,
+) {
     let Some(t) = app.transcripts.get_mut(session) else {
         return;
     };
     match t.entries.contains_key(&id) {
+        true if card => t.toggle(id),
         true => {
             let after = t.entries.range(id..).filter(|(_, e)| item(e)).count();
             t.mounted = t.mounted.max(after).min(ITEMS);
             (t.held, t.wanted, t.dirty) = (Some((id, 0)), Some(Direction::Older), true);
         }
-        false => t.wanted = Some(Direction::At(id)),
+        false => {
+            t.opened = None;
+            t.wanted = Some(Direction::At(id, card));
+        }
     }
 }

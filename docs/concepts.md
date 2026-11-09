@@ -36,7 +36,8 @@ When a session's context, what its model can hold at once, fills up, Razor start
 - one line for each tool call since your last request;
 - the files changed in the session's folder;
 - the commands still running;
-- its helpers and their states.
+- its helpers and their states;
+- the skills it had loaded, read again from their files (a skill you handed it comes back from its recorded text if its file is gone); any that do not fit are named so the agent can load them again.
 
 Everything earlier stays in the record, one recall away. Razor calls this a rebuild, and the same one happens when you type `/handover`, after a session holding at least 50,000 tokens has sat idle for 50 minutes (`[sessions]` settings), when you switch to a model that cannot continue the conversation, after a restart that the model's own conversation cannot survive, and each night for an always-on agent.
 

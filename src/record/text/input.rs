@@ -81,10 +81,12 @@ pub(crate) fn heard(me: &Summary, dir: &Path, entry: EntryId, mut input: Input) 
 /// The resolved skill ahead of the person's words; old records already carry it in `text`.
 pub(crate) fn skill(skill: Option<&crate::protocol::InputSkill>, text: String) -> String {
     match skill {
-        Some(skill) => format!(
-            "<skill name=\"{}\">\n{}\n</skill>\n\n{text}",
-            skill.name, skill.text
-        ),
+        Some(skill) => {
+            format!(
+                "<skill name=\"{}\">\n{}\n</skill>\n\n{text}",
+                skill.name, skill.text
+            )
+        }
         None => text,
     }
 }

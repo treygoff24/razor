@@ -1,7 +1,7 @@
 //! Rebuilds read only their asks, continuation note and settled calls through the index.
 
 use super::{Error, Record, io, text};
-use crate::protocol::{Body, BridgeInput, Entry, EntryId, Input, Trigger, now};
+use crate::protocol::{Body, BridgeInput, Entry, EntryId, Input, RestoredSkill, Trigger, now};
 use std::collections::{BTreeMap, HashMap};
 use std::{path::Path, process::Stdio, time::Duration};
 use tokio::{io::AsyncReadExt, process::Command};
@@ -22,8 +22,10 @@ impl Record {
         note: Option<String>,
         cut: EntryId,
         held: &[EntryId],
-    ) -> Result<(String, String, Vec<BridgeInput>), Error> {
+        tools: &crate::tools::Tools,
+    ) -> Result<(String, String, Vec<BridgeInput>, Vec<RestoredSkill>), Error> {
         let (note, shown) = self.note(note).await?;
+        let (skills_text, skills) = self.restored_skills(tools, cut, held).await?;
         let mut asks: Vec<_> = self
             .summary
             .asks
@@ -43,7 +45,8 @@ impl Record {
         }
         let (me, dir) = (&self.summary, &self.dir);
         for id in &asks[split..] {
-            if let Body::Input(input) = self.entry(*id).await?.body {
+            if let Body::Input(mut input) = self.entry(*id).await?.body {
+                input.skill = None;
                 let input = text::heard(me, dir, *id, input);
                 lines.push(text::ask(*id, &input.text));
                 lines.extend(input.images.iter().map(|image| text::image(&image.path)));
@@ -55,7 +58,8 @@ impl Record {
             .iter()
             .filter(|(id, _)| *id <= cut && !held.contains(id))
         {
-            if let Body::Input(input) = self.entry(*id).await?.body {
+            if let Body::Input(mut input) = self.entry(*id).await?.body {
+                input.skill = None;
                 let mut input = text::heard(me, dir, *id, input);
                 if asks[split..].contains(id) {
                     (input.text, input.images) = (String::new(), Vec::new());
@@ -74,12 +78,14 @@ impl Record {
             text::context(
                 trigger,
                 &shown,
+                skills_text,
                 changed_files(&self.summary.cwd).await,
                 lines,
                 calls,
                 me,
             ),
             videos,
+            skills,
         ))
     }
 
@@ -219,7 +225,6 @@ async fn changed_files(cwd: &Path) -> String {
 fn rendered(id: EntryId, input: Input) -> Result<String, Error> {
     let from = serde_json::to_string(&input.from)
         .map_err(|e| io("rendering an input's origin")(std::io::Error::other(e)))?;
-    let text = text::skill(input.skill.as_ref(), input.text);
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = input.text.split_whitespace().collect::<Vec<_>>().join(" ");
     Ok(text::input(id, &from, &text))
 }

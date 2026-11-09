@@ -2,6 +2,17 @@
 
 What changed in each Razor release. [Configuration](docs/configuration.md) and the other pages in [docs](docs/README.md) describe each feature in full.
 
+## 0.5.0 (8 November 2026)
+
+### New
+
+- After a rebuild or `/handover`, an agent gets back the skills it had loaded, read again from their files; a skill you handed it comes back from its recorded text if its file is gone. Any that do not fit are named so the agent can load them again, and the terminal's skill lamps mark the ones that wore off ([Concepts](docs/concepts.md#when-the-context-fills)).
+- **For scripts and apps reading the agents feed and the record:** each agent on the agents feed has `skills`, the skills in its context (`name`, `entry`, `at`, `how`, and `worn` once it wore off), and a rebuild entry has `skills` (`name`, `how`, `outcome`) and `held`, the inputs waiting to be sent that it left out. Older apps ignore the new fields.
+
+### Fixed
+
+- On a busy night, dreaming could leave older sessions out of its input and never read them. It now lists every session since the last pass and includes each one's digest within its input limit, so it also recalls less.
+
 ## 0.4.0 (8 November 2026)
 
 ### New

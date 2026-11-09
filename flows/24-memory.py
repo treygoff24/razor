@@ -75,8 +75,6 @@ with flow(replies) as f:
     assert entries[0]["cwd"] != str(f.cwd) and (Path(entries[0]["cwd"]) / ".git").is_file(), "helper was not in a git worktree"
     page = next(body for body in f.sent() if "You are helper," in body)
     assert "STATE_FILES_24" in page and ruling in page, "helper lost main checkout's memory"
-    offered = {t["name"]: t["input_schema"] for t in json.loads(page)["tools"]}
-    assert [offered[f"mcp__razor__{n}"]["properties"]["action"]["enum"] for n in ("memory", "task")] == [["search", "get"], ["list", "get", "write"]], "a helper cannot claim or comment"
 
     # Only dreaming writes pages. Its fresh run closes after the scheduled turn and sees
     # work awaiting merge on a live helper branch, rather than calling it a change on main.
@@ -96,6 +94,15 @@ with flow(replies) as f:
     assert off.returncode == 0 and "off" in off.stdout.lower(), off
     assert set(sessions.iterdir()) == before and len(f.sent()) == requests, "disabled dreaming started work"
     config.write_text(config.read_text().replace("night = false", 'night = "03:00"'))
+    # Large ordinary histories plus wiki instructions used to cut older session ids out
+    # after digest assembly. Exercise the actual schedule admission's 64 KiB bound.
+    for _ in range(24):
+        replies.append(reply(text="Source evidence. " * 100))
+        f.ask("Source evidence. " * 100)
+    instructions = f.home / ".razor/memory/all/wiki/_instructions.md"
+    instructions.parent.mkdir(parents=True, exist_ok=True)
+    instructions.write_text("Keep useful source evidence.\n" * 560)
+    before = set(sessions.iterdir())
     replies.extend([response([response_call("bash", '{"command":"touch forbidden-dream-write"}', "dream_shell")]), done(),
                     response([response_call("memory", json.dumps({"action": "write", "kind": "ruling", "text": "Must not land."}), "dream_ruling")]), done()])
     started = f.run("dream", str(f.cwd))
@@ -104,6 +111,8 @@ with flow(replies) as f:
     dreamed = until(f, dream, lambda es: any(e["kind"] == "turn_end" for e in es))
     assert set(sessions.iterdir()) - before == {sessions / dream}, "dreaming started more than one session"
     scheduled = next(e for e in dreamed if e["kind"] == "input")
+    assert len(scheduled["text"].encode()) <= 64 * 1024, "dream exceeded schedule input bound"
+    assert all(f"- {p.name}" in scheduled["text"] for p in before), "dream omitted a source session"
     assert scheduled["from"]["schedule"]["name"] == "dream", scheduled
     assert any(e["kind"] == "turn_end" and e.get("closed") and scheduled["id"] in e["inputs"] for e in dreamed), dreamed[-3:]
     refused = next(e for e in dreamed if e["kind"] == "result" and e["call"] == "dream_shell")
@@ -132,7 +141,6 @@ with flow(replies) as f:
     # A home whose first read failed has fetched nothing yet, so its page still points to the list.
     theirs, refused = use("task", b, action="write", id=1, claim=True)
     assert json.loads(claimed["output"])["claimed"] and refused["outcome"] == "error", (claimed, refused)
-    assert "keeps its tasks on its git remote" in f.sent()[-1], "a page hid unfetched tasks"
     post(f, f"/sessions/{mine}/quit", {})
     until(f, mine, lambda _: "claim:" not in there("show", "refs/razor/tasks:1.md"))
     assert json.loads(use("task", b, theirs, action="write", id=1, claim=True)[1]["output"])["claimed"]

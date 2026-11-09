@@ -54,8 +54,8 @@ file_long = "A memory with its citations and header is at most 17 KiB; shorten i
 scope = "A replacement stays in the original memory's scope; set all to match it."
 pages_full = "A wiki holds at most 200 pages; merge or retire a page first."
 instructions = "The person's wiki instructions cannot be changed through memory."
-dream_input = "{prompt}\n\nOptional wiki instructions:\n{instructions}\n\nMemory contents:\n{index}\n\nChanged sources:\n{cites}"
-dream_sessions = "Sessions since the last dream; read each with recall {session}:"
+dream_input = "{prompt}\n\nOptional wiki instructions:\n{instructions}\n\nChanged sources:\n{cites}\n\nMemory contents:\n{index}"
+dream_sessions = "Sessions since the last dream, newest first. Every id is listed first, then digest slices share the remaining input. Any session without a digest requires recall {session}:"
 dream_omitted = "({n} lines omitted; use memory search and recall for more.)"
 
 kind = "Writing memory needs kind; retiring with replaces and no text does not."

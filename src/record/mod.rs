@@ -7,6 +7,7 @@ mod rebuild;
 mod reply;
 mod runs;
 mod search;
+mod skills;
 mod summary;
 mod text;
 pub(crate) use calls::{action, ask, target};
@@ -15,7 +16,7 @@ pub(crate) use digest::digest;
 pub(crate) use reply::{Hold, reply, shown};
 pub use search::backfill;
 pub(crate) use search::search;
-pub(crate) use summary::{ChildSummary, Meeting, MeetingState, Summary, preview};
+pub(crate) use summary::{ChildSummary, Meeting, MeetingState, Summary};
 pub(crate) use text::{call_line, calls_left_out, handover, heard, interrupted, length};
 
 use crate::protocol::{

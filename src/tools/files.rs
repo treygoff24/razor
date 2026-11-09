@@ -1,7 +1,7 @@
 //! `read`, `write`, `edit` and `skill`.
 
 use super::{Error, Tools, io, load, other};
-use crate::protocol::{EntryId, IMAGE_BYTES, SPILL, image_type};
+use crate::protocol::{EntryId, IMAGE_BYTES, RestoreOutcome, RestoreSource, SPILL, image_type};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf};
@@ -171,7 +171,7 @@ pub(super) async fn edit(tools: &Tools, input: Edit) -> Result<Value, Error> {
 pub(super) async fn skill(tools: &Tools, at: EntryId, input: Skill) -> Result<Value, Error> {
     let dirs = tools.state().config.skills.clone();
     let (dir, text) = find_skill(dirs, &input.name).await?;
-    let (output, path) = tools.spill(at, text).await?;
+    let (output, path) = tools.spill(at, None, text).await?;
     Ok(json!({"name": input.name, "dir": dir, "output": output, "path": path}))
 }
 
@@ -186,16 +186,59 @@ pub(crate) async fn find_skill(dirs: Vec<PathBuf>, name: &str) -> Result<(PathBu
             "A skill's name is a bare directory name, such as `writing`.".into(),
         ));
     }
+    let file = locate(dirs, name)
+        .await
+        .ok_or_else(|| Error::Refused(format!("There is no skill named `{name}`.")))?;
+    let text = load(&file, &file.to_string_lossy()).await?;
+    Ok((file.parent().unwrap_or(&file).into(), text))
+}
+
+/// The first skill file, without reading its text; absence and a failed read stay distinct.
+async fn locate(dirs: Vec<PathBuf>, name: &str) -> Option<PathBuf> {
     for dir in dirs {
-        let (dir, file) = (dir.join(name), dir.join(name).join("SKILL.md"));
+        let file = dir.join(name).join("SKILL.md");
         if tokio::fs::try_exists(&file).await.unwrap_or(false) {
-            return Ok((dir, load(&file, name).await?));
+            return Some(file);
         }
     }
-    Err(Error::Refused(format!("There is no skill named `{name}`.")))
+    None
 }
 
 impl Tools {
+    /// Reload a skill for a rebuild, using a handed copy only when its file is absent.
+    pub(crate) async fn restore_skill(
+        &self,
+        at: EntryId,
+        name: &str,
+        handed: Option<String>,
+        limit: usize,
+    ) -> Result<(RestoreOutcome, String), Error> {
+        let dirs = self.state().config.skills.clone();
+        let (from, text) = match locate(dirs, name).await {
+            Some(file) => (
+                RestoreSource::Disk,
+                load(&file, &file.to_string_lossy()).await?,
+            ),
+            None => (
+                RestoreSource::Record,
+                handed
+                    .ok_or_else(|| Error::Refused(format!("There is no skill named `{name}`.")))?,
+            ),
+        };
+        let count = text.chars().count();
+        let prefix = if count > SPILL {
+            let path = self.dir.join("spill").join(at.0.to_string()).join(name);
+            format!("Full skill text: {}\n\n", path.display())
+        } else {
+            String::new()
+        };
+        if count.min(SPILL) + prefix.chars().count() > limit {
+            return Ok((RestoreOutcome::OverCap, String::new()));
+        }
+        let (text, _) = self.spill(at, Some(name), text).await?;
+        Ok((RestoreOutcome::Restored { from }, prefix + &text))
+    }
+
     /// The startup page's skill list: the first 100 of the described folders' skills with their
     /// descriptions. Lookup-only folders stay available through `skill`. None when empty.
     pub(crate) async fn skills(&self) -> Option<String> {

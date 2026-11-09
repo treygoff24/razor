@@ -555,19 +555,6 @@ pub(crate) fn dream_sessions_heading() -> &'static str {
     &TEXT.dream_sessions
 }
 
-/// A schedule input is bounded at 64 KiB; keep whole lines and report the omitted count.
-pub(crate) fn dream_text(text: &str) -> String {
-    let (text, more) = files::fit(text.lines().map(str::to_owned), (usize::MAX, 63 * 1024));
-    if more == 0 {
-        text
-    } else {
-        format!(
-            "{text}\n{}",
-            TEXT.dream_omitted.replace("{n}", &more.to_string())
-        )
-    }
-}
-
 /// The server-created dreaming run, from its schedule input or resident fresh-run job.
 pub(crate) fn dreaming(summary: &crate::record::Summary) -> bool {
     summary.scheduled.contains_key("dream")

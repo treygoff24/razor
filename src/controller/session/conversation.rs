@@ -587,7 +587,10 @@ impl Session {
         let held: Vec<_> = (self.pending.iter().chain(&batch))
             .map(|(id, _)| *id)
             .collect();
-        let (note, mut context, videos) = self.record.rebuild(trigger, note, cut, &held).await?;
+        let (note, mut context, videos, skills) = self
+            .record
+            .rebuild(trigger, note, cut, &held, &self.tools)
+            .await?;
         let cwd = &self.record.summary().cwd;
         let event = Before::Rebuild {
             trigger,
@@ -598,6 +601,8 @@ impl Session {
             trigger,
             note,
             context: context.clone(),
+            skills,
+            held: held.clone(),
             profile_version: self.profile.version.clone(),
             cut,
         };

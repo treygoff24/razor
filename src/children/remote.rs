@@ -598,6 +598,7 @@ pub(crate) fn child(parent: &SessionId, fact: &ChildSummary) -> AgentView {
         changed_file_count: 0,
         changed_file_first: None,
         calls: Vec::new(),
+        skills: Vec::new(),
         doing: None,
         hour: None,
         calls_made: 0,

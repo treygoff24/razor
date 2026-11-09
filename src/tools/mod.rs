@@ -387,14 +387,21 @@ impl Tools {
 
     /// Bound a text the controller made itself (a recalled entry). A text of at most `SPILL`
     /// characters comes back unchanged, with no path. A longer text is written to
-    /// `dir/spill/<at>`, and its last `SPILL` characters come back with that path.
-    async fn spill(&self, at: EntryId, text: String) -> Result<(String, Option<PathBuf>), Error> {
+    /// `dir/spill/<at>` (or its named subpath), and returns its last `SPILL` characters.
+    async fn spill(
+        &self,
+        at: EntryId,
+        subpath: Option<&str>,
+        text: String,
+    ) -> Result<(String, Option<PathBuf>), Error> {
         let count = text.chars().count();
         if count <= SPILL {
             return Ok((text, None));
         }
         let dir = self.dir.join("spill");
         let path = dir.join(at.0.to_string());
+        let path = subpath.map_or(path.clone(), |subpath| path.join(subpath));
+        let dir = path.parent().unwrap_or(&dir);
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| other(e, "Could not make the spill directory."))?;

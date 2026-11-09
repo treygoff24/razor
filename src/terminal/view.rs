@@ -376,6 +376,13 @@ pub(super) fn transcript(
     let identity = agent.map(|a| (a.window, a.name.clone()));
     let working = agent.is_some_and(|a| a.state == State::Working);
     let takes = super::inputs::takes(agent);
+    let skills = agent
+        .filter(|a| {
+            app.transcripts
+                .get(id)
+                .is_some_and(|t| t.skills != a.skills)
+        })
+        .map(|a| a.skills.clone());
     let asks = agent.map_or_else(Vec::new, |a| a.asks.iter().map(|q| q.id.1).collect());
     // A rejected usage window not yet past its reset: the latest reset, if any is given.
     let usage = agent.map_or(&[][..], |a| &a.usage[..]);
@@ -402,6 +409,9 @@ pub(super) fn transcript(
     };
     t.stops(stop.as_deref().unwrap_or_default());
     t.takes(takes);
+    if let Some(skills) = skills {
+        t.skills(skills);
+    }
     let band = app.shown_ask.as_ref().filter(|q| &q.id.0 == id);
     t.asks(asks, band.map(|q| q.id.1));
     t.limit(rejected, now);

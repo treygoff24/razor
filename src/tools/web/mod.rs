@@ -128,7 +128,9 @@ pub(super) async fn run(
                     Some(find) if verb == "fetch" => matching(&text, find),
                     _ => text,
                 };
-                let (mut output, path) = tools.spill(at, redact(format!("{name}\n{text}"))).await?;
+                let (mut output, path) = tools
+                    .spill(at, None, redact(format!("{name}\n{text}")))
+                    .await?;
                 if path.is_some() {
                     // A spill keeps the text's end; the provider still comes first.
                     output = format!("{name}\n{output}");

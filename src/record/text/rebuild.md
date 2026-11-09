@@ -3,7 +3,7 @@ The context was rebuilt from this session's record because {trigger}. This is a 
 ## Continuation note
 
 {note}
-{files}
+{skills}{files}
 ## The latest asks
 
 {asks}

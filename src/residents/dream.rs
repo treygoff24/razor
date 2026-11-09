@@ -67,7 +67,7 @@ impl Residents {
         if due.is_some_and(|d| d <= p.since) {
             return Ok(json!({"already_run": true}));
         }
-        let mut lines = Vec::new();
+        let mut sessions = Vec::new();
         for id in &p.sessions {
             let Ok(summary) = c.summary(id).await else {
                 continue;
@@ -75,18 +75,38 @@ impl Residents {
             if crate::memory::dreaming(&summary) {
                 continue;
             }
-            let name = summary.name;
-            let reply = self.reply(id).await;
-            lines.push(format!("- {id} {name}: {reply}"));
+            sessions.push((summary.at, id));
         }
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.0));
         let text = c.memory().dream_input(c, &p.root).await;
-        let text = format!(
+        let ids = sessions
+            .iter()
+            .map(|(_, id)| format!("- {id}\n"))
+            .collect::<String>();
+        let mut text = format!(
             "{text}\n\n{}\n{}",
             crate::memory::dream_sessions_heading(),
-            lines.join("\n")
+            ids
         );
-        let text = crate::memory::dream_text(&text);
-        if due.is_some() && lines.is_empty() {
+        const INPUT_BYTES: usize = 64 << 10; // The schedule-input limit, including every id.
+        let room = INPUT_BYTES.checked_sub(text.len() + 128).ok_or_else(|| {
+            Error::Refused(
+                "Dreaming's instructions and session ids exceed 64 KiB; shorten the instructions."
+                    .into(),
+            )
+        })?;
+        let count = sessions.len().min(room / 256);
+        let bytes = (room / count.max(1)).min(24 << 10);
+        if count < sessions.len() {
+            text.push_str("\nOldest sessions have ids alone; recall each one.\n");
+        }
+        for (_, id) in sessions.iter().take(count) {
+            let digest = crate::record::digest(c.home(), id, bytes.saturating_sub(32))
+                .await
+                .map_err(other("reading a dreaming digest"))?;
+            text.push_str(&format!("\n- {id}\n{digest}"));
+        }
+        if due.is_some() && sessions.is_empty() {
             return Ok(json!({"inactive": true}));
         }
         let at = now();
