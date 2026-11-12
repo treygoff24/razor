@@ -1,6 +1,7 @@
-//! The API server (docs/design/api.md): HTTP and NDJSON streams under `/v1`, on the local socket
-//! and an optional tailnet address, every request carrying a device key. Also its client half (how
-//! a command reaches it, `--print`, `razor login`, `razor devices`) and `razor doctor`.
+//! The API server (docs/design/api.md): HTTP and NDJSON streams under `/v1`, on the local socket,
+//! every request carrying a device key, and on the network endpoint, to enrolled keys. Also its
+//! client half (how a command reaches it, `--print`, `razor login`, `razor devices`) and `razor
+//! doctor`.
 
 mod agents;
 mod call;
@@ -12,7 +13,8 @@ mod load;
 mod marks;
 pub mod mcp;
 mod meetings;
-mod pair;
+mod network;
+mod pairing;
 mod peers;
 #[cfg(target_os = "macos")]
 mod power;
@@ -44,12 +46,12 @@ use axum::http::{Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
-use axum::serve::ListenerExt;
 pub use client::{
-    Connection, DEVICES_USE, connect, connection, devices, enroll, find, login, newest, revoke,
-    turn, voice,
+    Connection, DEVICES_USE, connect, connection, devices, enroll, login, newest, revoke, turn,
+    voice,
 };
 use futures_util::{FutureExt, Stream, StreamExt, stream};
+pub use pairing::{add_command, join_command};
 pub(crate) use ready::credentials;
 pub use ready::doctor;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -62,7 +64,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
@@ -96,9 +98,6 @@ struct App {
     meetings: Arc<meetings::Kept>,
     /// This home's id.
     id: Arc<str>,
-    /// Public identity fixed at startup; the listener's address once bound.
-    name: Arc<str>,
-    address: Arc<std::sync::OnceLock<std::net::SocketAddr>>,
     /// Serializes settings and the daily count on their owner through durable replacement.
     voice: Arc<Mutex<()>>,
     /// On the voice owner, the latest input of at most 64 terminals on any server naming it,
@@ -115,16 +114,15 @@ struct App {
 /// `razor serve`: this home's one server, until SIGTERM.
 /// - Raises the soft limit on open files to the hard one, at most 65,536, and holds `server.lock`
 ///   until the process exits.
-/// - Listens on `home/server.sock`, replacing a stale file, and on `server.address`, the tailnet
-///   address, when one is set.
-/// - Makes `server.id` at the first start and writes `server.json`: `{pid, address}`. The
-///   controller has already opened device enrollment and keys through `crate::devices`.
-/// - Every request must carry `Authorization: Bearer <key>`: the local key or an enrolled
-///   device's. A body is at most 32 MiB.
+/// - Listens on `home/server.sock`, replacing a stale file, and on its network endpoint.
+/// - Makes `server.id` at the first start and writes `server.json`: `{pid}`. The controller has
+///   already opened device enrollment and keys through `crate::devices`.
+/// - A request on the socket must carry `Authorization: Bearer <key>`: the local key or an
+///   enrolled program's; one on the network comes from an enrolled key. A body is at most 32 MiB.
 /// - ChatGPT sign-in shares the controller's Responses client and authentication mutex.
 /// - Sends to Apple's push service beside serving.
-/// - Returns once SIGTERM comes and the live calls have ended, recorded and charged, or 20
-///   seconds have passed.
+/// - Returns once SIGTERM comes, the live calls have ended, recorded and charged, or 20 seconds
+///   have passed, then gives the network up to `controller::CLOSE_TIMEOUT` to tell connected peers.
 pub async fn serve(home: PathBuf) -> Result<(), Error> {
     raise_open_files();
     config::make_home(&home).map_err(refused)?;
@@ -135,14 +133,16 @@ pub async fn serve(home: PathBuf) -> Result<(), Error> {
     let responses = Arc::new(Responses::new(home.clone()).map_err(refused)?);
     let controller = Controller::start(home.clone(), responses.clone());
     let controller = controller.await.map_err(refused)?;
-    let server = controller.config().await.server;
+    // The first read of the settings names the residents and opens the network endpoint, before
+    // any request can ask for either.
+    controller.config().await;
     let residents = Residents::open(controller.clone());
     tokio::spawn(crate::residents::desktop(home.clone()));
     let shutdown = async move {
         terminate.recv().await;
     };
-    let served = listen(home, server, controller, residents, responses, shutdown).await;
-    served.map_err(|e| Error::Refused(format!("The API server stopped: {e}")))
+    let served = listen(home, controller, residents, responses, shutdown);
+    (served.await).map_err(|e| Error::Refused(format!("The API server stopped: {e}")))
 }
 
 /// A failure before serving, in its own sentence.
@@ -170,27 +170,16 @@ fn raise_open_files() {
     }
 }
 
-/// Serves until `shutdown` resolves and the live calls have ended.
+/// Serves until `shutdown` resolves and the live calls have ended, then closes the network while
+/// serving still holds its connections, so the controller sees which peers to tell.
 async fn listen(
     home: PathBuf,
-    server: config::Server,
     controller: Controller,
     residents: Residents,
     responses: Arc<Responses>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), Error> {
-    let (address, deliveries) = (server.address, controller.deliveries());
-    if let Some(address) = &address {
-        let port = address
-            .rsplit_once(':')
-            .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
-        if !port {
-            return Err(Error::Refused(
-                "server.address must be a host:port, for example desk:7433.".into(),
-            ));
-        }
-    }
-    let name = server.name.into();
+    let deliveries = controller.deliveries();
     let devices = controller.devices().clone();
     let id = crate::devices::kept(&home.join(ID), 16, "Reading or making server.id").await?;
     let socket = home.join(SOCKET);
@@ -199,7 +188,7 @@ async fn listen(
     let local = UnixListener::bind(&socket).map_err(|e| {
         Error::Refused(format!("Razor cannot listen on {}: {e}.", socket.display()))
     })?;
-    let found = json!({ "pid": std::process::id(), "address": null });
+    let found = json!({ "pid": std::process::id() });
     save(&home, "server.json", found.to_string().as_bytes())
         .await
         .map_err(other("Writing server.json"))?;
@@ -218,8 +207,6 @@ async fn listen(
         views: Arc::new(views::Kept::open(&home).await),
         meetings: Arc::new(meetings::Kept::open().await),
         id: id.into(),
-        name,
-        address: Arc::default(),
         creations: Arc::default(),
         voice: Arc::default(),
         activity: Arc::default(),
@@ -235,9 +222,11 @@ async fn listen(
         }));
     let router = routes(&app);
     let local = axum::serve(local, router.clone()).into_future();
-    let served = async { tokio::try_join!(local, network(&app, address, router)).map(drop) };
+    let served = async { tokio::try_join!(local, network::serve(&app, router)).map(drop) };
+    // Borrowed, so the peers' connections it holds are still open when shutdown tells them.
+    tokio::pin!(served);
     tokio::select! {
-        served = served => served.map_err(other("Serving the API")),
+        served = &mut served => served.map_err(other("Serving the API")),
         () = push::send(app.clone()) => Ok(()),
         () = peers::run(app.clone()) => Ok(()),
         () = views::run(app.clone()) => Ok(()),
@@ -245,6 +234,7 @@ async fn listen(
         () = shutdown => {
             app.calls.send_replace(true);
             let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, app.calls.closed()).await;
+            app.controller.shutdown().await;
             Ok(())
         }
     }
@@ -271,10 +261,11 @@ fn routes(app: &App) -> Router {
             "/v1/sessions/{id}/deliveries/{entry}/archive",
             put(delivery_archive).delete(delivery_archive),
         )
+        .route("/v1/sessions/{id}/voice/{entry}", post(speech::note))
+        .route("/v1/mcp", post(mcp))
         .route_layer(middleware::from_fn_with_state(app.clone(), peers::forward))
         .route("/v1/sessions/{id}/call", get(call::upgrade))
         .merge(meetings::routes())
-        .route("/v1/sessions/{id}/voice/{entry}", post(speech::note))
         .route("/v1/views", get(views::route).put(views::route))
         .route("/v1/status", get(status::status))
         .merge(residents::routes())
@@ -295,15 +286,11 @@ fn routes(app: &App) -> Router {
         .route("/v1/voice", get(voice::get).put(voice::put))
         .route("/v1/voice/voices", get(voice::voices))
         .route("/v1/voice/reserve", post(voice::reserve))
+        .route("/v1/pairing", post(pairing::add))
+        .route("/v1/pairing/join", post(pairing::join))
+        .route("/v1/network", get(network::diagnostics))
         .route("/v1/devices", get(devices::list).post(devices::enroll))
-        .route("/v1/discover", get(pair::discover))
         .route("/v1/device", get(devices::identity))
-        .route(
-            "/v1/pair",
-            get(pair::identity)
-                .post(pair::hold)
-                .layer(DefaultBodyLimit::max(1024)),
-        )
         .route("/v1/devices/{name}", delete(devices::revoke))
         .route(
             "/v1/devices/self/push",
@@ -322,7 +309,6 @@ fn routes(app: &App) -> Router {
             post(mail).layer(DefaultBodyLimit::max(MAIL_BYTES)),
         )
         .route("/v1/login", post(sign_in))
-        .route("/v1/mcp", post(mcp))
         .route("/v1/mcp/callback", get(mcp_callback))
         .fallback(|| async { Refusal(StatusCode::NOT_FOUND, "There is no such route.".into()) })
         .layer(DefaultBodyLimit::max(BODY_BYTES))
@@ -332,56 +318,6 @@ fn routes(app: &App) -> Router {
             devices::authorize,
         ))
         .with_state(app.clone())
-}
-
-/// Serves `router` on `server.address`, trying again every 5 seconds until it can listen there,
-/// then publishes the bound address in `server.json`; with no address, never resolves.
-async fn network(app: &App, address: Option<String>, router: Router) -> io::Result<()> {
-    let Some(address) = address else {
-        return std::future::pending().await;
-    };
-    let mut first = true;
-    let remote = loop {
-        match TcpListener::bind(&address).await {
-            Ok(remote) => break remote,
-            Err(e) => {
-                if first {
-                    eprintln!(
-                        "Razor is not listening on server.address {address}: {e}; retrying every 5 seconds."
-                    );
-                    first = false;
-                }
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        }
-    };
-    let bound = remote.local_addr()?;
-    let _ = app.address.set(bound);
-    if !first {
-        eprintln!("Razor is now listening on server.address {address} ({bound}).");
-    }
-    let found = json!({"pid": std::process::id(), "address": bound.to_string()});
-    save(&app.home, "server.json", found.to_string().as_bytes()).await?;
-    // Streaming small writes must not wait for a peer's delayed acknowledgment, and a
-    // peer that vanished without closing (a phone that lost its network) is let go about
-    // two minutes after it last answered: keepalive probes an idle connection after 60
-    // seconds, every 15, four times; on Linux, writes unacknowledged for 120 seconds end
-    // one that is never idle, as a stream with heartbeats is, which keepalive never probes.
-    let remote = remote.tap_io(|tcp| {
-        let (tcp, secs) = (socket2::SockRef::from(&*tcp), Duration::from_secs);
-        let probes = socket2::TcpKeepalive::new().with_time(secs(60));
-        let probes = probes.with_interval(secs(15)).with_retries(4);
-        drop(tcp.set_tcp_nodelay(true));
-        drop(tcp.set_tcp_keepalive(&probes));
-        #[cfg(target_os = "linux")]
-        drop(tcp.set_tcp_user_timeout(Some(secs(120))));
-    });
-    axum::serve(
-        remote,
-        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .into_future()
-    .await
 }
 
 /// A client's own id for an input or a creation: 1 to 64 ASCII letters, digits and `-`.
@@ -589,6 +525,8 @@ struct Page {
     #[serde(default)]
     heartbeat: bool,
     #[serde(default)]
+    avatars: bool,
+    #[serde(default)]
     views: bool,
     #[serde(default)]
     terminal: bool,
@@ -609,6 +547,11 @@ async fn mail(
     Extension(devices::Enrolled(server)): Extension<devices::Enrolled>,
     Json(mail): Json<Mail>,
 ) -> Reply {
+    if let Some(name) = &server
+        && app.devices.peer(name).await.is_none()
+    {
+        return Err(bad("Only a directly paired server can send server mail."));
+    }
     let (session, entry) =
         crate::children::receive(&app.controller, mail, server.as_deref()).await?;
     Ok(Json(json!({ "session": session, "entry": entry })))

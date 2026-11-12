@@ -88,11 +88,14 @@ pub(crate) struct Hold {
     held: String,
     /// `held` starts with a complete, valid marked line, followed only by blank text.
     marked: bool,
+    /// Words of this reply have been shown.
+    begun: bool,
 }
 
 impl Hold {
-    /// The words of `delta` to show now, after any held ones that proved not to be a suggestion.
-    pub(crate) fn push(&mut self, delta: &str) -> String {
+    /// The words of `delta` to show now, after any held ones that proved not to be a suggestion,
+    /// and whether they are the first shown.
+    pub(crate) fn push(&mut self, delta: &str) -> (String, bool) {
         let mut shown = String::new();
         for piece in delta.split_inclusive('\n') {
             let (words, done) = (piece.trim_end_matches('\n'), piece.ends_with('\n'));
@@ -129,7 +132,8 @@ impl Hold {
                 (self.line, self.long) = (String::new(), false);
             }
         }
-        shown
+        let start = !(shown.is_empty() || std::mem::replace(&mut self.begun, true));
+        (shown, start)
     }
 }
 

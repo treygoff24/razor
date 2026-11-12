@@ -168,11 +168,16 @@ impl Api {
         Ok(detail)
     }
 
-    /// Renames the addressed session; a refusal is the API's own sentence.
-    pub async fn rename(&self, session: &SessionId, name: String) -> Result<(), Error> {
-        let path = format!("v1/sessions/{session}/name");
+    /// Sets the addressed session's name or avatar; a refusal is the API's own sentence.
+    pub async fn rename(
+        &self,
+        session: &SessionId,
+        field: &str,
+        name: String,
+    ) -> Result<(), Error> {
+        let path = format!("v1/sessions/{session}/{field}");
         let request = self.request(Method::PUT, &path)?.body(name);
-        let failed = "The rename request failed; reconnect and check the session's name.";
+        let failed = "The session change failed; reconnect and check its name or avatar.";
         read(Self::send(request, 30, failed).await?).await.map(drop)
     }
 
@@ -326,7 +331,7 @@ impl Api {
             loop {
                 let path = match &session {
                     Some(id) => format!("v1/sessions/{id}/events?after={after}&terminal=true"),
-                    None => "v1/status?views=true&heartbeat=true".into(),
+                    None => "v1/status?views=true&heartbeat=true&avatars=true".into(),
                 };
                 let ended = api
                     .lines(Method::GET, &path, &session, &mut after, &tx, &budget)

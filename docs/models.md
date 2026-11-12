@@ -2,16 +2,29 @@
 
 A Claude subscription or a ChatGPT subscription is enough to run Razor; no API key is needed. An API key for almost any provider works too, a company's AI gateway included ([Providers](#providers)). Razor reaches Claude through Anthropic's Agent SDK, GPT through OpenAI's Responses API, and every other model through an OpenAI-compatible chat endpoint; a provider says which of the three its models speak. Each session runs on one model at a time: switch with `/model` in the terminal app, start on one with `razor --model <name>`, or set the default with `model` in your settings. With no `model` set, new sessions start on `opus` at `high` effort.
 
-The names in the table are the short names Razor accepts: `opus`, `sonnet`, `haiku` and `fable` are Anthropic's model families, and `sol`, `terra`, `luna` and `astra` stand for OpenAI models listed under [GPT](#gpt).
+The names in the table are model families. A family name follows that family's newest release as Razor's updates move it, so a session on `opus` uses a new Opus on its next turn after such an update; a full id with a version, such as `claude-opus-5-5`, stays on that release ([Family names](#family-names)).
 
 | Family | Names | Sign-in | What it costs |
 | --- | --- | --- | --- |
 | Claude | `opus`, `sonnet`, `haiku`, `fable`, or a full `claude-…` id | Claude's own sign-in, run by `razor setup` (`--console` for a Console account) | Your Claude plan's usage limits; or API prices on an Anthropic Console account or key |
-| GPT | `sol`, `terra`, `luna`, `astra`, or a full GPT id that `/model` lists | `razor login` | Your ChatGPT plan's usage limits |
-| Gemini, DeepSeek, GLM | `gemini-3.8-flash`, `deepseek-v4.1-flash-1017`, `glm-5.3-flash` | The provider's API key | The provider's API prices |
+| GPT | `sol`, `terra`, `luna`, `astra`, or an exact GPT id | `razor login` | Your ChatGPT plan's usage limits |
+| Gemini, DeepSeek, GLM | `gemini`, `deepseek`, `glm` | The provider's API key | The provider's API prices |
 | Any provider's model | `<provider>/<id>`, such as `openai/gpt-6.1-sol` or `gateway/my-model` | The provider's API key, or none | Whatever that provider charges; nothing for a model on your own machine |
 
 Effort, how much work the model puts into each step, is `low`, `medium`, `high`, `xhigh` or `max`, set with `/effort` or `--effort`. Some chat models stop below `max`; asking for more gives them their highest.
+
+## Family names
+
+Choose Fable, Opus, Sonnet, Haiku, Sol, Terra, Luna, Astra, Gemini, DeepSeek or GLM. The model
+list offers these families first, followed by configured provider models.
+Full ids with a version still work when typed and in settings, but the list does not offer them.
+`/model Claude Fable`, `/model Fable` and `/model fable` all choose `fable`;
+`GPT 6.1 Sol` and `sol` choose `sol`. Names ignore case, spaces and hyphens, vendor
+words and version numbers. A lowercase full id with a version, such as
+`gpt-6.1-sol` or `claude-fable-5-2`, stays on that release. Unknown names and
+`<provider>/<id>` names pass through unchanged, leaving provider IDs intact.
+
+A session keeps the family it was given, and its status shows the release that actually answered its last turn beside it when the provider reported one, after a restart too. Settings may name a model either way; a `[models]` row under a family name wins over one under the release the family stands for today, and the two rows are never combined.
 
 ## Claude
 
@@ -33,7 +46,7 @@ razor login
 
 It prints a link and a code: open `https://auth.openai.com/codex/device`, enter the code, and Razor saves the sign-in in `~/.razor/auth.json` and refreshes it by itself. `/login` in the terminal app does the same. This is the sign-in OpenAI's Codex uses, and usage counts against your ChatGPT plan; when the plan's limit is reached, the request fails at once rather than retrying.
 
-The short names stand for full model ids: `sol` is `gpt-6.1-sol`, `terra` is `gpt-6.1-terra`, `luna` is `gpt-6-luna` and `astra` is `gpt-6-astra`. If you chose only ChatGPT in setup and your settings named no model, setup set `model = "sol"`.
+The names `sol`, `terra`, `luna` and `astra` track the latest models of those families. The family table in `src/profiles/models.rs` chooses each request's full ID; a session retains the family name, and its status shows the ID actually served. If you chose only ChatGPT in setup and your settings named no model, setup set `model = "sol"`.
 
 On the sign-in, GPT runs in code mode by default, as Codex runs these models: it sees an `exec` tool that runs JavaScript against Razor's tools, so it can batch independent reads in one call, and a `wait` tool for a run that is still going. `[profiles.codex] code_mode = false` gives it plain function tools instead.
 
@@ -64,7 +77,7 @@ A provider is where a group of models is reached: the API it speaks, its address
 | `google` | OpenAI-compatible chat | `https://generativelanguage.googleapis.com/v1beta/openai` | `GEMINI_API_KEY` |
 | `runinfra` | OpenAI-compatible chat | `https://api.runinfra.ai/v1` | `RUNINFRA_API_KEY` |
 
-The shipped chat models run on these: `gemini-3.8-flash` on `google`, `deepseek-v4.1-flash-1017` and `glm-5.3-flash` on `runinfra`. Any other provider is a `[providers.<name>]` table in your settings, and a session names its models `<provider>/<id>`, the id being what the provider calls the model:
+The shipped chat models run on these: `gemini` (today `gemini-3.8-flash`) on `google`, `deepseek` (`deepseek-v4.1-flash-1017`) and `glm` (`glm-5.3-flash`) on `runinfra`. Any other provider is a `[providers.<name>]` table in your settings, and a session names its models `<provider>/<id>`, the id being what the provider calls the model:
 
 ```toml
 # ~/.razor/config.toml

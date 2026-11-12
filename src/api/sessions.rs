@@ -37,6 +37,7 @@ pub(super) fn routes() -> Router<App> {
         )
         .route("/v1/sessions/{id}/settings", get(settings))
         .route("/v1/sessions/{id}/name", put(rename))
+        .route("/v1/sessions/{id}/avatar", put(avatar))
         .route("/v1/sessions/{id}/seen", put(seen))
 }
 
@@ -47,13 +48,17 @@ async fn models(State(app): State<App>, Query(q): Query<Page>) -> Reply<crate::p
     let (mut windows, mut efforts) = (BTreeMap::new(), BTreeMap::new());
     let mut unavailable = BTreeMap::new();
     let mut speeds = BTreeMap::new();
+    let labels = (models.iter())
+        .filter_map(|m| Some((m.clone(), profiles::label(m)?.into())))
+        .collect();
     let checks = if q.ready {
         let sign_in = config.claude.sign_in.is_empty().then_some(&[][..]);
         ready::credentials(&app.home, sign_in, Some(Duration::from_secs(2))).await
     } else {
         BTreeMap::new()
     };
-    for name in &models {
+    // Defaults can be explicit pins, whose metadata clients need without offering them.
+    for name in models.iter().chain([&config.model, &config.call_model]) {
         let (window, _) = profiles::limits(name, &config, None);
         windows.extend(window.map(|window| (name.clone(), window)));
         let route = profiles::model(name, &config);
@@ -85,6 +90,7 @@ async fn models(State(app): State<App>, Query(q): Query<Page>) -> Reply<crate::p
         call_effort: config.call_effort,
         speed: config.speed,
         speeds,
+        labels,
     }))
 }
 
@@ -364,8 +370,14 @@ async fn entries(
     Ok(([(header::CONTENT_TYPE, NDJSON)], Body::from_stream(lines)).into_response())
 }
 
-async fn digest(State(app): State<App>, Path(id): Path<SessionId>) -> Reply<String> {
-    let text = crate::record::digest(&app.home, &id, 24 * 1024)
+/// A session's digest, in at most `limit` bytes when that is under the 24 KiB every digest fits.
+async fn digest(
+    State(app): State<App>,
+    Path(id): Path<SessionId>,
+    Query(q): Query<Page>,
+) -> Reply<String> {
+    let bytes = q.limit.unwrap_or(usize::MAX).min(24 * 1024);
+    let text = crate::record::digest(&app.home, &id, bytes)
         .await
         .map_err(controller::Error::from)?;
     Ok(Json(text))
@@ -442,6 +454,21 @@ async fn task(State(app): State<App>, Path((id, n)): Path<(SessionId, u32)>) -> 
 /// The person's rename; the body is the new name.
 async fn rename(State(app): State<App>, Path(id): Path<SessionId>, name: String) -> Reply {
     crate::children::rename(&app.controller, &id, &name).await?;
+    Ok(Json(json!({})))
+}
+
+/// Selects a configured avatar, or clears the session choice with an empty body.
+async fn avatar(State(app): State<App>, Path(id): Path<SessionId>, name: String) -> Reply {
+    let name = name.trim();
+    let avatars = app.controller.config().await.brand.avatars;
+    if !name.is_empty() && !avatars.contains_key(name) {
+        return Err(bad(
+            "That avatar picture is not available; choose an available name or send an empty name to clear it.",
+        ));
+    }
+    app.controller
+        .append(&id, crate::protocol::Body::Avatar { name: name.into() })
+        .await?;
     Ok(Json(json!({})))
 }
 

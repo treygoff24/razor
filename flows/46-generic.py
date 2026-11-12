@@ -200,7 +200,7 @@ with flow([reply(LOCAL, call(0, "local_write", "write", '{"path":"local.txt","co
     meta = json.loads((f.requests / "001.json").read_text())
     assert meta["path"] == "/chat/completions" and meta["headers"]["authorization"] == "Bearer flow-local-key", meta
     models = json.loads(send(f, "GET", "/models").read())
-    assert {LOCAL, OPEN} <= set(models["models"]) and models["windows"][LOCAL] == 200 and models["windows"][GEMINI] == 4096, models
+    assert {LOCAL, OPEN} <= set(models["models"]) and models["windows"][LOCAL] == 200 and models["windows"]["gemini"] == 4096, models
     result = f.run("--model", OPEN, "--print=json", "Reply without a key.")
     opened = json.loads(result.stdout)
     assert result.returncode == 0 and opened["message"] == old, result

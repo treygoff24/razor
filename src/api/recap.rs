@@ -40,15 +40,15 @@ pub(super) async fn recap(
     let asked = async {
         let evidence = evidence(&app, &summary, after).await?;
         let config = app.controller.config().await;
-        let mut route = profiles::model(&summary.model, &config).ok()?;
+        let route = profiles::model(&summary.model, &config).ok()?;
         // Trey, 2026-11-04: "Claude sessions should use haiku medium, gpt sessions terra low"; a
         // provider's session uses its own model there, never a second provider (6 Nov 2026).
-        let endpoint = &mut route.endpoint;
-        match (endpoint.transport, &endpoint.key) {
-            (Transport::Claude, None) => endpoint.id = "haiku".into(),
-            (Transport::Responses, None) => endpoint.id = profiles::id("terra".into()),
-            _ => {}
-        }
+        let name = match (route.endpoint.transport, &route.endpoint.key) {
+            (Transport::Claude, None) => "haiku",
+            (Transport::Responses, None) => "terra",
+            _ => &summary.model,
+        };
+        let route = profiles::model(name, &config).ok()?;
         let (home, cwd) = (&app.home, &summary.cwd);
         let asked = super::ready::answer(home, &app.responses, cwd, &route, &id, PROMPT, &evidence);
         asked.await.ok()

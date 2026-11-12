@@ -1,7 +1,7 @@
 //! Device authorization, enrollment routes and phone notification settings.
 use super::{App, Refusal, Reply, bad};
-use crate::protocol::{Device, Follow, Notifications, Push, SessionId};
-use crate::{config, devices::Devices};
+use crate::devices::Devices;
+use crate::protocol::{Device, Follow, Notifications, Push, PushService, SessionId};
 use axum::{
     extract::{Extension, Json, Path, Request, State},
     http::{StatusCode, header},
@@ -10,26 +10,19 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::{
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
-};
+use std::sync::Arc;
 const FOLLOWS: usize = 8;
 const MUTED: usize = 256;
 
-/// The check every request passes: its bearer key is the local key or an enrolled device's. The
-/// request then carries that device's channel, which its streams watch.
+/// The check every request passes: over the network, the connection's enrolled key; on the
+/// socket, its bearer key is the local key or an enrolled program's. The request then carries
+/// that device's channel, which its streams watch.
 pub(super) async fn authorize(
     State(devices): State<Arc<Devices>>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let method = request.method();
-    let path = request.uri().path();
-    if (method == axum::http::Method::GET && path == "/v1/mcp/callback")
-        || (path == "/v1/pair"
-            && matches!(*method, axum::http::Method::GET | axum::http::Method::POST))
-    {
+    if request.method() == axum::http::Method::GET && request.uri().path() == "/v1/mcp/callback" {
         return next.run(request).await;
     }
     let given = request
@@ -39,7 +32,11 @@ pub(super) async fn authorize(
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default()
         .as_bytes();
-    let Some((gone, name)) = devices.authorize(given).await else {
+    let enrolled = match request.extensions().get::<super::network::Device>() {
+        Some(device) => devices.network(device.0).await,
+        None => devices.authorize(given).await,
+    };
+    let Some((gone, name)) = enrolled else {
         let sentence = "This request needs a device key that works: Authorization: Bearer <key>.";
         return Refusal(StatusCode::UNAUTHORIZED, sentence.into()).into_response();
     };
@@ -66,74 +63,16 @@ pub(super) async fn identity(
     Ok(Json(json!(app.devices.identity(&name).await)))
 }
 
-/// A device to enroll: another server has an address, and its pairing's key when the other
-/// side made it.
+/// A program to enroll, with the key it will send, or a fresh one.
 #[derive(Deserialize)]
 pub(super) struct Name {
     name: String,
-    address: Option<String>,
     key: Option<String>,
 }
 
-/// Answers the device with its key and, for one with no address, `pairing`: the line the phone
-/// app pairs from, when `server.address` is a machine name.
-pub(super) async fn enroll(
-    State(app): State<App>,
-    Json(Name { name, address, key }): Json<Name>,
-) -> Reply {
-    let own = app.address.get().copied();
-    if address.is_some() && app.devices.quiet.load(std::sync::atomic::Ordering::Relaxed) {
-        return Err(Refusal(StatusCode::FORBIDDEN, crate::devices::QUIET.into()));
-    }
-    if address.is_some() && own.is_none() {
-        return Err(bad(
-            "This server has no listening address; check server.address, restart Razor, then pair.",
-        ));
-    }
-    let (key, answered, request) = match (&address, key, own) {
-        (Some(address), None, Some(own)) => match app.devices.answered(address, own).await {
-            Some(key) => (Some(key), true, false),
-            None => (None, false, true),
-        },
-        (_, key, _) => (key, false, false),
-    };
-    let device = app.devices.enroll(name, address, key).await?;
-    let server = app.controller.config().await.server;
-    let line = device
-        .address
-        .is_none()
-        .then(|| pairing(&app.id, &server, device.key.as_deref().unwrap_or_default()))
-        .flatten();
-    let mut answer = json!(device);
-    answer["pairing"] = json!(line);
-    let requested = match (&device.address, own, &device.key) {
-        (Some(address), Some(own), Some(key)) if request => {
-            app.devices.ask(address, &own.to_string(), key).await
-        }
-        _ => false,
-    };
-    answer["own"] = json!(own);
-    answer["requested"] = json!(requested);
-    answer["answered"] = json!(answered);
-    Ok(Json(answer))
-}
-
-/// `razor://pair?id=…&label=…&address=…&key=…`, its query form-encoded; None when
-/// `server.address` is empty or an IP address, which the phone does not accept.
-fn pairing(id: &str, server: &config::Server, key: &str) -> Option<String> {
-    let address = server.address.as_deref().filter(|a| {
-        !a.is_empty() && a.parse::<SocketAddr>().is_err() && a.parse::<IpAddr>().is_err()
-    })?;
-    let mut line = reqwest::Url::parse("razor://pair").ok()?;
-    let label = super::label(server);
-    let fields = [
-        ("id", id),
-        ("label", &label),
-        ("address", address),
-        ("key", key),
-    ];
-    line.query_pairs_mut().extend_pairs(fields);
-    Some(line.into())
+/// Answers the enrolled program with its key.
+pub(super) async fn enroll(State(app): State<App>, Json(Name { name, key }): Json<Name>) -> Reply {
+    Ok(Json(json!(app.devices.enroll(name, key).await?)))
 }
 
 pub(super) async fn revoke(State(app): State<App>, Path(name): Path<String>) -> Reply {
@@ -148,9 +87,10 @@ pub(super) async fn register(
     Extension(device): Extension<Enrolled>,
     Json(push): Json<Push>,
 ) -> Reply {
-    let (name, environment) = (phone(device, &push)?, push.environment);
-    app.devices.change(&name, |d| d.push = Some(push)).await?;
-    Ok(Json(super::push::unsent(&app, environment).await))
+    let name = phone(device, &push)?;
+    let answer = super::push::unsent(&app, &push).await;
+    app.devices.register(&name, push).await?;
+    Ok(Json(answer))
 }
 
 pub(super) async fn unregister(
@@ -198,7 +138,8 @@ pub(super) async fn follow(
     Path(session): Path<SessionId>,
     Json(push): Json<Push>,
 ) -> Reply {
-    let (name, environment) = (phone(device, &push)?, push.environment);
+    let name = phone(device, &push)?;
+    let answer = super::push::unsent(&app, &push).await;
     let summary = app.controller.summary(&session).await?;
     if summary.child.is_some() || app.residents.timed(&summary).await {
         let sentence = "Only a top-level session that is not a resident is followed.";
@@ -211,7 +152,7 @@ pub(super) async fn follow(
             d.follows.drain(..d.follows.len().saturating_sub(FOLLOWS));
         })
         .await?;
-    Ok(Json(super::push::unsent(&app, environment).await))
+    Ok(Json(answer))
 }
 
 pub(super) async fn unfollow(
@@ -227,13 +168,22 @@ pub(super) async fn unfollow(
     Ok(Json(json!({})))
 }
 
-/// The enrolled device a registration came from, once its token is one Apple could have made.
+/// The enrolled device a registration came from, once its service and token are valid.
 fn phone(device: Enrolled, push: &Push) -> Result<String, Refusal> {
     let name = enrolled(device)?;
-    let hex = push.token.bytes().all(|b| b.is_ascii_hexdigit());
+    let valid = match (push.service, push.environment) {
+        (PushService::Apns, Some(_)) => push.token.bytes().all(|b| b.is_ascii_hexdigit()),
+        (PushService::Fcm, None) => push
+            .token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':')),
+        _ => false,
+    };
     // Apple's tokens are opaque and vary in length: a simulator's Live Activity token is 256.
-    if push.token.is_empty() || push.token.len() > 1024 || !hex {
-        return Err(bad("A push token is at most 1,024 hex digits."));
+    if push.token.is_empty() || push.token.len() > 1024 || !valid {
+        return Err(bad(
+            "Use an APNs hex token with its environment, or an FCM token without an environment; tokens have 1–1,024 characters.",
+        ));
     }
     Ok(name)
 }

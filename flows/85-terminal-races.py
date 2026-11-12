@@ -138,7 +138,7 @@ for handed85 in (False, True):
             draft = lambda: server.send(f, "GET", f"/sessions/{sid}/draft").read()
             server.wait(lambda: draft() == b"unfinished85")
             t.click("hand it back")
-            t.send("\x1b")
+            if not handed85: t.send("\x1b")  # closes the card; with none open Escape stops the turn
             t.shown("handed85", "unfinished85")
             assert draft() == b"unfinished85", "hand-back discarded the saved draft"
             loaded85 = server.agents(f)[sid]["skills"]

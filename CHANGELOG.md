@@ -2,6 +2,59 @@
 
 What changed in each Razor release. [Configuration](docs/configuration.md) and the other pages in [docs](docs/README.md) describe each feature in full.
 
+## 0.6.0 (12 November 2026)
+
+### New
+
+- Custom avatars. The starter skill `agent-avatar` helps an agent make one from a picture generated on your ChatGPT sign-in, check it and install it; `[brand.avatars]` names each picture, `/avatar <name>` gives one to a session, and an always-on agent's `avatar` setting gives one to it and its threads. The terminal's workshop scene draws them; the phone and Mac apps will in a later build and draw the usual creature until then ([Configuration](docs/configuration.md#the-terminal-app)).
+- An always-on agent keeps its own memory beside its project's: its own state note, rulings, facts and pages, which only its sessions read ([Memory](docs/memory.md#an-always-on-agents-own-memory)).
+- Shared memory works between people. Each change is committed as you, a ruling belongs to the person who added it, and only they retire or replace it; when people disagree, each one's agents follow their own person, and a new ruling citing you can settle the others' rulings, which their next session asks them about. When a repository you cloned already shares memory or tasks, a startup page asks once whether to join ([Memory](docs/memory.md#sharing-with-other-people)).
+- A project whose memory is shared gets one nightly pass among your paired servers that can reach each other, which reads your sessions from all of them, instead of one pass on each; a server none of them reaches runs its own ([Memory](docs/memory.md#several-machines)).
+- In a shared task list, a task can be addressed to one person with `for`: it shows as a question on their startup page alone, with the agent's reading of any term it was unsure of ([Memory](docs/memory.md#questions-for-another-person)).
+- Every session starts with the project's glossary, the wiki page `glossary`, so agents use the project's terms as defined; dreaming keeps it ([Memory](docs/memory.md#the-glossary)).
+- An agent can start a helper on a task. The helper claims it in its own project, on whichever server it runs; its report becomes a comment on the task when its parent settles it, and merging a helper that reported finished closes the task ([Memory](docs/memory.md#tasks)).
+- Android notifications: a server given Firebase credentials sends the Android app's alerts and followed sessions through Firebase Cloud Messaging, ready for the app's update that reaches this release ([Configuration](docs/configuration.md#android-push-notifications)).
+- `razor doctor` shows this server's network key, its relay connection and, for each paired server, whether it is reached directly or through a relay, with the round trip ([Troubleshooting](docs/troubleshooting.md#more-machines)).
+- The starter pack ends every conversation's opening with `code-quality.md`, seven lines on writing simple, deep code.
+
+### Changed
+
+- Razor's machines and apps reach each other only by key, over connections encrypted end to end, and Razor no longer needs Tailscale or any VPN. The server no longer listens for plain HTTP at `[server] address`, and pairing by address, `razor devices find` and setup's question about other machines are gone ([More machines](docs/machines.md)).
+- To update: run `razor update` and `razor restart` on every machine. If you were given a relay address, set it on each with `razor config set network.relays '["…"]'` before pairing anything ([Running your own relay](docs/relay.md)). Then pair every server and app again once by code, under the name `razor devices` already lists for it, so a phone keeps its notification settings: `razor devices add <name>` shows a code, then run `razor devices join <name>` on the other server and paste it, or scan it in the app's Settings ([More machines](docs/machines.md#servers-and-apps-paired-by-an-earlier-version)).
+- A phone or Mac app from before this release cannot reach a server on this release and shows itself signed out until you update it and pair it again by code.
+- A relay that admits only its own people takes one password per person, written into the relay address in that person's `[network] relays`; `razor doctor` and pairing's refusals show the address without it ([Running your own relay](docs/relay.md)).
+- `[server] address` is no longer used: a config that sets it still loads, and `razor doctor` asks you to remove it. A `[remote]` that holds `address` and `key` no longer stops the server; starting a session says to name the paired server instead, as `server = "<name>"`.
+- A settings error names the key and never repeats the value you gave, so a password or key typed in the wrong place stays out of `razor config`, `razor doctor`, the server log and the terminal's notices.
+- The Android app does not reach a server on this release until its next update.
+- Model names are families: when an update to Razor moves a family to a newer release, a session on `fable`, `opus` or `sol` uses it on its next turn, and a full id with a version stays where it is. Gemini, DeepSeek and GLM are families too (`gemini`, `deepseek`, `glm`), the picker lists families first, then the provider models you configured, and a session's status shows the model that actually answered beside its choice, when the provider reported one ([Models and sign-in](docs/models.md#family-names)).
+- `fable` runs Fable 5.2, through Claude Agent SDK 0.3.321. Fast works on its full id, `claude-fable-5-2`, too, and the speed picker shows Fable 5.2's Fast price.
+- A ruling is now one short plain rule, written by the agent, citing your message; Razor copies your exact words in beneath it. Dreaming may merge, refine or retire your rulings from those words, and asks you only when two of them truly contradict ([Memory](docs/memory.md#how-your-decisions-become-rulings)).
+- Memory refuses text that looks like an API key or a private key, without repeating it, and dreaming retires an older memory holding one so you can rotate the key ([Memory](docs/memory.md#keys-and-secrets)).
+- Dreaming skips folders that no longer exist and temporary or cache folders, and a dreaming session closes at the end of every turn, one you opened by answering it included ([Memory](docs/memory.md#dreaming)).
+- When a session closes for good, Razor stops and discards the helpers it never settled, keeping each one's uncommitted work on its branch; a helper it cannot reach or preserve stays unsettled. Closing for being idle keeps them.
+- A message you send while an agent works reaches it with a line asking for an answer before its next step, and an agent that was only waiting for a helper or a command is told to answer you and end its turn rather than wait again, so its answer reaches you instead of staying in its thinking.
+- A session closing with `/done` while it works stays under Working in the agents list until it closes, instead of moving among the idle ones.
+- A repository is named by its main checkout's folder, not by its origin's address, so its worktrees and a clone whose origin has another name keep the name you see on disk.
+- `[sessions] handover_minutes` and `close_minutes` take fractions of a minute: `0.1` is six seconds ([Configuration](docs/configuration.md#models-and-sessions)).
+- A stopping server tells the devices connected to it why their connection ended.
+- Releases ship agent-browser 0.42.0, its latest, in place of 0.41.2: it keeps literal text exact when it fills or types, keeps fractional coordinates, reuses or relaunches a browser session more reliably, and tells agents to prefer snapshots to screenshots.
+- Releases ship Cua Driver 0.47.18, Cua's newest, in place of 0.44.0: it refuses input to macOS security and consent prompts, waits for a control to become enabled after bringing its app forward, sends a middle click to the right window on macOS, and works with more Linux desktops (Hyprland, GNOME and KWin after an update).
+- **For programs reaching the API from another machine:** the plain HTTP address and its device key are gone, so a dashboard or script that used `http://<address>` stops reaching Razor. A program on the same machine uses the local socket ([Scripting](docs/scripting.md#from-another-machine-or-program)); one elsewhere needs Razor's network library.
+- **For scripts and apps reading devices and settings:** a device has no `address`; a paired server or app has `keys`, its network keys, and a server also its `server_id`, and no listing shows a device's relays. `/v1/pair` and `/v1/discover` are gone; `POST /v1/devices` takes `name` and an optional `key`, for a program on the local socket, and answers with the device alone, without `pairing`, `own`, `requested` or `answered`. The terminal offers a pairing code with `POST /v1/pairing`, joins with one through `POST /v1/pairing/join` and reads `GET /v1/network` for doctor; all three take only the local key on the socket. `server.json` holds only `pid`, and a session's settings answer leaves out `[network]`.
+- **For scripts and apps reading the record:** `model` keeps the chosen family (`sol`, not `gpt-6.1-sol`) in a session's start, its inputs and each turn's end, and a turn's end adds `served_model` when the provider reported its id. A session's first entry may carry `project_root`, and a new `avatar` entry records a session's avatar.
+- **For scripts and apps reading the agents feed:** a row has `closing_working`, true while a session asked to close as it worked, and may have `served_model` and `avatar`. The `agents` line's `brand` carries `resident_avatars`, and the pictures themselves with `?avatars=true` ([Scripting](docs/scripting.md#the-local-api)). `GET /v1/models` adds `labels`, each family's display name.
+- **For scripts and apps reading the status stream and a session's events:** a `delta` carries `start` on the first words of each reply block, so a reader that joins mid-reply knows where the next reply begins.
+- **For apps registering for notifications:** a registration names its `service`, `apns` unless it says `fcm`, and an FCM token has no `environment`.
+
+### Fixed
+
+- A resident lost its shell and the other tools a dream may not use after its first night of dreaming, and stayed that way through restarts and `razor --resume`: its own conversation was mistaken for the dream it had started. It keeps its tools now, and a resident already stuck gets them back on its next message after you update and restart Razor, with nothing to repair by hand.
+- A phone paired again under a new name, with the same notification token, got each notification twice. A token now belongs to the last device that registered it.
+- A session could stay working with nothing running, and never answer your next message, after a rebuild (at a handover, the context threshold, the night or a restart) while a call had details the agent had not yet been sent.
+- A phone that opened a session while the agent was replying could drop that whole reply, and so could one watching when a Claude reply was cut off after its first words and tried again.
+- Stopping the server could leave behind a Claude Code process that did not answer its close; the Claude bridge now waits for the SDK to end it. `razor stop`, `razor restart` and `razor install` still wait only a bounded time, now including up to three seconds to tell connected devices.
+- With shared memory, two machines writing at the same moment could get "the remote did not answer" when the second should simply have tried again; it now does.
+
 ## 0.5.0 (8 November 2026)
 
 ### New

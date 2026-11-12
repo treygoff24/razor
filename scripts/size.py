@@ -10,9 +10,10 @@ ROWS = {"Protocol": "src/protocol", "Session": "src/controller", "Record": "src/
         "Context": "src/profiles", "Model": "src/responses src/claude bridge",
         "Tool": "src/tools src/code_mode", "Shell": "src/shell",
         "Children": "src/children src/residents src/memory src/launcher.rs",
-        "API": "src/api src/config src/devices.rs src/main.rs src/lib.rs", "Extension": "src/extensions",
-        "Terminal": "src/terminal", "Flows": "flows scripts eval", "Performance": "perf"}
-COMMENTS = {".rs": "//", ".ts": "//", ".js": "//", ".py": "#", ".sh": "#"}
+        "API": "src/api src/config src/devices.rs src/devices src/main.rs src/lib.rs", "Extension": "src/extensions",
+        "Terminal": "src/terminal", "Network": "network", "Flows": "flows scripts eval", "Performance": "perf",
+        "Skill": "packs"}
+COMMENTS = {".rs": "//", ".ts": "//", ".js": "//", ".py": "#", ".sh": "#", ".swift": "//"}
 
 root = Path(__file__).resolve().parents[1]
 section = (root / "SPEC.md").read_text().split("## 6. Budgets", 1)[1].split("## 7.", 1)[0]

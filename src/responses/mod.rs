@@ -37,6 +37,7 @@ pub struct Responses {
 /// A completed response: its done items in output order, with every native field kept.
 #[derive(Default)]
 struct Response {
+    model: Option<String>,
     items: Vec<Value>,
     usage: Usage,
     end_turn: bool,

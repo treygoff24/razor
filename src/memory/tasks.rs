@@ -32,6 +32,12 @@ pub(super) struct Edit {
     blocked_by: Option<Vec<u32>>,
     /// An empty one clears it.
     due: Option<String>,
+    /// The resident whose task it is, left off other sessions' startup pages; empty clears it.
+    resident: Option<String>,
+    /// The person sharing the project who must answer it, by the name or email of their commits:
+    /// a question on their startup page, left off everyone else's; empty clears it.
+    #[serde(rename = "for")]
+    pub(super) asks: Option<String>,
     pub(super) claim: Option<bool>,
     /// A child's write may release only its own claim. Never the model's to set.
     #[serde(skip)]
@@ -44,8 +50,8 @@ pub(super) struct Edit {
     /// The due date a reminder went out for, so it goes out once. Never the model's to set.
     #[serde(skip)]
     pub(super) notified: Option<String>,
-    /// A session whose claim this claim may take over: the parent starting its child on the
-    /// task. Never the model's to set.
+    /// The session and server ids of the parent whose claim this start may take over.
+    /// Never the model's to set.
     #[serde(skip)]
     pub(super) from: Option<String>,
     /// The header the task must still have, as read when the server decided on the change: a
@@ -320,7 +326,7 @@ pub(super) fn get(dir: &Path, id: u32) -> Answer {
 /// `from`'s, a header still `seen`, and the whole file within what a read holds. Every file is
 /// replaced by one rename, the comment first and the close last. The answer is the task's
 /// number and title, and `claimed` for a claim.
-pub(super) fn apply(dir: &Path, server: &str, who: &str, e: &Edit) -> Answer {
+pub(super) fn apply(dir: &Path, who: &str, e: &Edit) -> Answer {
     let (all, t) = (scan(dir, false)?, &*TEXT);
     let mut task = match e.id.map(|id| (id, all.binary_search_by_key(&id, |t| t.id))) {
         None => Task::read(all.last().map_or(1, |t| t.id + 1), true, ""),
@@ -339,6 +345,8 @@ pub(super) fn apply(dir: &Path, server: &str, who: &str, e: &Edit) -> Answer {
     let long = |s: &Option<String>| s.as_ref().is_some_and(|s| s.len() > 16 << 10);
     let blank = e.comment.as_ref().is_some_and(|c| c.trim().is_empty());
     let fits = (e.title.is_some() || e.id.is_some()) && line(&e.title, 200) && line(&e.close, 500);
+    let fits = fits && (e.resident.as_deref() == Some("") || line(&e.resident, 64));
+    let fits = fits && (e.asks.as_deref() == Some("") || line(&e.asks, 200));
     if !fits || long(&e.text) || long(&e.comment) || blank || e.priority.is_some_and(|p| p > 4) {
         return Err(refuse(&t.bounds));
     }
@@ -355,7 +363,7 @@ pub(super) fn apply(dir: &Path, server: &str, who: &str, e: &Edit) -> Answer {
         return Err(missing(n));
     }
     let mine = |held: &&str| {
-        let from = e.from.as_deref().is_some_and(|f| ids(held) == (f, server));
+        let from = e.from.as_deref().is_some_and(|f| ids(held) == ids(f));
         ids(held) == ids(who) || from
     };
     let claim = e.claim.filter(|claim| *claim || e.own);
@@ -377,6 +385,8 @@ pub(super) fn apply(dir: &Path, server: &str, who: &str, e: &Edit) -> Answer {
         ("parent", e.parent.map(|n| (n > 0).then(|| n.to_string()))),
         ("blocked-by", e.blocked_by.as_ref().map(|n| Some(join(n)))),
         ("due", due.map(Some)),
+        ("resident", e.resident.clone().map(Some)),
+        ("for", e.asks.clone().map(Some)),
         ("claim", e.claim.map(|claim| claim.then(|| who.to_owned()))),
         ("notified", e.notified.clone().map(Some)),
         ("closed", e.close.as_ref().map(closed)),
@@ -450,16 +460,29 @@ pub(super) fn closes(dir: &Path, server: &str, before: &[Task]) -> Result<Vec<No
     Ok(notes)
 }
 
-/// The page's tasks part for `session` of `server`: how many are ready, then the open tasks it
-/// holds and those due within a week, overdue ones included; when none is open, nothing, or for
-/// a `shared` project, that `task list` shows them: this home may not have fetched them yet.
-pub(super) fn page(dir: &Path, session: &str, server: &str, shared: bool) -> Result<String, Error> {
+/// The page's tasks part for `session` of `server`, a session of resident `own` if any and of
+/// the person `me` on a shared project: how many are ready, then the open tasks it holds and
+/// those due within a week, overdue ones included, leaving out other residents' tasks and every
+/// question for a person; when none is open, nothing, or for a `shared` project, that `task list`
+/// shows them: this home may not have fetched them yet. With it, the questions for `me`.
+pub(super) fn page(
+    dir: &Path,
+    session: &str,
+    server: &str,
+    (shared, me): (bool, Option<&Person>),
+    own: Option<&str>,
+) -> Result<(String, Vec<String>), Error> {
     let all = scan(dir, false)?;
-    if !all.iter().any(|t| t.open) {
+    let asks = me.map_or(Ok(Vec::new()), |me| asks(dir, &all, me, false))?;
+    let states = states(&all);
+    let seen =
+        |t: &&Task| t.get("resident").is_none_or(|r| Some(r) == own) && t.get("for").is_none();
+    let all: Vec<_> = (all.iter().zip(states)).filter(|(t, _)| seen(t)).collect();
+    if !all.iter().any(|(t, _)| t.open) {
         let said = if shared { &*TEXT.shared } else { "" };
-        return Ok(said.into());
+        return Ok((said.into(), asks));
     }
-    let ready = states(&all).iter().filter(|s| **s == "ready").count();
+    let ready = all.iter().filter(|(_, s)| *s == "ready").count();
     let week = jiff::Span::new().days(7);
     let soon = jiff::Zoned::now().date().saturating_add(week).to_string();
     let line = |t: &Task| {
@@ -474,9 +497,42 @@ pub(super) fn page(dir: &Path, session: &str, server: &str, shared: bool) -> Res
         let said = fill(said, &[("id", &t.id), ("due", &due), ("title", &title)]);
         Some(said)
     };
-    let lines = fit(all.iter().filter_map(line), PAGE).0;
+    let lines = fit(all.iter().filter_map(|(t, _)| line(t)), PAGE).0;
     let heading = fill(&TEXT.tasks, &[("ready", &ready)]);
-    Ok(format!("{heading}\n{lines}").trim_end().into())
+    Ok((format!("{heading}\n{lines}").trim_end().into(), asks))
+}
+
+/// A person sharing a project, as their commits name them: their name and email.
+pub(super) type Person = (String, String);
+
+/// The open tasks among `all`, the tasks in `dir`, that are questions for `me`, named in them
+/// by name or by email: a line each, saying who asks; with
+/// `readings`, each followed by its newest comments on a line each, where the other side wrote
+/// how it read the person's words.
+pub(super) fn asks(
+    dir: &Path,
+    all: &[Task],
+    me: &Person,
+    readings: bool,
+) -> Result<Vec<String>, Error> {
+    let mut lines = Vec::new();
+    let mine = |t: &&Task| t.open && t.get("for").is_some_and(|f| f == me.0 || f == me.1);
+    for t in all.iter().filter(mine) {
+        let (by, title) = (t.get("by").map(shown), t.get("title"));
+        let with: [(_, &dyn std::fmt::Display); 3] = [
+            ("id", &t.id),
+            ("by", &by.unwrap_or_default()),
+            ("title", &title.unwrap_or_default()),
+        ];
+        lines.push(fill(&TEXT.asked, &with));
+        let said = if readings { get(dir, t.id)? } else { json!({}) };
+        for comment in said["comments"].as_array().into_iter().flatten() {
+            let text = comment["text"].as_str().unwrap_or_default();
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            lines.push(format!("  - {}", &text[..text.floor_char_boundary(400)]));
+        }
+    }
+    Ok(lines)
 }
 
 /// The folder of the project kept for `root`, an absolute path, within the tasks folder: a

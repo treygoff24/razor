@@ -1,5 +1,7 @@
 //! The live configuration; parsing is bounded and a bad edit never replaces the last good value.
 
+mod brand;
+pub(crate) use brand::avatar_pixels;
 pub mod cli;
 pub(crate) mod manage;
 mod mcp;
@@ -10,7 +12,7 @@ pub(crate) use pack::{Settings, roots};
 pub(crate) use residents::{Day, Deliver, Resident, Schedule, Time};
 
 use crate::{
-    protocol::{Brand, Effort, Mcp, Phone, SessionId, Speed, Ui},
+    protocol::{Effort, Mcp, Phone, SessionId, Speed, Ui},
     tools,
 };
 use serde::{Deserialize, Serialize};
@@ -68,7 +70,8 @@ pub struct Config {
     pub(crate) rebuild: Rebuild,
     pub(crate) sessions: Sessions,
     pub(crate) server: Server,
-    /// `[remote]`: another machine's server this one's session commands use instead of its own.
+    pub(crate) network: Network,
+    /// `[remote]`: the directly paired server that session commands address by default.
     pub(crate) remote: Option<Remote>,
     guards: Guards,
     tools: BTreeMap<String, Script>,
@@ -109,7 +112,7 @@ pub struct Config {
     /// The system prompt's entries in order: `razor`, `project`, files and folders, absolute once
     /// parsed (docs/design/profiles.md). Only the person's file and the pack may set it.
     startup: Vec<String>,
-    pub(crate) brand: Brand,
+    pub(crate) brand: brand::Brand,
     pub(crate) ui: Ui,
     pub(crate) phone: Phone,
     /// A program and its arguments that read a reply's text on standard input and write its
@@ -127,11 +130,79 @@ pub struct Config {
     pub(crate) capture: Vec<String>,
     /// Local player argv: substitute {rate}, then append the audio path.
     pub(crate) play: Vec<String>,
-    /// `[push]`: Apple's push service, a machine key; without it nothing is sent.
+    /// `[push]`: push services and their machine credentials; without them nothing is sent.
     pub(crate) push: Option<Push>,
     /// `[tasks]`: set only in a project's own `.razor/config.local.toml`.
     pub(crate) tasks: Tasks,
     pub(crate) memory: Memory,
+}
+
+/// The only relays this server uses; None selects iroh's public relay map.
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Network {
+    relays: Option<Vec<Relay>>,
+}
+
+/// A relay address in the settings. Its query can hold the relay's password, so it serializes
+/// without it and a malformed one is refused without repeating it; only `Network::relays` gives
+/// the address as written, to open the endpoint and to pair.
+#[derive(Clone)]
+struct Relay(iroh::RelayUrl);
+
+impl<'de> Deserialize<'de> for Relay {
+    fn deserialize<D: serde::Deserializer<'de>>(given: D) -> Result<Self, D::Error> {
+        let url = String::deserialize(given)?.parse::<iroh::RelayUrl>().ok();
+        url.filter(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
+            .map(Relay)
+            .ok_or_else(|| {
+                serde::de::Error::custom("not a valid HTTP or HTTPS relay address with a host")
+            })
+    }
+}
+
+impl Serialize for Relay {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(shown(&self.0))
+    }
+}
+
+/// A settings diagnostic names keys and files and never repeats a value, which can be a secret
+/// written under the wrong key; a secret written as a key name is outside that rule.
+/// Serde's message without the value it quotes: `invalid type: string "…", expected a sequence` keeps `string`, an unknown variant its
+/// list of choices alone.
+fn unquoted(message: &str) -> String {
+    for prefix in ["invalid type: ", "invalid value: ", "unknown variant "] {
+        let rest = message.strip_prefix(prefix);
+        if let Some((given, expected)) = rest.and_then(|m| m.rsplit_once(", expected ")) {
+            let kind = given.split(['"', '`']).next().unwrap_or_default();
+            return format!(
+                "{}, expected {expected}",
+                format!("{prefix}{kind}").trim_end()
+            );
+        }
+    }
+    message.into()
+}
+
+/// A relay address as Razor shows it: without its query, where a relay's password goes.
+pub(crate) fn shown(relay: &iroh::RelayUrl) -> &str {
+    relay
+        .as_str()
+        .split_once('?')
+        .map_or(relay.as_str(), |(bare, _)| bare)
+}
+
+impl Network {
+    /// The relays as written, password included.
+    pub(crate) fn relays(&self) -> Option<Vec<iroh::RelayUrl>> {
+        (self.relays.as_ref()).map(|relays| relays.iter().map(|r| r.0.clone()).collect())
+    }
+
+    pub(crate) fn advertised(&self) -> Vec<iroh::RelayUrl> {
+        self.relays()
+            .unwrap_or_else(|| iroh::RelayMode::Default.relay_map().urls())
+    }
 }
 
 /// One plugin file; handlers run in configuration order. Relative paths start at Razor's home.
@@ -187,6 +258,8 @@ pub(crate) struct Memory {
     pub(crate) night: DreamNight,
     pub(crate) model: Option<String>,
     pub(crate) remote: Option<String>,
+    /// False once the person declined to join the memory and tasks the project's origin offers.
+    pub(crate) join: bool,
 }
 impl Default for Memory {
     fn default() -> Self {
@@ -194,6 +267,7 @@ impl Default for Memory {
             night: DreamNight::At(Time(3 * 3600)),
             model: None,
             remote: None,
+            join: true,
         }
     }
 }
@@ -228,14 +302,16 @@ pub(crate) struct Rebuild {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Sessions {
     pub(crate) idle: usize,
-    pub(crate) handover_minutes: u64,
+    pub(crate) handover_minutes: f64,
     pub(crate) handover_tokens: u64,
     /// Zero leaves conversations open until the person closes them.
-    pub(crate) close_minutes: u64,
+    pub(crate) close_minutes: f64,
 }
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Server {
+    /// The address a server listened on before pairing by code: loaded and unused, so a config
+    /// written for it still starts the server; doctor asks for its removal.
     pub(crate) address: Option<String>,
     pub(crate) https_url: Option<String>,
     /// The machine's shorthand the other servers pair this one under (`desk`, `laptop`): the
@@ -250,26 +326,32 @@ pub(crate) struct Server {
     /// as its last arguments; read only by `razor install`.
     pub(crate) wrapper: Vec<String>,
 }
-/// The other server's `server.address`, the file holding the key it enrolled this machine with,
-/// and the folder there that new sessions start in, else the launch folder's path.
+/// A paired server for session commands, and its folder instead of the launch directory. One
+/// written before pairing by code, with an address and key and no server, still loads, and
+/// session commands refuse it.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Remote {
-    pub(crate) address: String,
-    pub(crate) key: PathBuf,
+    #[serde(default)]
+    pub(crate) server: String,
     pub(crate) folder: Option<PathBuf>,
+    #[serde(default, rename = "address", skip_serializing)]
+    _address: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "key", skip_serializing)]
+    _key: Option<serde::de::IgnoredAny>,
 }
-/// The Apple developer team and the app's bundle id, and a token signing key for each
-/// environment this server sends to; nothing goes to a device whose environment has none.
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+/// Machine credentials for Apple and Firebase; an unconfigured service sends nothing.
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub(crate) struct Push {
     pub(crate) team: String,
     pub(crate) bundle: String,
     pub(crate) development: Option<PushKey>,
     pub(crate) production: Option<PushKey>,
-    /// Where pushes go instead of Apple's host: the flows' stand-in.
+    /// Where either service sends instead of its own host: the flows' stand-in.
     pub(crate) endpoint: Option<String>,
+    /// Service-account JSON, outside a project; its private key never leaves the signer.
+    pub(crate) fcm_credentials: Option<PathBuf>,
 }
 /// A key's id and the path of its `.p8` file outside any repository; its bytes go nowhere but
 /// the signature.
@@ -394,6 +476,7 @@ impl Default for Config {
             rebuild: Rebuild::default(),
             sessions: Sessions::default(),
             server: Server::default(),
+            network: Network::default(),
             remote: None,
             guards: Guards::default(),
             tools: BTreeMap::new(),
@@ -438,9 +521,9 @@ impl Default for Sessions {
     fn default() -> Self {
         Self {
             idle: 4,
-            handover_minutes: 50,
+            handover_minutes: 50.0,
             handover_tokens: 50_000,
-            close_minutes: 0,
+            close_minutes: 0.0,
         }
     }
 }
@@ -457,7 +540,7 @@ impl Default for Children {
             grace: Duration::from_secs(180),
             reviewer: None,
             researcher: None,
-            watcher: "gemini-3.8-flash".into(),
+            watcher: "gemini".into(),
         }
     }
 }
@@ -511,11 +594,21 @@ impl Config {
             let moved = "cannot hold base_url, key or id: they moved to [providers.<name>] as base_url, key and models, and the model is named <provider>/<id> (docs/configuration.md#providers).";
             return Err(Error::Invalid(format!("[models.{name}] {moved}")));
         }
-        let mut config: Self = table.try_into().map_err(|e: toml::de::Error| {
-            let why = e.message().trim_end().replace('\n', " ");
-            Error::Invalid(format!("The config is invalid: {why}."))
+        let mut config: Self = serde_path_to_error::deserialize(table).map_err(|e| {
+            let why = unquoted(e.inner().message().trim_end()).replace('\n', " ");
+            Error::Invalid(match e.path().to_string() {
+                at if at == "." => format!("The config is invalid: {why}."),
+                at => format!("The config is invalid at {at}: {why}."),
+            })
         })?;
-        config.model = crate::profiles::id(std::mem::take(&mut config.model));
+        for name in [&mut config.model, &mut config.call_model] {
+            *name = crate::profiles::id(std::mem::take(name));
+        }
+        if config.network.relays.as_ref().is_some_and(Vec::is_empty) {
+            return Err(Error::Invalid(
+                "network.relays cannot be empty; remove the setting to use iroh's relays.".into(),
+            ));
+        }
         if (config.rebuild.threshold).is_some_and(|t| !t.is_finite() || !(0.0 < t && t <= 1.0)) {
             return Err(Error::Invalid(
                 "rebuild.threshold must be greater than zero and at most one.".into(),
@@ -550,6 +643,9 @@ impl Config {
     /// What the merged settings name across files: each provider's name and address, each model
     /// row against its route, and with `provider_only` a default model on a provider.
     fn check(self) -> Result<Self, Error> {
+        if !self.brand.resident_avatars.is_empty() {
+            return Err(Error::Invalid("Use residents.<name>.avatar.".into()));
+        }
         let invalid = |e: crate::profiles::Error| Error::Invalid(e.to_string());
         for (name, provider) in &self.providers {
             let url = provider.base_url.as_deref().map(reqwest::Url::parse);
@@ -561,8 +657,8 @@ impl Config {
         for (name, row) in &self.models {
             crate::profiles::validate(name, row, &self).map_err(invalid)?;
         }
-        if self.provider_only {
-            crate::profiles::model(&self.model, &self).map_err(invalid)?;
+        if self.provider_only && crate::profiles::model(&self.model, &self).is_err() {
+            return Err(Error::Invalid("With provider_only on, model must name a model on a provider under [providers], as <provider>/<id> (docs/models.md#providers), or set provider_only = false.".into()));
         }
         Ok(self)
     }
@@ -587,7 +683,7 @@ impl Config {
                 }
                 Transport::Chat => false,
             };
-        let variant = self.models.get(model).and_then(|c| c.variant.as_ref());
+        let variant = profiles::settings(model, self).and_then(|c| c.variant.as_ref());
         // Codex's image generation runs on the ChatGPT sign-in: GPT there gets it, and Claude and
         // chat a helper on it, never a provider's GPT.
         let image = (route.endpoint.key.is_none()

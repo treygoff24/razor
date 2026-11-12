@@ -53,6 +53,7 @@ pub(super) struct Session {
     news: bool,
     profile: Arc<Profile>,
     model: String,
+    served_model: Option<String>,
     model_settings: ModelSettings,
     reported: Option<u64>,
     context: Option<u64>,
@@ -94,8 +95,8 @@ pub(super) struct Session {
     /// The newest thought's number since the session loaded.
     thoughts: u64,
     planned: Option<Trigger>,
-    /// `/done`'s input: the turn that answers it is the session's last.
-    done: Option<EntryId>,
+    /// `/done`'s input and whether the session worked when it came: its answering turn is the last.
+    done: Option<(EntryId, bool)>,
 }
 
 /// An open model conversation: messages in, lines out, and what its batch must settle.
@@ -303,12 +304,12 @@ impl Session {
             },
         )?;
         // An admitted `/done` survives a crash until answered or withdrawn.
-        let mut done = s.job();
+        let mut done = s.job().map(|job| (job, false));
         for &entry in &s.unanswered {
             if let Body::Input(input) = record.entry(entry).await?.body
                 && input.command == Some(Command::Done)
             {
-                done = Some(entry);
+                done = Some((entry, false));
             }
         }
         let session = Session {
@@ -321,6 +322,7 @@ impl Session {
             events: receiver,
             profile: Arc::new(profile),
             model: s.model.clone(),
+            served_model: None,
             model_settings: s.settings,
             reported: s.window,
             context: s.context,
@@ -408,7 +410,9 @@ impl Session {
             self.record.summary(),
             state,
             self.context,
-            self.done.is_some() && self.record.summary().job().is_none(),
+            self.done
+                .filter(|_| self.record.summary().job().is_none())
+                .map(|(_, working)| working),
             limits,
         );
     }
@@ -434,7 +438,6 @@ impl Session {
         (self.done, self.planned, self.blocked) = (None, None, true);
         self.c.inner.children.post.closed(self.id.as_str());
         self.c.inner.memory.closed(&self.c, self.record.summary());
-        self.c.inner.children.closed(&self.c, self.record.summary());
         self.pending.clear();
         self.delivered.clear();
         self.sent.clear();
@@ -526,7 +529,7 @@ impl Session {
     /// Escape, or one with no conversation, drops it and ends the turn here; held inputs open
     /// the next turn.
     pub(super) async fn stop(&mut self) -> Result<(), Error> {
-        let quit = self.done == Some(EntryId(0));
+        let quit = matches!(self.done, Some((EntryId(0), _)));
         if self.state != State::Working && !quit {
             return Ok(());
         }

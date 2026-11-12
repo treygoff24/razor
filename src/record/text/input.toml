@@ -3,6 +3,7 @@
 # alone; each header goes before the words, and `{from}`, `{who}`, `{question}`, `{entry}` and
 # `{status}` are filled in. A child's report gets `report`; an input from a program, a schedule,
 # a heartbeat or Razor gets its line, and the person's words, an answer included, get none.
+# `steer` follows the person's words that join a running turn, and no others.
 parent = "{from} (your parent)"
 child = "{from} (your child)"
 report = "{from} (your child) reports {status}: "
@@ -19,6 +20,7 @@ attached = "\nAttached file: {path}"
 image_origin = "\n[Image #{number}: copy {copy}; original at {path} on {device} stays on that device]"
 image_scaled = "scaled"
 image_pointer = "pointer only"
+steer = "\n\n(Sent while you were working. Answer in a line before your next call.)"
 voice = "(Voice note, transcribed by machine; some words may be misheard.)\n"
 call = "(Said aloud on a live call and transcribed by machine; some words may be misheard.)\n"
 call_started = "The person is on a live call. A voice speaks your words to them as they arrive, rewording them, and it has already acknowledged their request; don't restate their request. Talk like you're on the phone with them:\n- While working, speak up for a meaningful finding, a consequential change of direction, a problem they should know about, or a decision you need from them. Quiet while you work is fine; let routine steps pass without narration.\n- Give each shell command a description.\n- While you work, what the person says on the call reaches you as their own words. Act on a correction or new request at once and say so, and drop what it replaced without reporting it; ignore backchannel such as \"mm-hm\" or \"okay\".\n- End with the answer, as you'd say it aloud: the specifics that matter (times, names, amounts), no tables, lists, markdown or code unless asked.\n"

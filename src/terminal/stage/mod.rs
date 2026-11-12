@@ -29,6 +29,7 @@ pub(super) struct Seen {
 #[derive(Default)]
 pub(super) struct Stage {
     seen: BTreeMap<SessionId, Seen>,
+    avatars: BTreeMap<String, std::sync::Arc<[art::Sprite; 8]>>,
     focus: Option<SessionId>,
     ready: bool,
     clock: Option<u64>,
@@ -60,6 +61,45 @@ struct Cache {
 }
 
 impl Stage {
+    pub(super) fn brand(&mut self, brand: &crate::protocol::Brand) {
+        use base64::Engine;
+        self.avatars = brand
+            .avatars
+            .iter()
+            .filter_map(|(name, data)| {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .ok()?;
+                let pixels = crate::config::avatar_pixels(&bytes).ok()?;
+                let poses: [art::Sprite; 8] = std::array::from_fn(|n| {
+                    let k = if n < 4 { 1 } else { 3 };
+                    let w = 33 / k;
+                    let mut sprite = art::Sprite::new(w, w);
+                    for y in 0..w {
+                        for x in 0..w {
+                            let mut counts = BTreeMap::new();
+                            for dy in 0..k {
+                                for dx in 0..k {
+                                    let i = ((y * k + dy) * 132 + (n % 4) * 33 + x * k + dx) * 4;
+                                    let p = &pixels[i..i + 4];
+                                    let colour = (p[3] >= 128).then(|| [p[0], p[1], p[2]]);
+                                    *counts.entry(colour).or_insert(0) += 1;
+                                }
+                            }
+                            sprite.px[y * w + x] = counts
+                                .into_iter()
+                                .max_by_key(|(_, n)| *n)
+                                .and_then(|(p, _)| p);
+                        }
+                    }
+                    sprite
+                });
+                Some((name.clone(), std::sync::Arc::new(poses)))
+            })
+            .collect();
+        self.cache = None;
+    }
+
     /// Observes a status row without replaying any of the first snapshot's arrivals.
     pub(super) fn agent(&mut self, row: &AgentView, now: u64) {
         if self.focus.is_some()

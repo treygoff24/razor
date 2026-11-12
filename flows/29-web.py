@@ -90,47 +90,6 @@ def invoke(f, verb, session=None):
 # Every provider/verb has a success, and a reported failure followed by another
 # provider's success. Two Responses statuses are distinct documented failures.
 cases = [(p, v) for p in PROVIDERS for v in PATHS[p]]
-for provider, verb in cases:
-    fallback = next(p for p in PROVIDERS if p != provider and verb in PATHS[p])
-    arguments = {"url": URL} if verb == "fetch" else {"query": "web evidence"}
-    bodies = [success(provider, verb), failure(provider, verb), success(fallback, verb)]
-    with TemporaryDirectory(prefix="razor-web-") as scratch:
-        requests = Path(scratch)
-        with serve([Reply(json.dumps(b).encode()) for b in bodies], requests) as url:
-            replies = [tool(None, verb, **arguments), reply(None),
-                       tool(None, verb, **arguments), reply(None)]
-            with flow(replies, config=config(url, verb, [provider, fallback]), env=KEYS) as f:
-                session, first, _ = invoke(f, verb)
-                _, second, _ = invoke(f, verb, session)
-                for entry, expected in [(first, provider), (second, fallback)]:
-                    assert not entry["error"], entry
-                    output = entry["output"]
-                    assert output["output"].startswith(expected + "\n"), output
-                    assert URL in output["output"], output
-                    if verb != "fetch":
-                        assert "web evidence" in output["output"] and "[redacted]" in output["output"], output
-                    if verb == "search":
-                        assert all(URL + str(i) in output["output"] for i in range(10)), output
-                        assert output["path"] is None and len(output["output"]) < 30_000, output
-                offered = f.request(1)["tools"]
-                names = {t["name"] for t in offered}
-                # Claude Code's own web tools are always there, beside a configured verb.
-                assert f"mcp__razor__{verb}" in names and {"WebSearch", "WebFetch"} <= names, names
-                # The verb says to use the native tools first and for routine work (Trey, 2026-10-29).
-                told = next(t for t in offered if t["name"] == f"mcp__razor__{verb}")["description"]
-                assert "native web tool" in told and "second, independent" in told, told
-            # Ignore unrelated port-probe GETs; all three provider calls must still be POSTs.
-            sent = [r for p in sorted(requests.glob("*.json"))
-                    if (r := json.loads(p.read_text()))["method"] == "POST"]
-            assert [r["path"] for r in sent] == [PATHS[provider][verb]] * 2 + [PATHS[fallback][verb]], sent
-            for i, p in enumerate([provider, provider, fallback], 1):
-                headers = sent[i - 1]["headers"]
-                key = KEYS[f"{p.upper()}_API_KEY"]
-                header = "authorization" if p == "firecrawl" else "x-api-key"
-                assert headers.get(header) == (f"Bearer {key}" if p == "firecrawl" else key), headers
-                body = json.loads((requests / f"{i:03}.body").read_bytes())
-                assert URL in json.dumps(body) if verb == "fetch" else "web evidence" in json.dumps(body), body
-
 # Non-success bytes, empty text, incomplete answers, find (literal), whole-file
 # spill and exhaustion share the same installed-binary path, not a private API.
 extras = [
@@ -141,26 +100,70 @@ extras = [
     ("fetch", ["firecrawl"], [{"success": True, "data": {"markdown": "spill evidence\n" * 3000 + "flow-firecrawl-secret"}}], {}, "firecrawl", False),
     ("fetch", list(PROVIDERS), [failure(p, "fetch") for p in PROVIDERS], {}, "parallel", True),
 ]
-for verb, providers, bodies, fields, expected, error in extras:
-    with TemporaryDirectory(prefix="razor-web-") as scratch:
-        encoded = [Reply(b if isinstance(b, bytes) else json.dumps(b).encode()) for b in bodies]
-        with serve(encoded, Path(scratch)) as url:
-            arguments = {**({"url": URL} if verb == "fetch" else {"query": "web evidence"}), **fields}
-            with flow([tool(None, verb, **arguments), reply(None)],
-                      config=config(url, verb, providers), env=KEYS) as f:
-                session, result, entries = invoke(f, verb)
-                assert result["error"] == error, result
-                output = result["output"] if error else result["output"]["output"]
-                assert output.startswith(expected + "\n"), output
-                if fields:
-                    assert output == "firecrawl\nNo lines match find.", output
-                if not error and result["output"]["path"]:
-                    whole = Path(result["output"]["path"]).read_text()
-                    assert len(whole) > 30_000 and whole.startswith("firecrawl\n"), whole[:100]
-                    assert "flow-firecrawl-secret" not in whole and "[redacted]" in whole, whole[-100:]
-                if error:
-                    assert all(p + ":" in output for p in PROVIDERS), output
-                    assert "another URL" in output and "[web]" in output, output
+# One home and one provider stand-in serve every case; each case rewrites [web], which its
+# first turn reads at admission, and counts the provider's requests from its own start.
+provided, replies = [], []
+with TemporaryDirectory(prefix="razor-web-") as scratch, serve(provided, Path(scratch)) as url, \
+        flow(replies, config=config(url, "search", []), env=KEYS) as f:
+    requests, path = Path(scratch), f.home / ".razor/config.toml"
+    head, tail = path.read_text().split(config(url, "search", []))
+    configure = lambda verb, providers: path.write_text(head + config(url, verb, providers) + tail)
+    # Ignore unrelated port-probe GETs; all provider calls must still be POSTs.
+    posts = lambda: [r for p in sorted(requests.glob("*.json")) if (r := json.loads(p.read_text()))["method"] == "POST"]
+    for provider, verb in cases:
+        fallback = next(p for p in PROVIDERS if p != provider and verb in PATHS[p])
+        arguments = {"url": URL} if verb == "fetch" else {"query": "web evidence"}
+        provided += [Reply(json.dumps(b).encode()) for b in (success(provider, verb), failure(provider, verb), success(fallback, verb))]
+        replies += [tool(None, verb, **arguments), reply(None), tool(None, verb, **arguments), reply(None)]
+        configure(verb, [provider, fallback])
+        base, earlier = len(f.sent()), len(posts())
+        session, first, _ = invoke(f, verb)
+        _, second, _ = invoke(f, verb, session)
+        for entry, expected in [(first, provider), (second, fallback)]:
+            assert not entry["error"], entry
+            output = entry["output"]
+            assert output["output"].startswith(expected + "\n"), output
+            assert URL in output["output"], output
+            if verb != "fetch":
+                assert "web evidence" in output["output"] and "[redacted]" in output["output"], output
+            if verb == "search":
+                assert all(URL + str(i) in output["output"] for i in range(10)), output
+                assert output["path"] is None and len(output["output"]) < 30_000, output
+        offered = f.request(base + 1)["tools"]
+        names = {t["name"] for t in offered}
+        # Claude Code's own web tools are always there, beside a configured verb.
+        assert f"mcp__razor__{verb}" in names and {"WebSearch", "WebFetch"} <= names, names
+        # The verb says to use the native tools first and for routine work (Trey, 2026-10-29).
+        told = next(t for t in offered if t["name"] == f"mcp__razor__{verb}")["description"]
+        assert "native web tool" in told and "second, independent" in told, told
+        sent = posts()[earlier:]
+        assert [r["path"] for r in sent] == [PATHS[provider][verb]] * 2 + [PATHS[fallback][verb]], sent
+        for i, p in enumerate([provider, provider, fallback], 1):
+            headers = sent[i - 1]["headers"]
+            key = KEYS[f"{p.upper()}_API_KEY"]
+            header = "authorization" if p == "firecrawl" else "x-api-key"
+            assert headers.get(header) == (f"Bearer {key}" if p == "firecrawl" else key), headers
+            body = json.loads((requests / f"{earlier + i:03}.body").read_bytes())
+            assert URL in json.dumps(body) if verb == "fetch" else "web evidence" in json.dumps(body), body
+
+    for verb, providers, bodies, fields, expected, error in extras:
+        provided += [Reply(b if isinstance(b, bytes) else json.dumps(b).encode()) for b in bodies]
+        arguments = {**({"url": URL} if verb == "fetch" else {"query": "web evidence"}), **fields}
+        replies += [tool(None, verb, **arguments), reply(None)]
+        configure(verb, providers)
+        session, result, entries = invoke(f, verb)
+        assert result["error"] == error, result
+        output = result["output"] if error else result["output"]["output"]
+        assert output.startswith(expected + "\n"), output
+        if fields:
+            assert output == "firecrawl\nNo lines match find.", output
+        if not error and result["output"]["path"]:
+            whole = Path(result["output"]["path"]).read_text()
+            assert len(whole) > 30_000 and whole.startswith("firecrawl\n"), whole[:100]
+            assert "flow-firecrawl-secret" not in whole and "[redacted]" in whole, whole[-100:]
+        if error:
+            assert all(p + ":" in output for p in PROVIDERS), output
+            assert "another URL" in output and "[web]" in output, output
 
 # A configured provider without a key still leaves the vendor's own names.
 with flow([reply(None)], config='[web]\nsearch = ["exa"]\nfetch = ["firecrawl"]\n') as f:
@@ -189,18 +192,20 @@ with flow([reply(None), reply(None)], config='[profiles.claude]\ncode_mode = tru
     names = {t["name"] for t in f.request(2)["tools"]}
     assert "WebFetch" in names and "### `fetch`" in json.dumps(f.request(2)["tools"]), names
 
-# Detached startup must also fail the printing client and leave the reason in the server log.
+# Detached startup must also fail the printing client and leave the reason in the server log;
+# a server started in the foreground refuses each bad [web] in turn.
 with flow([], config='[web]\nsearch = ["exa", "exa"]') as f:
     result = f.run("--print", "Bad configuration.")
     assert result.returncode != 0, result
     assert "at most once" in (f.home / ".razor/server.log").read_text()
-
-for text, message in [
-    ('answer = ["firecrawl"]', "no answer action"),
-    ('search = ["unknown"]', "unknown variant"),
-    ('[web.exa]\nbase_url = "file:///tmp/unsafe"', "HTTP or HTTPS"),
-]:
-    with flow([], config="[web]\n" + text) as f:
+    path = f.home / ".razor/config.toml"
+    head, tail = path.read_text().split('[web]\nsearch = ["exa", "exa"]')
+    for text, message in [
+        ('answer = ["firecrawl"]', "no answer action"),
+        ('search = ["unknown"]', "unknown variant"),
+        ('[web.exa]\nbase_url = "file:///tmp/unsafe"', "HTTP or HTTPS"),
+    ]:
+        path.write_text(head + "[web]\n" + text + tail)
         result = f.run("serve")
         assert result.returncode != 0, result
         assert message in result.stderr, result

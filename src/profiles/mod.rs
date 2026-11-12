@@ -9,7 +9,8 @@ mod typescript;
 
 pub(crate) use conversation::{Conversation, IMAGE};
 pub(crate) use models::{
-    LARGE, Model, Transport, id, limits, model, models, speed, speed_choice, validate, video,
+    LARGE, Model, Transport, id, label, limits, model, models, settings, speed, speed_choice,
+    validate, video,
 };
 pub(crate) use startup::{machine, opening, save};
 
@@ -217,7 +218,7 @@ impl From<bool> for Builtins {
 pub(crate) fn dream_tool(name: &str) -> bool {
     matches!(
         name,
-        "read" | "recall" | "skill" | "status" | "memory" | "message"
+        "read" | "recall" | "skill" | "status" | "memory" | "task" | "message"
     )
 }
 /// The shipped built-in declarations, with a variant's entries and then, for a child, the

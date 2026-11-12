@@ -298,10 +298,11 @@ with wall_clock() as (clock, env, advance):
         activity = json.loads(server.send(f, "GET", f"/sessions/{session}/agent").read())["last_activity"]
         advance(9_000_000)
         server.until(f, session, lambda es: any(e.get("close_reason") == "idle" for e in es))
-        server.until(f, session, lambda es: any("settled" in e.get("event", {}) for e in es if e["kind"] == "child"))
-        assert json.loads(server.send(f, "GET", f"/sessions/{session}/agent").read())["last_activity"] == activity, "idle close's child settlement moved activity"
+        assert json.loads(server.send(f, "GET", f"/sessions/{session}/agent").read())["last_activity"] == activity, "idle close moved activity"
         resumed = f.run("--resume", session, "--print=json", "Continue the Claude conversation.")
         assert resumed.returncode == 0 and note in f.sent()[-1], resumed.stderr
+        # An idle close reopens under the same id, so it settles no helper, then or by the reopening.
+        assert not any("settled" in e.get("event", {}) for e in f.record(session) if e["kind"] == "child"), "idle close settled a helper"
 
     # Running jobs hold off maintenance; answering their notice starts a new idle interval.
     advance(0)
@@ -441,12 +442,12 @@ key = {json.dumps(str(apns.key))}
         assert not any(note in body for body in f.sent()), "the idle rebuild sent a request"
         assert activity() == original_activity, "handover moved activity"
         inputs = [e for e in entries if e["kind"] == "input"]
-        phone = f.run("devices", "add", "phone").stdout.splitlines()[1]
+        phone = server.phone(f, "phone")
         # At `all` every finish is sent, so no finished alert below means the idle close sent none.
         for route, body in (("/devices/self/push", {"token": "aa18", "environment": "development"}),
                             (path + "/follow", {"token": "ff18", "environment": "development"}),
                             ("/devices/self/notifications", {"level": "all"})):
-            registered = server.send(f, "PUT", route, body, key=phone)
+            registered = server.send(phone, "PUT", route, body)
             assert registered.status == 200, registered.read()
             registered.read()
         with server.send(f, "GET", path + "/events") as stream:

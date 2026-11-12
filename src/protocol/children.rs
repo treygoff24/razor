@@ -134,6 +134,7 @@ pub(crate) enum ChildRequest {
         #[serde(default)]
         speed: Speed,
         in_place: bool,
+        task: Option<u32>,
         input: Input,
     },
     Continue {
@@ -147,6 +148,7 @@ pub(crate) enum ChildRequest {
     Settle {
         session: SessionId,
         decision: Decision,
+        report: Option<(String, Option<u32>, String)>,
     },
     Update {
         parent: SessionId,

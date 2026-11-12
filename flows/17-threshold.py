@@ -47,7 +47,7 @@ def step(id, name, arguments, large=False):
 
 
 def run(replies, config="[rebuild]\nthreshold = 0.5"):
-    with flow(replies, model="gpt-6.1-sol", config=PLAIN + config) as f:
+    with flow(replies, model="sol", config=PLAIN + config) as f:
         entries = list(f.record(f.ask(ask)["session"]))
         asked = [e["id"] for e in entries if e["kind"] == "input" and e["from"] == "razor"]
         return entries, asked, [e for e in entries if e["kind"] == "rebuild"]
@@ -71,8 +71,8 @@ entries, asked, rebuilds = run([step("grow1", "bash", {"command": "true"}, large
                                 step("grow2", "bash", {"command": "true"}, large=True), done()])
 assert len(asked) == 1 and [e["trigger"] for e in rebuilds] == ["threshold"], (asked, rebuilds)
 
-# Each override fires where the global threshold and shipped window would not. A short GPT
-# name in config applies to its full model id, including the loop route's Context readings.
+# Each override fires where the global threshold and shipped window would not. A family row
+# applies to a session on that family, including the loop route's Context readings.
 for settings, large in (("[rebuild]\nthreshold = 0.9\n[models.sol]\nthreshold = 0.5", True),
                         ("[models.sol]\nwindow = 100", False)):
     entries, asked, rebuilds = run([step("configured", "bash", {"command": "true"}, large=large),

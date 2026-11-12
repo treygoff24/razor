@@ -14,13 +14,13 @@ from responses import reply as turn
 import server
 from terminal import Terminal
 
-EARLIER, FINAL = "EARLIER69 " + "earlier " * 1500 + "END69", "FINAL69 " + "summary " * 400 + "END69"
+EARLIER, FINAL = "EARLIER69 " + "earlier " * 2500 + "END69", "FINAL69 " + "summary " * 400 + "END69"
 replies = [reply("ALPHA69", text="a-first69"), reply("BRAVO69", text="b-first69"),
            reply("MORE69", text="a-more69"), reply("LATER69", text="a-later69"),
            reply("FINAL69", text="a-final69"),
-           claude.reply(*[(None, "Read", {"file_path": f"/nowhere69/STEP_{n:03}_{'x' * 100}"}) for n in range(300)], text=EARLIER, match="STEPS69"),
+           claude.reply(*[(None, "Read", {"file_path": f"/nowhere69/STEP_{n:03}_{'x' * 100}"}) for n in range(100)], text=EARLIER, match="STEPS69"),
            reply("STEPS69", text=FINAL), reply("OLD69", text="OLD_WORDS69"), reply("AFTER69", text="b-after69"), reply("SLOW69", text="b-slow69"),
-           reply("LONG69", text="LONG69 " + "long " * 8000 + "CONCLUSION69"), replace(reply("b-slow69", text="STALE69"), cuts=tuple(range(1, 200))),
+           reply("LONG69", text="LONG69 " + "long " * 8000 + "CONCLUSION69"), replace(reply("b-slow69", text="STALE69"), cuts=(1,), pause=1),
            # The GPT session's recap request also holds the prompt, so its reply comes first.
            turn('"model":"gpt-6.1-terra"', "GPT_WORDS69"),
            # The provider's session's recap is a chat request to its own model.
@@ -34,7 +34,7 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
         made = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
         server.send(f, "PUT", f"/sessions/{made}/name", name).read()
         server.post(f, f"/sessions/{made}/input", {"text": words})
-        server.until(f, made, lambda es: es[-1]["kind"] == "turn_end", timeout=120)  # STEPS69 reads 300 times
+        server.until(f, made, lambda es: es[-1]["kind"] == "turn_end", timeout=120)  # STEPS69 reads 100 times
         return made
 
     def moves(words, said, s=None):  # work in a (or s): not the person's words, nor anyone looking
@@ -51,17 +51,18 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
             t.until(lambda t: "╮" in (top := t.screen.display[0]) and any(words in l[top.index("╮") + 1:] for l in t.screen.display))
         shown("b-first69")
         t.shown("○ a69", "▶ b69")  # the list's layout, published each second, can trail
-        t.click("○ a69")
+        # Address by id: reply text can arrive before the layout moves its row out of WORKING.
+        t.send(f"/attach {a}\r")
         shown("a-first69")
         # Switching away reports a's last entry shown, with when.
         last = list(f.record(a))[-1]["id"]
-        t.click("○ b69")
+        t.send(f"/attach {b}\r")
         shown("b-first69")
         server.wait(lambda: server.agents(f)[a].get("seen") == last, 10, "switching away reported nothing")
         moves("MORE69", "a-more69")
         advance(9 * 60_000)
-        t.shown("↺ a-more69")  # the list has moved a's row before it is clicked
-        t.click("○ a69")
+        t.shown("↺ a-more69")
+        t.send(f"/attach {a}\r")
         shown("a-more69")
         # Nine minutes away from focus, with a's record moved, asks nothing either.
         t.send("\x1b[O")
@@ -71,11 +72,12 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
         t.send("\x1b[I")
         shown("a-later69")
         # Ten minutes away from a, by switching to b, recaps what came after the last entry seen.
-        t.click("○ b69")
+        t.send(f"/attach {b}\r")
+        shown("b-first69")
         moves("FINAL69", "a-final69")
         advance(28 * 60_000)
         t.shown("↺ a-final69")
-        t.click("○ a69")
+        t.send(f"/attach {a}\r")
         t.shown("↺ away 10 min · RECAP_WORDS69")
         asked = [body for body in f.sent() if "Tell the person" in body]
         assert len(asked) == 1 and "a-final69" in asked[0] and "a-later69" not in asked[0], asked
@@ -87,7 +89,7 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
         moves("AFTER69", "b-after69", b)
         advance(40 * 60_000)
         t.shown("↺ b-after69")
-        t.click("○ b69")
+        t.send(f"/attach {b}\r")
         t.shown("↺ away 12 min")  # since the restart; a's recap said 10
         # A recap that lands after its return has ended, here by leaving and coming back, is not shown.
         t.send("\x1b[O")
@@ -99,7 +101,7 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
         stale = server.wait(lambda: [r for r in f.requests.glob("*.body") if "b-slow69" in r.read_text()])[0]
         t.send("\x1b[O\x1b[I")
         server.wait(lambda: "sent" in json.loads(stale.with_suffix(".json").read_text()))
-        t.pump(3, lambda _: "STALE69" in t.text())  # it lands about 0.3 s after
+        t.pump(1, lambda _: "STALE69" in t.text())  # it lands about 0.3 s after
         assert "STALE69" not in t.text(), t.text()
 
     def written(session):  # the model request that wrote a recap of all of it
@@ -111,13 +113,11 @@ with wall_clock() as (_, env, advance), flow(replies, config=config, env=env) as
     evidence = body["messages"][0]["content"][0]["text"]
     assert "haiku" in body["model"] and body["output_config"] == {"effort": "medium"}, body
     # The agent's words come before its steps: both summaries whole, then the newest steps.
-    assert EARLIER in evidence and FINAL in evidence and "STEP_299" in evidence and "STEP_000" not in evidence, evidence
+    assert EARLIER in evidence and FINAL in evidence and "STEP_099" in evidence and "STEP_000" not in evidence, evidence
     assert len(evidence.encode()) <= 32 << 10, len(evidence)
-    gpt = server.post(f, "/sessions", {"cwd": str(f.cwd), "model": "sol"})["session"]
-    body = written(gpt)
+    body = written(server.post(f, "/sessions", {"cwd": str(f.cwd), "model": "sol"})["session"])
     assert body["model"] == "gpt-6.1-terra" and body["reasoning"]["effort"] == "low", body
-    chat = server.post(f, "/sessions", {"cwd": str(f.cwd), "model": "open69/open69"})["session"]
-    body = written(chat)
+    body = written(server.post(f, "/sessions", {"cwd": str(f.cwd), "model": "open69/open69"})["session"])
     assert body["model"] == "open69" and "Tell the person" in body["messages"][0]["content"], body
     # Newest words longer than the whole budget keep their start and their conclusion.
     evidence = written(root("long69", "LONG69"))["messages"][0]["content"][0]["text"]

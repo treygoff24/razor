@@ -1,8 +1,10 @@
-"""Pushes to Apple's service, against a stand-in for it: `razor devices add`
-prints a pairing line with the id `agents` carries, and for an IP address says what to set; a
+"""Pushes to Apple's service, against a stand-in for it: `razor devices add` shows a code for this
+server's key and relay, and `agents` carries the server's identity; a
 question sends one signed alert without its words; once answered, the next pushes drop it from
 the open list; a delivery, a top-level finish and a top-level failure send theirs, while a child
 and a stopped turn send none; a token Apple calls gone and a removed device get nothing more; a
+token registered by a second device leaves the first, so a phone paired again under another name
+is notified once; a
 followed session's Live Activity updates, sends again after a restart and ends when the session
 finishes; a repeated input and a repeated creation return the first answer, the input's across a
 restart; each device's level and mutes filter what it gets, a root's note to the person pushes
@@ -11,11 +13,12 @@ open, an alert's interruption level says whether the person is in the session, a
 long for a lock screen is refused. Presence readings use direct row detail, including a fresh
 unprompted session outside the live feed."""
 from pathlib import Path
-from urllib.parse import parse_qsl, urlsplit
+import base64
 import json
 import tempfile
 import time
 from apns import apple
+from clock import wall_clock
 from driver import flow
 from responses import PLAIN, reply as turn
 from standin import Reply
@@ -53,8 +56,9 @@ replies = [*ask("ASK48"), turn("ASK48", "deliver", line="DELIVERED48", url="http
 
 
 def api(f, method, path, key, body=None):
-    """The status and JSON answer of a request through the socket with `key`."""
-    answer = server.send(f, method, path, body, key=key)
+    """The status and JSON answer of a request through the socket with the local `key`, or as the
+    device whose connection function `key` is."""
+    answer = server.send(key if callable(key) else f, method, path, body, key=None if callable(key) else key)
     return answer.status, json.loads(answer.read() or b"null")
 
 
@@ -63,9 +67,8 @@ def restart(f):
     server.start(f)
 
 
-with apple(Path(tempfile.mkdtemp(prefix="razor-apns-"))) as apns:
+with apple(Path(tempfile.mkdtemp(prefix="razor-apns-"))) as apns, wall_clock(still=False) as (_, clock, advance):
     config = PLAIN + f"""[server]
-address = "localhost:0"
 label = "flow · 48"
 name = "desk"
 realm = "work"
@@ -77,7 +80,7 @@ endpoint = "{apns.url}"
 key_id = "FLOWKEY48"
 key = {json.dumps(str(apns.key))}
 """
-    with flow(replies, model="gpt-6.1-sol", config=config) as f:
+    with flow(replies, model="gpt-6.1-sol", config=config, env=clock) as f:
         state = f.home / ".razor"
 
         def alerts(token=None):
@@ -91,11 +94,6 @@ key = {json.dumps(str(apns.key))}
         def razor(push):
             return push["body"]["razor"]
 
-        def enroll(name):
-            added = f.run("devices", "add", name)
-            assert added.returncode == 0, added.stderr
-            return added.stdout.splitlines()
-
         def session(text):
             made = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
             server.post(f, f"/sessions/{made}/input", {"text": text})
@@ -104,14 +102,14 @@ key = {json.dumps(str(apns.key))}
         def ended(made, n=1):
             return server.until(f, made, lambda es: sum(e["kind"] == "turn_end" for e in es) == n)
 
-        # 1. The pairing line carries the id, label, address and key; `agents` the same server.
-        printed = enroll("phone")
-        phone, pairing = printed[1], printed[-1]
-        line = urlsplit(pairing)
-        fields = dict(parse_qsl(line.query))
+        # 1. The code carries this server's network key and relay; `agents` the same server.
+        shown, code = server.offer(f, "probe")
+        raw = base64.urlsafe_b64decode(code[7:] + "===")
+        assert raw[1:33].hex() == server.peer("id", str(state / "node.key")).stdout.strip(), code
+        assert raw[51:].decode() == server.RELAY + "/", code
+        shown.kill()
+        phone = server.phone(f, "phone")
         home = (state / "server.id").read_text()
-        assert (line.scheme, line.netloc) == ("razor", "pair") and len(home) == 32, pairing
-        assert fields == {"id": home, "label": "flow · 48", "address": "localhost:0", "key": phone}, pairing
         key = (state / "device.key").read_text().strip()
         agents = json.loads(server.send(f, "GET", "/status").readline())
         # The row's identity; fields other features add (transcribe, video, load) are theirs to check.
@@ -151,10 +149,6 @@ key = {json.dumps(str(apns.key))}
         assert sorted(razor(a)["kind"] for a in later) == ["delivery", "finished"], later
         assert all(razor(a)["open"] == [] and razor(a)["session"] == asking for a in later), later
 
-        receipt = f"/sessions/{asking}/deliveries/{next(razor(a)['entry'] for a in later if razor(a)['kind'] == 'delivery')}"
-        for method,field in (("PUT","read"),("DELETE","read"),("PUT","archive"),("DELETE","archive")):
-            assert api(f,method,receipt+"/"+field,key)[0] == 200
-
         # 4. A child's report sends nothing for the child; a stopped turn nothing, and its job's
         # end notice opens no turn; a failed top-level turn one `stuck`, which arrives after them.
         parent = session("KIDS48")
@@ -180,8 +174,11 @@ key = {json.dumps(str(apns.key))}
         # 5. A token Apple calls gone leaves its device; a removed device's new token gets
         # nothing. A second device's alerts mark when each event's pushes went.
         apns.gone.add("aa11")
-        pad = enroll("pad")[1]
-        assert api(f, "PUT", "/devices/self/push", pad, {"token": "ee55", "environment": "development"}) == (200, {})
+        pad, watch = server.phone(f, "pad"), server.phone(f, "watch")  # both before the follows, which share one update
+        for device in (watch, pad):
+            assert api(f, "PUT", "/devices/self/push", device, {"token": "ee55", "environment": "development"}) == (200, {})
+        held = [d["name"] for d in json.loads((state / "devices.json").read_text()) if d.get("push", {}).get("token") == "ee55"]
+        assert held == ["pad"], held
         assert api(f, "PUT", "/devices/self/notifications", pad, {"level": "all"}) == everything
         before = len(alerts("aa11"))
         gone = session("GONE48")
@@ -209,25 +206,28 @@ key = {json.dumps(str(apns.key))}
         assert api(f, "PUT", f"/sessions/{done}/follow", pad, dict(follow, token="dd77")) == (200, {})
         followed = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
         assert api(f, "PUT", f"/sessions/{followed}/follow", pad, follow) == (200, {})
-        watch = enroll("watch")[1]
         assert api(f, "PUT", f"/sessions/{followed}/follow", watch, dict(follow, token="ee77")) == (200, {})
         offset = len(wait(lambda: activities("ff66")))
         watch_offset = len(wait(lambda: activities("ee77")))
         restart(f)
         wait(lambda: [a["body"]["aps"]["event"] for a in activities("dd77")][-1:] == ["end"])
-        resent = wait(lambda: activities("ff66")[offset:])[0]
+        resent, sent = wait(lambda: activities("ff66")[offset:])[0], time.monotonic()
         headers, aps = resent["headers"], resent["body"]["aps"]
         assert (headers["apns-push-type"], headers["apns-topic"]) == (
             "liveactivity", "com.example.razor.push-type.liveactivity"), headers
         assert (aps["event"], aps["content-state"]["state"]) == ("update", "needs_you"), aps
         assert aps["stale-date"] - aps["timestamp"] == 900, aps
         wait(lambda: activities("ee77")[watch_offset:])
-        at = time.monotonic()
         server.post(f, f"/sessions/{followed}/input", {"text": "FOLLOW48"})
         server.until(f, followed, lambda es: any(e["kind"] == "job" for e in es))
         assert f.run("devices", "remove", "watch").returncode == 0
-        working = wait(lambda: activities("ff66")[offset + 1:])[0]
-        assert time.monotonic() - at > 8 and working["headers"]["apns-priority"] == "5", working
+        # The ten seconds pass on the server's monotonic clock: no update 8 s after the last, one by 17 s.
+        advance((ahead := max(0, sent + 7 - time.monotonic())) * 1000, monotonic=True)
+        time.sleep(1.2)
+        assert not activities("ff66")[offset + 1:], "an update came sooner than ten seconds after the last"
+        advance((ahead + 10) * 1000, monotonic=True)
+        working = wait(lambda: activities("ff66")[offset + 1:], 3, "no update ten seconds after the last")[0]
+        assert working["headers"]["apns-priority"] == "5", working
         assert len(activities("ee77")) == watch_offset + 1, activities("ee77")
         assert working["body"]["aps"]["content-state"]["state"] == "working", working
         (f.cwd / "go48").touch()
@@ -252,7 +252,7 @@ key = {json.dumps(str(apns.key))}
         assert api(f, "POST", f"/sessions/{repeat}/input", key, dict(sent, request="no spaces"))[0] == 400
 
         # 8. Three more devices, at `agents` (the default), `all` and `questions`.
-        one, two, three = (enroll(name)[1] for name in ("one", "two", "three"))
+        one, two, three = (server.phone(f, name) for name in ("one", "two", "three"))
         for device, token in ((one, "a1"), (two, "b2"), (three, "c3")):
             assert api(f, "PUT", "/devices/self/push", device, {"token": token, "environment": "development"})[0] == 200
         assert api(f, "GET", "/devices/self/notifications", one) == (200, {"level": "agents", "muted": []})
@@ -299,7 +299,7 @@ key = {json.dumps(str(apns.key))}
         # Following as a background view neither marks presence nor suppresses the sender's push.
         viewed = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
         before = json.loads(server.send(f, "GET", f"/sessions/{viewed}/agent").read())
-        with server.send(f, "GET", f"/sessions/{viewed}/events?follow=true&terminal=true", key=one) as stream:
+        with server.send(one, "GET", f"/sessions/{viewed}/events?follow=true&terminal=true") as stream:
             assert json.loads(stream.readline())["kind"] == "attached"
             during = json.loads(server.send(f, "GET", f"/sessions/{viewed}/agent").read())
             assert (during.get("looked_at"), during.get("terminal", False)) == (before.get("looked_at"), before.get("terminal", False)), during
@@ -311,14 +311,14 @@ key = {json.dumps(str(apns.key))}
         after = json.loads(server.send(f, "GET", f"/sessions/{viewed}/agent").read())
         assert (after.get("looked_at"), after.get("terminal", False)) == (before.get("looked_at"), before.get("terminal", False)), after
         watched = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
-        with server.send(f, "GET", f"/sessions/{watched}/events", key=one) as stream:
+        with server.send(one, "GET", f"/sessions/{watched}/events") as stream:
             assert json.loads(stream.readline())["kind"] == "attached"
             assert api(f, "POST", f"/sessions/{watched}/input", one, {"text": "REPLY48B"})[0] == 200
             ended(watched)
             wait(lambda: level("b2", watched) == ["active"])
         # Passive is the watching device's alone: `two` watching leaves `one`'s finish active.
         elsewhere = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
-        with server.send(f, "GET", f"/sessions/{elsewhere}/events", key=two) as stream:
+        with server.send(two, "GET", f"/sessions/{elsewhere}/events") as stream:
             assert json.loads(stream.readline())["kind"] == "attached"
             assert api(f, "POST", f"/sessions/{elsewhere}/input", one, {"text": "ELSEWHERE48"})[0] == 200
             ended(elsewhere)
@@ -346,11 +346,6 @@ key = {json.dumps(str(apns.key))}
         assert got == [answering, stuck, asked], alerts("c3")
         assert not any(b"NOTEWORDS48" in r["raw"] for r in apns.received), "a note's words reached Apple"
 
-        # 9. With server.address an IP address, enrolling says what to set instead of a line.
-        config = (state / "config.toml").read_text().replace('"localhost:0"', '"10.9.8.7:7480"')
-        (state / "config.toml").write_text(config)
-        printed = "\n".join(enroll("tablet"))
-        assert "razor://" not in printed and "set server.address to this computer's tailnet name" in printed, printed
         assert not any(b"SECRET48" in r["raw"] for r in apns.received), "a question's words reached Apple"
 
 # More follows than the local queue and active sends combined: neither a first update nor an

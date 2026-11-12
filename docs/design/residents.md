@@ -1,5 +1,9 @@
 # Residents, schedules and the memory client
 
+## A resident's own memory inside its project
+
+A resident's home session and threads start with the project's memory page and then their own layer, kept in `residents/<name>/` in the project's memory folder; another session in the same folder sees the project's page alone. The caller's record, not its folder, grants the layer. The home session's state note goes into the layer, a thread sends the home session what to keep, and any other session in the folder writes a project state note. A task tagged with the resident's name stays in the project's list and off other sessions' pages. The project's one nightly pass is a fresh run of the resident and tidies both layers; a home without the resident leaves the layer alone. The design is in [memory.md](memory.md#a-residents-own-layer-and-sharing-between-people).
+
 Design page, 2026-10-27; revised 2026-10-28 after a cold review. It covers two modules, `src/residents/` and `src/memory/`. Their budget row is "Children, mail, schedules, memory client" (6,000 lines); these two modules get 1,200 of it and children and mail the rest.
 
 Read: `main`, the record, API and children pages; the rulings and the cold review; a resident's configuration and service units; the configured ask and notify commands; Memorum's source and `memoryd schema --json`.
@@ -385,7 +389,7 @@ Design of 2026-10-29, asked for by Trey, built against Memorum, whose client Raz
 | 23 | A resident's `message` question with no parent returns once recorded, as an open ask. The ask command (a flow script) prints an answer after 1 s, and the resident's next request holds it as `Origin::Answer`. A second ask answered first through the API is not answered again by its command |
 | 24 | Memorum runs for real, from the flow's own directory, through `MEMORUM_SOCKET`. A ruling citing the person's message by default is written standing, and one citing the session's `Start` entry is refused. Search finds the ruling. A `state` write supersedes the previous one. In a second session, a fact replaced with `replaces` is gone from search and its replacement is found, and the first request holds the new state note and the ruling, not the old note. Each ruling on that page is one line, its words and then its id: Razor's ruling as the person's words it cites; a bare "yes", given in a session whose turn closed with a 472-byte question, after "…" and that question's whole words in its last 300 bytes, and none of its head; and a ruling the flow writes straight to Memorum in Loom's form as the words it quotes, whitespace made single spaces |
 
-Flows 21 to 24 are written (`flows/21-resident.py` to `flows/24-memory.py`).
+Flows 21, 22 and 24 are written (`flows/21-resident.py`, `flows/22-schedule.py`, which also holds the asks, and `flows/24-memory.py`).
 
 ## Size
 

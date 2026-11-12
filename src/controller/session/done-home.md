@@ -1,1 +1,1 @@
-Send the home session `{owner}` one `message` note of what it should keep from this session, and write your facts and notes; the home session holds the folder's one state note.
+Send the home session `{owner}` one `message` note of what it should keep from this session, and write your facts and notes; the home session writes the resident's own state note.

@@ -258,7 +258,7 @@ Three questions decide it: what an action is, what it receives and returns, and 
 - **Binding is by name only.** Not by name and version: a version on each action adds nothing that is not already covered:
   - nothing would compare it except a check at load;
   - the evaluation runs before every install (SPEC section 7), so a changed action is measured with every profile in any case;
-  - declarations and the actions they bind live in one repository, one compile unit, and change in the same commit, and flows 10 and 28 fail if they drift apart.
+  - declarations and the actions they bind live in one repository, one compile unit, and change in the same commit, and flows 6 and 28 fail if they drift apart.
 
 **3. Within a conversation the list only grows, and each route offers the new entries through its own append path.**
 - **Sending the whole tool list again.**
@@ -290,7 +290,7 @@ Three questions decide it: what an action is, what it receives and returns, and 
 
 1. **The shell's job task queues `Started`, before its `Ended`** (a ruling on the cold review). `Shell::start` spawns the job's task, which queues `Started` and then watches the job; `start` waits for that queueing and returns the job's number, no longer the event.
    - **Why in the job's task.** An awaited send inside `start` before the task exists would leave a running child with nobody to reap it, kill it at its deadline or report its end, if the caller were dropped while the queue was full. `start` waits only after the task is running, so a dropped caller leaves the job supervised.
-   - **Why `start` waits for it.** Otherwise a `bash` call with a short `wait_ms` could return before its job's task first ran, and the call's `Result` would reach the record before the job's `Started`. Flows 19 and 35 need a job's `Started` recorded before its call's `Result`.
+   - **Why `start` waits for it.** Otherwise a `bash` call with a short `wait_ms` could return before its job's task first ran, and the call's `Result` would reach the record before the job's `Started`. Flow 19 needs a job's `Started` recorded before its call's `Result`.
    - **One rule for the controller.** The controller drains the job events before it appends a call's `Result`.
    - **What it removes.** No action needs a job-event sender, and the controller drains one channel. Both changes are in `src/shell/mod.rs`.
 2. **`SPILL` moves into `tools`,** and `src/shell/output.rs` imports it (one line).

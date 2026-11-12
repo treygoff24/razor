@@ -7,7 +7,7 @@ import signal
 import time
 from driver import flow
 from model import agent, message, reply
-from responses import done, response
+from responses import done
 import server
 from standin import Reply
 from terminal import Terminal
@@ -106,6 +106,8 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     sid = child(parent, "mail40")
     entries = ended(sid, "mail-waiting40")
     assert any(e["kind"] == "mail_sent" for e in entries) and not reports(parent, sid), entries
+    # A turn the kill cuts runs again on restart, so the sibling's answer to the mention ends first.
+    ended(child(parent, "sibling40"), "sibling-no-reply40")
     server.stop(f, signal.SIGKILL)
     server.start(f)
     config = f.home / ".razor/config.toml"
@@ -167,14 +169,13 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     assert "report" not in end and len(reports(parent, sid)) == 1, end
 
     # A turn ending in an error reports blocked at once with its sentence; continue runs it again.
-    lost = response([{"type": "message", "id": "msg_lost40", "role": "assistant", "phase": "final_answer",
-                      "content": [{"type": "output_text", "text": "lost40"}]}], completed=False)
+    rejected = Reply(b'{"error": {"type": "invalid_request_error", "message": "Rejected40"}}', status=400, match=error)
     replies += [agent(ERROR, "start", name="error40", brief="Fail once.", model="gpt-6.1-sol", placement="in_place"),
-                agent(ERROR, "wait"), reply(ERROR, text="error-report-received40"), *[replace(lost, match=error)] * 6]
+                agent(ERROR, "wait"), reply(ERROR, text="error-report-received40"), rejected]
     parent = start(ERROR)
     sid = child(parent, "error40")
     entries = ended(parent, "error-report-received40")
-    blocked = "The model response did not complete; send another input to try again.\n\nContinue error40 to try again."
+    blocked = "The model endpoint returned HTTP 400: Rejected40.\n\nContinue error40 to try again."
     wait = next(e["call"] for e in entries if e["kind"] == "call" and e["input"].get("action") == "wait")
     waited = json.loads(next(e["output"] for e in entries if e["kind"] == "result" and e["call"] == wait))
     assert waited["from"]["report"]["status"] == "blocked" and waited["text"] == blocked, waited
@@ -205,7 +206,7 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     replies += [agent(CRASH, "start", name="crash40", brief="Wait on a job.", cwd="crash40", placement="in_place"),
                 agent(CRASH, "wait"), reply(CRASH, text="crash-report-received40"),
                 reply(crash, "Bash", {"command": "while [ ! -f go40 ]; do sleep 0.05; done", "run_in_background": True}),
-                replace(reply(crash, text="unread40"), cuts=tuple(range(5, 850, 5)))]  # about 5 s
+                replace(reply(crash, text="unread40"), cuts=tuple(range(10, 850, 10)))]  # about 2.5 s
     parent = start(CRASH)
     sid = child(parent, "crash40")
     server.until(f, sid, lambda es: any(e["kind"] == "result" for e in es))

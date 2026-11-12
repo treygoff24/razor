@@ -93,6 +93,7 @@ pub fn stage(
     speed: Option<Speed>,
     handover: Option<bool>,
 ) {
+    let model = model.map(crate::profiles::id);
     let name = model.as_deref().unwrap_or(app.choice().0);
     let choice = choice(app, name, speed.unwrap_or(app.speed()));
     if let Some(reason) = choice.and_then(|c| c.reason.clone()) {
@@ -115,7 +116,8 @@ pub fn stage(
         Some(format!(" · {words}, {cost}{then}{why}"))
     });
     app.say(&format!(
-        "Next input: {model} · {}{}{}. Applies to your next input. {hint}",
+        "Next input: {} · {}{}{}. Applies to your next input. {hint}",
+        super::text::model(model),
         effort.map_or("effort pending", super::text::effort),
         app.speed().suffix(),
         switch.unwrap_or_default()
@@ -246,7 +248,7 @@ pub fn draw(app: &mut App, b: &mut Buffer, area: Rect) {
         super::text::effort(effort.min(top))
     };
     if let (Some(handover), Some(s)) = (p.handover, switch(app, name)) {
-        let title = format!("switch to {name} · {}", effort(name));
+        let title = format!("switch to {} · {}", super::text::model(name), effort(name));
         lines = vec![Line::styled(title, style(GRAY, RECESS))];
         for (h, action) in [(false, "picker.keep"), (true, "picker.handover")] {
             let (words, cost) = uncached(s, h).unwrap_or_default();
@@ -259,7 +261,7 @@ pub fn draw(app: &mut App, b: &mut Buffer, area: Rect) {
     for (i, word) in rows.filter(|_| p.handover.is_none()) {
         let cost = switch(app, word).and_then(|s| uncached(s, s.keep.is_none()));
         let mark = if i == p.index { "▸" } else { " " };
-        let row = format!("{mark} {word} · {}", effort(word));
+        let row = format!("{mark} {} · {}", super::text::model(word), effort(word));
         lines.push(Line::from(format!(
             "{row:<36}{}",
             cost.unwrap_or_default().1

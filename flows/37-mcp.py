@@ -431,35 +431,37 @@ def restart_case():
 
 
 def timeout_case():
-    """A server that never answers is cancelled without replay, through either route."""
+    """A server that never answers is cancelled without replay, through either route, over HTTP
+    and over stdio."""
     for code in (False, True):
-        for legacy in (False, True):
-            replies = []
-            with mcp.serve() as external, flow(replies, model="gpt-6.1-sol" if code else "opus") as f:
-                start(f)
-                cancelled = f.cwd / "cancelled.json"
-                connection = ({"command": sys.executable, "args": [str(Path(mcp.__file__).resolve())],
-                               "env": {"MCP_CANCEL_FILE": str(cancelled)}} if legacy else {"url": external.url + "/mcp"})
-                operation(f, "add", name="remote", scope="global", config={
-                    **connection, "tools": ["hang"], "timeout": 2000})
-                session = create(f)
-                connected(f, session, "remote")
-                replies += [model_reply(code, "mcp__remote__hang", {}, id="hang37"), model_reply(code, text="done")]
-                post(f, f"/sessions/{session}/input", {"text": "Call the tool once."})
-                entries = until(f, session, lambda es: any(e["kind"] == "turn_end" for e in es), timeout=30)
-                call = next(e for e in entries if e["kind"] == "call" and e["call"] == "hang37")
-                result = next(e for e in entries if e["kind"] == "result" and e["call"] == "hang37")
-                assert result["outcome"] == "error" and "within 2000 ms" in result["output"], result
+        replies = []
+        with mcp.serve() as external, flow(replies, model="gpt-6.1-sol" if code else "opus") as f:
+            start(f)
+            cancelled = f.cwd / "cancelled.json"
+            servers = {"remote": {"url": external.url + "/mcp"},
+                       "local": {"command": sys.executable, "args": [str(Path(mcp.__file__).resolve())],
+                                 "env": {"MCP_CANCEL_FILE": str(cancelled)}}}
+            for name, connection in servers.items():
+                operation(f, "add", name=name, scope="global", config={
+                    **connection, "tools": ["hang"], "timeout": 200})
+            session = create(f)
+            for n, name in enumerate(servers, 1):
+                connected(f, session, name)
+                replies += [model_reply(code, f"mcp__{name}__hang", {}, id=f"hang37{name}"), model_reply(code, text="done")]
+                post(f, f"/sessions/{session}/input", {"text": f"Call the {name} tool once."})
+                entries = until(f, session, lambda es: sum(e["kind"] == "turn_end" for e in es) >= n, timeout=30)
+                call = next(e for e in entries if e["kind"] == "call" and e["call"] == f"hang37{name}")
+                result = next(e for e in entries if e["kind"] == "result" and e["call"] == f"hang37{name}")
+                assert result["outcome"] == "error" and "within 200 ms" in result["output"], result
                 assert "outcome is unknown" in result["output"] and "not retried" in result["output"], result
                 assert result["at"] - call["at"] < 5000, (call, result)
-                if legacy:
+                if name == "local":
                     until(f, session, lambda _: cancelled.exists(), timeout=2)
                     assert json.loads(cancelled.read_text())["method"] == "notifications/cancelled"
                 else:
                     # rmcp 2026-07-28 HTTP cancels its response stream without a wire notification.
                     assert len([r for r in external.requests if r["body"]["method"] == "tools/call"]) == 1, external.requests
-            print(f"PASS 37-mcp timeout {'GPT' if code else 'Claude'} {'stdio' if legacy else 'HTTP'} unknown, no replay", flush=True)
-
+                print(f"PASS 37-mcp timeout {'GPT' if code else 'Claude'} {'stdio' if name == 'local' else 'HTTP'} unknown, no replay", flush=True)
 
 if __name__ == "__main__":
     timeout_case()

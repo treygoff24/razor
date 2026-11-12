@@ -14,7 +14,7 @@ pub fn read(mut brand: Brand) -> Brand {
         .collect();
     brand.name = clip(&name, 64);
     if brand.name.is_empty() {
-        brand.name = Brand::default().name;
+        brand.name = Brand::<String>::default().name;
     }
     brand
         .colours

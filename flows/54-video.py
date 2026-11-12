@@ -129,7 +129,7 @@ with flow(replies, model="sol", config=config, env={"GEMINI_API_KEY": "flow-gemi
     assert next(e for e in entries if e["id"] == entry)["video"]["watcher"] == "watcher-1"
     status, _, body = call("GET", f"/sessions/{parent}/agent")
     [row] = json.loads(body)["children"]
-    assert (row["name"], row["launched"], row["model"]) == ("watcher-1", entry, GEMINI), row
+    assert (row["name"], row["launched"], row["model"]) == ("watcher-1", entry, "gemini"), row
     watcher = row["session"]
     full = str(f.home / ".razor/sessions" / parent / two)
     asked = json.dumps([b for b, _ in spooled("gpt") if "it stutters" in json.dumps(b)][0]["input"])

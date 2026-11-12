@@ -109,7 +109,13 @@ class Apple:
 def apple(folder: Path, key_id: str = "FLOWKEY48", team: str = "FLOWTEAM48"):
     """Yields the stand-in, its URL in `url`; a clean exit fails if a request was not signed."""
     folder.mkdir(exist_ok=True)
-    stand_in = Apple(folder, key_id, team)
+    with listening(Apple(folder, key_id, team)) as stand_in:
+        yield stand_in
+
+
+@contextmanager
+def listening(stand_in):
+    """Listen for either push service using the same HTTP/2 transport."""
     listener = socket.create_server(("127.0.0.1", 0))
     stand_in.url = f"http://127.0.0.1:{listener.getsockname()[1]}"
 

@@ -21,6 +21,7 @@ pub(super) async fn read(
 ) -> Result<Response, Error> {
     let (mut message, mut calls, mut finish, mut usage, mut thought) =
         (Map::new(), Vec::new(), None, Value::Null, false);
+    let mut model = None;
     stream::events(response, |data| {
         if data == b"[DONE]" {
             let calls = std::mem::take(&mut calls);
@@ -29,11 +30,13 @@ pub(super) async fn read(
                 calls,
                 finish.take(),
                 &usage,
+                model.take(),
             ));
         }
         let Ok(mut chunk) = serde_json::from_slice::<Value>(data) else {
             return Some(Err(Error::Incomplete));
         };
+        model = chunk["model"].as_str().map(str::to_owned).or(model.take());
         if chunk["error"].is_object() {
             return Some(Err(Error::Incomplete));
         }
@@ -112,6 +115,7 @@ fn complete(
     mut calls: Vec<Value>,
     finish: Option<String>,
     usage: &Value,
+    model: Option<String>,
 ) -> Result<Response, Error> {
     match finish.as_deref() {
         Some("stop" | "tool_calls") => {}
@@ -157,6 +161,7 @@ fn complete(
         waited: 0,
     };
     Ok(Response {
+        model,
         items: vec![Value::Object(message)],
         usage,
         end_turn: true,

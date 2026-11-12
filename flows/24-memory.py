@@ -32,10 +32,10 @@ with flow(replies) as f:
     f.base()
     session = None
 
-    def use(tool, where=f, resume=None, **arguments):
+    def use(tool, where=f, resume=None, words="Keep RULING_FILES_24 in the project.", **arguments):
         """A turn of `where`'s session `resume`, else a new one, calling `tool`: the session and its result."""
         replies.extend([reply((None, f"mcp__razor__{tool}", arguments)), reply(text="saved")])
-        sid = where.ask(*(["--resume", resume] if resume else []), "Keep RULING_FILES_24 in the project.")["session"]
+        sid = where.ask(*(["--resume", resume] if resume else []), words)["session"]
         return sid, [e for e in where.record(sid) if e["kind"] == "result"][-1]
 
     def memory(**arguments):
@@ -58,10 +58,29 @@ with flow(replies) as f:
     assert not memory(action="search", query="lantern")["hits"] and list(retired.rglob(f"{new}.md")), "retirement did not move the file out of search"
     memory(action="write", kind="state", text="STATE_FILES_24 ready for a new session.", replaces="state")
     ruling = memory(action="write", kind="ruling", text="Keep the marker.")["id"]
+    person = next(e for e in reversed(list(f.record(session))) if e["kind"] == "input" and e["from"] == "person")
+    original = memory(action="get", id=ruling)["file"]
+    source = f"razor:{session}:l-{person['id']}"
+    assert f"---\nKeep the marker.\n\n{source}\n> {person['text']}" in original and f"cites: {source}" in original, original
+    other_words = "Keep the second marker too.\nExact words on two lines."
+    _, second = use("memory", resume=session, words=other_words, action="write", kind="ruling", text="Keep both markers.")
+    second = json.loads(second["output"])["id"]
+    second_file = memory(action="get", id=second)["file"]
+    assert "> " + other_words.replace("\n", "\n> ") in second_file, "ruling lost multiline original words"
+    for fields, refusal in [({"ref": 1}, "holds no words"), ({"expires": "2099-01-01"}, "standing decision")]:
+        failed = use("memory", resume=session, action="write", kind="ruling", text="Must not land.", **fields)[1]
+        assert failed["outcome"] == "error" and refusal in failed["output"], failed
+    legacy = next((f.home / ".razor/memory").rglob(f"{ruling}.md")).with_name("ruling-legacy24.md")
+    legacy.write_text(f'---\nsource: {source}\n---\nthe human said ({source}): "LEGACY_WORDS_24"\n\nagent\'s reading:\nRead the old marker.')
+    # A ruling from before Razor, as the one-time import wrote it, and one with no quotation.
+    old_words = "loom:main-r1:l-7\n> PRE_RAZOR_WORDS_24"
+    legacy.with_name("ruling-old24.md").write_text(f"---\nsource: {source}\n---\nKeep the old marker.\n\n{old_words}")
+    legacy.with_name("ruling-bare24.md").write_text(f"---\nsource: {source}\ncites: {source}\n---\nKeep the bare marker.")
     replies.append(reply(text="opened"))
     f.ask("Read project memory.")
     page = f.sent()[-1]
-    assert "STATE_FILES_24" in page and "RULING_FILES_24" in page and ruling in page, "new session lost state or ruling"
+    assert "STATE_FILES_24" in page and "Keep the marker." in page and ruling in page, "new session lost state or ruling"
+    assert "RULING_FILES_24" not in page and "LEGACY_WORDS_24" not in page and "Read the old marker." in page, "page showed quotations or lost the old rule"
     replies.extend([reply((None, "mcp__razor__agent", {"action": "start", "name": "helper",
                          "brief": "Read the project's memory and answer."}), match="START_HELPER_24"),
                     reply(text="started", match="START_HELPER_24"),
@@ -96,15 +115,24 @@ with flow(replies) as f:
     config.write_text(config.read_text().replace("night = false", 'night = "03:00"'))
     # Large ordinary histories plus wiki instructions used to cut older session ids out
     # after digest assembly. Exercise the actual schedule admission's 64 KiB bound.
-    for _ in range(24):
-        replies.append(reply(text="Source evidence. " * 100))
-        f.ask("Source evidence. " * 100)
+    # The 24 sessions take their turns at once.
+    replies.extend(reply(text="Source evidence. " * 100) for _ in range(24))
+    fillers = [post(f, "/sessions", {"cwd": str(f.cwd)})["session"] for _ in range(24)]
+    for filler in fillers:
+        post(f, f"/sessions/{filler}/input", {"text": "Source evidence. " * 100})
+    for filler in fillers:
+        until(f, filler, lambda es: any(e["kind"] == "turn_end" for e in es), timeout=60)
     instructions = f.home / ".razor/memory/all/wiki/_instructions.md"
     instructions.parent.mkdir(parents=True, exist_ok=True)
     instructions.write_text("Keep useful source evidence.\n" * 560)
     before = set(sessions.iterdir())
-    replies.extend([response([response_call("bash", '{"command":"touch forbidden-dream-write"}', "dream_shell")]), done(),
-                    response([response_call("memory", json.dumps({"action": "write", "kind": "ruling", "text": "Must not land."}), "dream_ruling")]), done()])
+    replies.extend([response([response_call("bash", '{"command":"touch forbidden-dream-write"}', "dream_shell"),
+                             response_call("message", '{"type":"question","text":"Keep both markers?"}', "dream_question")]), done(), done(),
+                    response([response_call("memory", json.dumps({"action": "write", "kind": "ruling", "text": "Must not land."}), "dream_ruling")]),
+                    response([response_call("memory", json.dumps({"action": "write", "kind": "ruling", "text": "Keep the markers together.", "replaces": [ruling, second]}), "dream_merge"),
+                              response_call("memory", json.dumps({"action": "write", "kind": "ruling", "text": "Keep the old marker always.", "replaces": "ruling-old24"}), "dream_old"),
+                              response_call("memory", json.dumps({"action": "write", "kind": "ruling", "text": "Keep the bare marker always.", "replaces": "ruling-bare24"}), "dream_bare"),
+                              response_call("memory", json.dumps({"action": "write", "kind": "ruling", "text": "Keep it.\n\nloom:main-r1:l-8\n> NEW_WORDS", "replaces": "ruling-legacy24"}), "dream_new")]), done()])
     started = f.run("dream", str(f.cwd))
     assert started.returncode == 0, started
     dream = started.stdout.strip()
@@ -119,16 +147,40 @@ with flow(replies) as f:
     assert refused["outcome"] == "error" and not (f.cwd / "forbidden-dream-write").exists(), refused
     assert any(all(part in line for part in (cited, cite, "awaiting merge", branch))
                for line in scheduled["text"].splitlines()), "citation lost its unmerged helper branch"
-    # A real person's input supplies valid ruling provenance; the dreaming role still refuses.
+    question = next(e["id"] for e in dreamed if e.get("call") == "dream_question" and e["kind"] == "call")
+    answer = post(f, f"/sessions/{dream}/asks/{question}", {"text": "Keep this decision in the project."})["entry"]
+    dreamed = until(f, dream, lambda es: any(e["kind"] == "turn_end" and answer in e["inputs"] for e in es))
+    assert dreamed[-1].get("closed"), "dream stayed open after the person's answer"
+    # A person message gives a valid default citation; dreaming must still refuse a new ruling.
     f.ask("--resume", dream, "Keep this decision in the project.")
-    refused = next(e for e in f.record(dream) if e["kind"] == "result" and e["call"] == "dream_ruling")
-    assert refused["outcome"] == "error", "dreaming wrote a ruling"
+    dreamed = list(f.record(dream))
+    refused = next(e for e in dreamed if e["kind"] == "result" and e["call"] == "dream_ruling")
+    assert refused["outcome"] == "error" and "replacing existing rulings" in refused["output"], refused
+    merged = next(e for e in dreamed if e.get("call") == "dream_merge" and e["kind"] == "result")
+    assert merged["outcome"] == "success", merged
+    combined = memory(action="get", id=json.loads(merged["output"])["id"])["file"]
+    for previous in (original, second_file):
+        quote = previous.split("---\n", 2)[-1].split("\n\n", 1)[1]
+        assert quote in combined and f"cites: {quote.splitlines()[0]}" in combined, "merged ruling lost original words or citation"
+    assert all(list(retired.rglob(f"{old}.md")) and not legacy.with_name(f"{old}.md").exists()
+               for old in (ruling, second)), "merge did not retire both rulings"
+    # A replacement carries a pre-Razor quotation under its own source, unchanged and outside the
+    # cites; a ruling with no quotation, or a new quotation written into the rule, is still refused.
+    carried, bare, new = (next(e for e in dreamed if e.get("call") == call and e["kind"] == "result")
+                          for call in ("dream_old", "dream_bare", "dream_new"))
+    assert carried["outcome"] == "success", carried
+    carried = memory(action="get", id=json.loads(carried["output"])["id"])["file"]
+    assert carried.endswith(f"Keep the old marker always.\n\n{old_words}") and "cites: loom" not in carried, carried
+    assert bare["outcome"] == "error" and legacy.with_name("ruling-bare24.md").exists(), bare
+    assert new["outcome"] == "error" and "one line" in new["output"] and legacy.exists(), new
 
     # Two homes share tasks through a bare repository's hidden ref: a claim on one is refused on
     # the other, a write while the remote is unreachable is refused, and closing releases a claim.
     remote = f.home / "tasks.git"
     there = lambda *a: subprocess.run(["git", "--git-dir", remote, *a], capture_output=True, text=True).stdout
     there("init", "--bare")
+    f.git("config", "user.name", "Flow")
+    f.git("config", "user.email", "flow@example.invalid")
     f.git("remote", "add", "origin", "~/tasks.git")  # git's own home form, which it expands
     (f.cwd / ".razor").mkdir()
     (f.cwd / ".razor/config.local.toml").write_text('[tasks]\nremote = "origin"\n')
@@ -298,26 +350,20 @@ with flow(replies) as f:
     assert "closed:" not in nested_task.read_text(), nested_task.read_text()
     assert [p.read_text().split("---\n")[-1].strip() for p in nested_task.parent.glob("comments/2/*.md")] == ["Nested project report."]
 
-# A session in a resident's folder cannot replace its state; its /done names the home session
-# and a refused write returns the existing note, including for a session opened by cwd.
-with flow([reply((None, 'mcp__razor__memory', {'action': 'write', 'kind': 'state', 'text': 'HOME_STATE_348'}), match='HOME_348'),
-           reply(text='saved', match='HOME_348'),
-           reply((None, 'mcp__razor__memory', {'action': 'write', 'kind': 'state', 'text': 'THREAD_STATE_348'}), match='THREAD_348'),
-           reply(text='refused', match='THREAD_348'),
-           reply(text='closed', match='The person asked for `/done`')], config='[server]\naddress = "127.0.0.1:0"') as f:
-    from server import start
-    (f.cwd / 'persona.md').write_text('You are Ember.')
-    with (f.home / '.razor/config.toml').open('a') as config:
-        config.write(f'\n[residents.ember]\ncwd = {json.dumps(str(f.cwd))}\nstartup = [{json.dumps(str(f.cwd / "persona.md"))}, "razor"]\n')
-    start(f)
-    post(f, '/sessions/ember/input', {'text': 'HOME_348'})
-    until(f, 'ember', lambda es: any(e['kind'] == 'turn_end' for e in es))
-    thread = post(f, '/sessions', {'cwd': str(f.cwd)})['session']
-    post(f, f'/sessions/{thread}/input', {'text': 'THREAD_348'})
-    entries = until(f, thread, lambda es: any(e['kind'] == 'turn_end' for e in es))
-    refused = next(e for e in entries if e['kind'] == 'result')
-    assert refused['outcome'] == 'error' and 'HOME_STATE_348' in refused['output'] and 'ember' in refused['output'], refused
-    post(f, f'/sessions/{thread}/done', {})
-    entries = until(f, thread, lambda es: any(e.get('closed') for e in es))
-    closeout = next(e['text'] for e in entries if e['kind'] == 'input' and 'The person asked for `/done`' in e.get('text', ''))
-    assert 'ember' in closeout and '`message`' in closeout and "write the project's state note" not in closeout, closeout
+# A start claims the child's project, and reports both the claim and a competing refusal.
+    replies += [tool("START_24", "agent", action="start", name="claim24", cwd=str(other.cwd), task=1, brief="Hold."),
+                tool("START_24", "agent", action="wait"), reply(text="Started.", match="START_24"), reply(text="Held.", match="You are claim24,")]
+    parent = f.ask("START_24")["session"]
+    launched = json.loads(next(e["output"] for e in f.record(parent) if e["kind"] == "result"))
+    replies += [tool("COMPETE_24", "agent", action="start", name="compete24", cwd=str(other.cwd), task=1, brief="Hold."),
+                tool("COMPETE_24", "agent", action="wait"), reply(text="Started.", match="COMPETE_24"), reply(text="Held.", match="You are compete24,")]
+    third = replace(f, cwd=f.cwd / "third")
+    third.cwd.mkdir()
+    third.base()
+    second = third.ask("COMPETE_24")["session"]
+    refused = json.loads(next(e["output"] for e in f.record(second) if e["kind"] == "result"))
+    files = list((f.home / ".razor/tasks").rglob("1.md"))
+    claimed = next(p.read_text() for p in files if "title: Other work" in p.read_text())
+    untouched = next(p.read_text() for p in files if "title: Helper work" in p.read_text())
+    assert launched.get("task") == {"id": 1, "title": "Other work", "claimed": True} and launched["session"] in claimed and "claim:" not in untouched, (launched, claimed, untouched, refused)
+    assert isinstance(refused.get("task"), str) and "is claimed by" in refused["task"], refused

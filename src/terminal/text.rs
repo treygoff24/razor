@@ -438,10 +438,13 @@ pub(super) fn effort(value: crate::protocol::Effort) -> &'static str {
     }
 }
 
-/// A model's display name: `claude-opus-5-5` is `Opus 5.5`.
+/// A model's display name: `deepseek` is `DeepSeek`, `claude-opus-5-5` is `Opus 5.5`.
 pub(super) fn model(s: &str) -> String {
     if s.is_empty() {
         return "model unknown".into();
+    }
+    if let Some(label) = crate::profiles::label(s) {
+        return label.into();
     }
     let s = s.strip_prefix("claude-").unwrap_or(s);
     let s = s.split('[').next().unwrap_or(s);

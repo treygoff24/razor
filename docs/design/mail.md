@@ -195,7 +195,7 @@ The headers, the Post input and the 512 name words are data files; the tool text
 
 ## Where this departs from the spec
 
-1. **Today's mail reaches the model as bare words.** `rendered` (`src/controller/session/conversation.rs:214-223`) sends `input.text` alone, and `mail` (`src/children/message.rs:168-186`) admits the sender's words unchanged, so a parent of five children cannot tell which wrote. `heard` fixes it at render time; flow 13 keeps passing, since the record still holds the bare words.
+1. **Today's mail reaches the model as bare words.** `rendered` (`src/controller/session/conversation.rs:214-223`) sends `input.text` alone, and `mail` (`src/children/message.rs:168-186`) admits the sender's words unchanged, so a parent of five children cannot tell which wrote. `heard` fixes it at render time; flow 11 keeps passing, since the record still holds the bare words.
 2. **The spec's mail is parent and child only.** The glossary's **mail** ("between a parent and a child") and section 4's cut of "cross-session channels, rooms, signing and locks" need Trey's 2026-10-29 words beside them: direct mail now spans sessions, realms and machines, while channels still do not.
 3. **"One authenticated API server per machine"** (section 3): a machine can run more than one, so an address names a server, not a machine.
 4. **The 2026-10-27 keep list has "residents' Post address and mailbox".** A resident's Post address is made at its first `post` command, not at its first start (Trey agreed, 2026-10-29); its Razor address works from the start.

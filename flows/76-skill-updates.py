@@ -7,6 +7,7 @@ import shutil
 import sys
 import time
 from claude import reply
+from clock import wall_clock
 from driver import BINARY, REPLIES, Reply, flow
 from server import send, start, stop, wait
 
@@ -22,8 +23,8 @@ def skill(path, text):
     (path / "SKILL.md").write_text(f"---\ndescription: Flow skill.\n---\n{text}\n")
 
 
-with flow([reply(("toolu_update", "mcp__razor__skill", {"name": "moving"})),
-           Reply((REPLIES / "done.sse").read_bytes())] * 2, config='pack="../../pack"\n') as f:
+with wall_clock(still=False) as (_, clock, advance), flow([reply(("toolu_update", "mcp__razor__skill", {"name": "moving"})),
+           Reply((REPLIES / "done.sse").read_bytes())] * 2, config='pack="../../pack"\n', env=clock) as f:
     root = f.home.parent
     upstream, pack, library = (root / name for name in ("upstream", "pack", "library"))
     upstream.mkdir()
@@ -175,6 +176,7 @@ sys.exit(result.returncode)
     (root / "hang").touch()
     start(f)
     wait(lambda: (root / "child").exists(), 20, "vendor stand-in never started")
+    spawned = time.monotonic()
     other = f.home / "other-razor"
     other.mkdir()
     (other / "config.toml").write_text(config.read_text())
@@ -185,7 +187,12 @@ sys.exit(result.returncode)
         wait(lambda: "holds the lock" in (other / "server.log").read_text(), 10, "second home did not skip")
         assert len((root / "calls").read_text().splitlines()) == 2
         # Timeout kills the entire process group; the server still answers a resident request.
-        wait(lambda: "exceeded two minutes" in log.read_text(), 135, "vendor timeout was not reported")
+        # The two minutes pass on the server's monotonic clock: not over at 115 s, over by 121 s.
+        advance((ahead := 115 - (time.monotonic() - spawned)) * 1000, monotonic=True)
+        time.sleep(1.2)
+        assert "exceeded two minutes" not in log.read_text(), "vendor stopped before two minutes"
+        advance((ahead + 6) * 1000, monotonic=True)
+        wait(lambda: "exceeded two minutes" in log.read_text(), 10, "vendor timeout was not reported")
         child = int((root / "child").read_text())
         wait(lambda: subprocess.run(["ps", "-p", str(child), "-o", "stat="], capture_output=True,
                                     text=True).stdout.strip().strip("s+") in ("", "Z"), 10, "timed-out descendant survived")

@@ -11,7 +11,7 @@ pub(crate) use remote::{
     child, child_row, continuation, deliver, descendants, records, recover, recover_loaded, root,
     update,
 };
-pub(crate) use search::search;
+pub(crate) use search::{digest, search};
 mod turn;
 mod watch;
 pub(crate) use message::{name, path_identity, project, receive, repo, repo_info};

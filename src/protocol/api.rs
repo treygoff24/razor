@@ -85,6 +85,9 @@ pub(crate) struct Models {
     /// Every listed model's offered efforts, from least to most, including uncapped models.
     pub(crate) efforts: BTreeMap<String, Vec<Effort>>,
     pub(crate) speeds: BTreeMap<String, Vec<SpeedChoice>>,
+    /// Each listed family's display name, such as `DeepSeek`; other names show as given.
+    #[serde(default)]
+    pub(crate) labels: BTreeMap<String, String>,
     /// Checked only with `?ready=true`; absent means Razor found the credentials, not that a
     /// model request will succeed. Without that query this map is empty.
     pub(crate) unavailable: BTreeMap<String, String>,
@@ -242,14 +245,20 @@ impl Delivery {
 pub(crate) const DEVICES: &str = "devices.json";
 
 /// The key is present only in the answer that enrolled this device.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Device {
     pub(crate) name: String,
     pub(crate) added: Millis,
     pub(crate) key: Option<String>,
-    /// Set when the device is another Razor server: this server calls it at `http://<address>`
-    /// with the same key, and an address names it as `@<name>`.
-    pub(crate) address: Option<String>,
+    /// Public iroh identities belonging to this one enrollment, including its extensions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) keys: Vec<iroh::PublicKey>,
+    /// Relays exchanged at pairing; later dials use only these stored addresses. Never listed:
+    /// an address may hold a relay's password.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) relays: Vec<iroh::RelayUrl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) server_id: Option<String>,
     /// The phone's notification token; stored in `devices.json` and never listed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) push: Option<Push>,
@@ -259,6 +268,13 @@ pub(crate) struct Device {
     /// What its notifications bring when it set that; stored as `push`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) notifications: Option<Notifications>,
+}
+
+impl Device {
+    /// Only an enrollment with a server identity and network keys has server authority.
+    pub(crate) fn is_peer(&self) -> bool {
+        self.server_id.is_some() && !self.keys.is_empty()
+    }
 }
 
 /// What a device's notifications bring. `questions`: questions and stuck top-level sessions;
@@ -283,11 +299,21 @@ pub(crate) enum NotificationLevel {
     Off,
 }
 
-/// A notification token from Apple's push service, for the environment the app was signed for.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A device or follow token and the service that issued it; APNs also needs its environment.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct Push {
     pub(crate) token: String,
-    pub(crate) environment: Environment,
+    #[serde(default)]
+    pub(crate) service: PushService,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) environment: Option<Environment>,
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PushService {
+    #[default]
+    Apns,
+    Fcm,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -296,7 +322,7 @@ pub(crate) enum Environment {
     Production,
 }
 
-/// A Live Activity following one top-level session, with that activity's own token.
+/// One top-level session followed through an activity token (APNs) or device token (FCM).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Follow {
     pub(crate) session: SessionId,
@@ -421,10 +447,15 @@ pub(crate) struct SkillState {
 /// One row replaces the previous row; absent facts are never invented as zero.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentView {
+    /// The last turn's provider-reported model, separate from the chosen family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) served_model: Option<String>,
     pub(crate) session: SessionId,
     pub(crate) parent: Option<SessionId>,
     pub(crate) launched: Option<EntryId>,
     pub(crate) name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) avatar: Option<String>,
     pub(crate) model: String,
     pub(crate) effort: Effort,
     #[serde(default)]
@@ -432,6 +463,9 @@ pub struct AgentView {
     pub(crate) state: State,
     #[serde(default)]
     pub(crate) closing: bool,
+    /// The close was asked while the session worked, so it keeps Working's place until it closes.
+    #[serde(default)]
+    pub(crate) closing_working: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) close_reason: Option<super::CloseReason>,
     pub(crate) headline: String,
@@ -560,21 +594,25 @@ pub(crate) struct UsageWindow {
     pub(crate) reason: Option<String>,
 }
 
-/// A pack's product name and colours, passed through to clients; nothing in the core reads it.
+/// Product name, colours and avatar pictures; config uses file entries, clients base64 PNGs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Brand {
+#[serde(default, bound(deserialize = "T: Deserialize<'de>"))]
+pub struct Brand<T = String> {
     /// Wherever a client names the product.
     pub(crate) name: String,
     /// Theme colour names to `#rrggbb`. A client keeps
     /// its own colour for each name left out and ignores what it cannot use.
     pub(crate) colours: BTreeMap<String, String>,
+    pub(crate) avatars: BTreeMap<String, T>,
+    pub(crate) resident_avatars: BTreeMap<SessionId, String>,
 }
-impl Default for Brand {
+impl<T> Default for Brand<T> {
     fn default() -> Self {
         Self {
             name: "Razor".into(),
             colours: BTreeMap::new(),
+            avatars: BTreeMap::new(),
+            resident_avatars: BTreeMap::new(),
         }
     }
 }
@@ -661,8 +699,11 @@ pub enum Live {
     Pending {
         inputs: Vec<EntryId>,
     },
+    /// Reply words, `start` on the first shown since the last `Text` entry, turn end or void.
     Delta {
         text: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        start: bool,
     },
     /// Words of the session's `n`th thought since it loaded, `start` on its first; each
     /// `Thinking` entry supersedes the oldest thought no entry took and no `void` line voided.
@@ -690,7 +731,7 @@ pub enum Live {
         agents: Vec<AgentView>,
         config: Option<String>,
         /// The last good config's; sent again whenever it changes.
-        brand: Brand,
+        brand: Box<Brand>,
         /// As `brand`.
         ui: Box<Ui>,
         /// As `brand`.

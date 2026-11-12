@@ -1,7 +1,7 @@
 //! `razor install`: the one service that runs `razor serve` and restarts it after a failure.
 
 use super::{Error, TEXT, other};
-use crate::config::{setup, shipped};
+use crate::{api, config, controller};
 use std::ffi::CStr;
 use std::fs::{File, TryLockError};
 use std::io::{Read, Write};
@@ -13,6 +13,8 @@ use tokio::process::Command;
 
 /// Maximum time for runtime tasks to finish after the API has shut down.
 pub const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+/// Lets the process exit release its lock after both bounded shutdown stages and runtime teardown.
+const STOP_MARGIN: Duration = Duration::from_secs(1);
 
 /// Write and enable the service that runs `razor serve` and restarts it within a minute of a
 /// failure: a systemd user unit on Linux, which starts at boot when lingering is on and at login
@@ -49,12 +51,11 @@ pub async fn install(home: &Path) -> Result<String, Error> {
     for word in &mut argv {
         *word = encode(word).replace('$', dollar);
     }
-    let saved_home = encode(&home.display().to_string());
     let values = [
         ("{label}", encode(&label)),
         ("{command}", argv.join(between)),
         ("{path}", encode(&std::env::var("PATH").unwrap_or_default())),
-        ("{home}", saved_home.clone()),
+        ("{home}", encode(&home.display().to_string())),
     ];
     let existing = check_service(home).await?;
     stop(home).await?;
@@ -286,7 +287,7 @@ pub async fn stop(home: &Path) -> Result<(), Error> {
         }
     };
     tokio::time::timeout(
-        crate::api::SHUTDOWN_TIMEOUT + TEARDOWN_TIMEOUT + Duration::from_secs(1),
+        api::SHUTDOWN_TIMEOUT + controller::CLOSE_TIMEOUT + TEARDOWN_TIMEOUT + STOP_MARGIN,
         released,
     )
     .await
@@ -402,7 +403,7 @@ pub async fn desktop(home: PathBuf) {
         Some([control, _]) => control,
         None => std::env::var_os("DISPLAY").is_some(),
     };
-    let program = tokio::task::spawn_blocking(|| shipped("cua-driver"));
+    let program = tokio::task::spawn_blocking(|| config::shipped("cua-driver"));
     let (true, Ok(Some(program))) = (usable, program.await) else {
         return;
     };
@@ -414,7 +415,7 @@ pub async fn desktop(home: PathBuf) {
         let mut command = Command::new(&program);
         command.args(["serve", "--embedded", "--parent-liveness-stdio", "--socket"]);
         command.arg(&socket).arg("--pid-file").arg(&pid);
-        command.env_clear().envs(setup::environment());
+        command.env_clear().envs(config::setup::environment());
         command.stdin(Stdio::piped()).stdout(Stdio::null());
         let started = std::time::Instant::now();
         let mut child = match command.kill_on_drop(true).spawn() {

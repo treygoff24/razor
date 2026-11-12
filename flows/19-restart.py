@@ -1,8 +1,7 @@
-"""The server is killed while a session waits on its child and runs a background job; on restart
-the session resumes in a rebuilt context, the child is rebuilt and finishes and its report
-reaches the parent, and the job, still running, is taken back: its end is noticed. A server killed
-during `/done`'s closing turn still closes the session. Under systemd, stopping a service with
-the settings `razor install` writes does the same to a turn and its job. A closing row's final state is read directly after it leaves the live feed."""
+"""Restart recovers sessions, children, reports and jobs; unknown calls never run twice.
+Closing sessions stay closed, expired turns stay held, and unread deliveries retain old owners.
+The systemd unit preserves jobs; bridge cleanup survives SIGKILL with a wedged SDK."""
+from contextlib import suppress
 import json
 import os
 import signal
@@ -51,6 +50,16 @@ replies = [
           match=child),
     reply(("toolu_finish", "mcp__razor__agent", {"action": "finish", "status": "finished", "report": "Counted once."}),
           match=child)]
+# Razor dies after a command has done its work and before its result is recorded: on restart the
+# call's outcome is unknown, its job ends unknown, and the command is never run again. The
+# command's own last act kills the server, its parent, so no result can be recorded. It first
+# waits for its job's start to be recorded, as any command that runs a moment does; on a busy
+# machine the kill could otherwise land before it, leaving no job to end.
+dies = "UNKNOWN_19"
+command = ("printf 'ran\\n' >> runs.txt; until grep -qs '\"event\":\"started\"' "
+           "\"$HOME/.razor/sessions/$RAZOR_SESSION/record.jsonl\"; do sleep 0.02; done; kill -KILL $PPID")
+replies += [reply(("toolu_dies", "Bash", {"command": command}), match=dies),
+            *[Reply((REPLIES / "done.sse").read_bytes(), match=dies)] * 2]
 
 
 def alive(pid):
@@ -73,10 +82,13 @@ with flow(replies) as f:
     sid = next(e["session"] for e in f.record(parent) if e["kind"] == "child")
     server.until(f, sid, lambda es: any(e["kind"] == "job" for e in es))
     job = next(e for e in f.record(parent) if e["kind"] == "job")
-    os.kill(pid, signal.SIGKILL)
+    killer = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    order = server.post(f, f"/sessions/{killer}/input", {"text": f"{dies}: run the command once."})["entry"]
     server.gone(pid)
     assert alive(job["pid"]), "the background job died with the server"
-    before, early = list(f.record(parent)), list(f.record(sid))
+    before, early, unknown = list(f.record(parent)), list(f.record(sid)), list(f.record(killer))
+    assert [e["kind"] for e in unknown if e["kind"] in ("call", "result")] == ["call"], unknown
+    assert (f.cwd / "runs.txt").read_text() == "ran\n"
     server.start(f)
     entries = server.until(f, parent, lambda es: any(e["kind"] == "turn_end" and ask in e["inputs"] for e in es))
     assert entries[:len(before)] == before, "the restart rewrote the parent's record"
@@ -92,6 +104,28 @@ with flow(replies) as f:
     assert result(later, "toolu_count")["outcome"] == "unknown", later
     assert (f.cwd / "counted").read_text() == "x", "the child's command ran again, or not in its parent's folder"
     assert alive(job["pid"]) and not [e for e in entries if e["kind"] == "job" and e["event"] == "ended"], entries
+    recovered = server.until(f, killer, lambda es: any(e["kind"] == "turn_end" and order in e["inputs"] for e in es))
+    recovered = server.until(f, killer, lambda es: any(
+        e["kind"] == "turn_end" and any(i["id"] in e["inputs"] for i in es if i.get("from") == "razor")
+        for e in es))
+    notices = [e for e in recovered if e.get("from") == "razor"]
+    assert len(notices) == 1 and "toolu_dies" in notices[0]["text"], notices
+    assert recovered[:len(unknown)] == unknown, "the restart rewrote the record"
+    end = next(e for e in recovered if e["kind"] == "turn_end")
+    assert end["end"] == "done", end
+    calls = [e for e in recovered if e["kind"] == "call"]
+    outputs = [e for e in recovered if e["kind"] == "result"]
+    assert [e["call"] for e in calls] == ["toolu_dies"], calls
+    assert len(outputs) == 1 and outputs[0]["call"] == "toolu_dies", outputs
+    assert outputs[0]["outcome"] == "unknown" and outputs[0]["id"] > len(unknown), outputs
+    jobs = [(e["event"], e.get("end")) for e in recovered if e["kind"] == "job"]
+    assert jobs == [("started", None), ("ended", "unknown")], jobs
+    rebuilds = [e for e in recovered if e["kind"] == "rebuild"]
+    assert len(rebuilds) == 1 and rebuilds[0]["trigger"] == "restart", rebuilds
+    assert (f.cwd / "runs.txt").read_text() == "ran\n", "the command ran again"
+    fresh = json.loads([body for body in f.sent() if dies in body][1])
+    assert "runs.txt" in json.dumps(fresh["messages"]), "the rebuilt context omits the call"
+    assert "toolu_dies" not in json.dumps(fresh["messages"]), "the old call was replayed as a tool_use"
     (f.cwd / "release").touch()
     entries = server.until(f, parent, lambda es: any(
         e["kind"] == "turn_end" and any(i["id"] in e["inputs"] for i in es if i.get("from") == "razor")
@@ -101,7 +135,20 @@ with flow(replies) as f:
     # Claude Code reports 1,000,000 for opus; with no row Razor fills 500,000 and hands over at 0.9.
     measured = {k: entries[-1][k] for k in ("context", "window", "threshold")}
     assert measured["context"] and (measured["window"], measured["threshold"]) == (500000, 0.9), measured
-    server.stop(f, signal.SIGKILL)
+    # A wedged SDK child cannot cooperate with EOF or TERM. Its bridge must stay alive to
+    # finish the SDK's KILL escalation even when the server dies without shutting down.
+    pid = json.loads((f.home / ".razor/server.json").read_text())["pid"]
+    parents = dict(map(int, line.split()) for line in subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True).splitlines())
+    clis = [p for p, owner in parents.items() if parents.get(owner) == pid]
+    assert clis, "the server had no SDK child to stop"
+    try:
+        for cli in clis:
+            os.kill(cli, signal.SIGSTOP)
+        server.stop(f, signal.SIGKILL)
+    finally:
+        for cli in clis:
+            with suppress(ProcessLookupError):
+                os.kill(cli, signal.SIGCONT)
     server.start(f)
     server.send(f, "GET", "/sessions").read()
     assert all(server.agents(f)[parent][k] == v for k, v in measured.items()), server.agents(f)[parent]
@@ -149,10 +196,12 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
     assert any(e["kind"] == "job" and e["event"] == "ended" for e in f.record(sid))
     assert not [e for e in f.record(parent) if e["kind"] == "input" and e["id"] != ask], "the child woke its parent"
 
+    rows = {}
     def marked():  # the status rows follow the record's closing entries
-        rows = server.agents(f)
-        return all(rows.get(s, {}).get("state") == "needs_you" and rows[s].get("interrupted") for s in (parent, sid)) and rows
-    held = server.wait(marked, 10, "the restart never marked both held turns interrupted")
+        rows.clear()
+        rows.update(server.agents(f))
+        return all(rows.get(s, {}).get("state") == "needs_you" and rows[s].get("interrupted") for s in (parent, sid)) and rows.copy()
+    held = server.wait(marked, 10, rows)
     assert all((f.home / ".razor/live" / s).exists() for s in (parent, sid))
     (f.cwd / "release19").touch()
     server.until(f, parent, lambda es: any(e["kind"] == "job" and e["event"] == "ended" for e in es))
@@ -161,7 +210,7 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
     counts = {s: len(list(f.record(s))) for s in (parent, sid)}
     server.stop(f, signal.SIGKILL)
     server.start(f)
-    assert all(server.agents(f)[s].get("interrupted") for s in (parent, sid))
+    server.wait(marked, 10, rows)
     time.sleep(0.25)
     assert counts == {s: len(list(f.record(s))) for s in (parent, sid)}, "a held turn ended twice"
     assert len(f.sent()) == requests, "a second restart sent a model request"

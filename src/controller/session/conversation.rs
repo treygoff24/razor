@@ -74,13 +74,13 @@ impl Session {
     /// Why the conversation cannot go on with `model`, rendered as `profile`: another profile,
     /// or a latest reading at that model's rebuild threshold where its window is known.
     pub(super) fn unkept(&self, model: &str, profile: &Profile) -> Option<String> {
+        let name = crate::profiles::label(model).unwrap_or(model);
         if self.record.summary().profile_version != profile.version {
-            return Some(format!("this conversation does not carry over to {model}"));
+            return Some(format!("this conversation does not carry over to {name}"));
         }
         let (window, threshold) = limits(model, &self.settings.config, None);
-        let full = |w: u64| self.context >= Some((threshold * w as f64) as u64);
-        let over = window.is_some_and(full);
-        over.then(|| format!("the conversation is past {model}'s rebuild threshold"))
+        let over = window.is_some_and(|w| self.context >= Some((threshold * w as f64) as u64));
+        over.then(|| format!("the conversation is past {name}'s rebuild threshold"))
     }
 
     /// What a switch to each of `models` but the session's own reads without the prompt cache:
@@ -220,7 +220,7 @@ impl Session {
         let page = match resume {
             Some(_) => None,
             None => {
-                let memory = self.c.inner.memory.page(&self.c, &s.cwd, &self.id);
+                let memory = self.c.inner.memory.page(&self.c, s);
                 let (memory, skills) = tokio::join!(memory, self.tools.skills());
                 let page = opening.page(memory, skills, &self.tools.mcp_section());
                 profiles::save(&dir, &self.profile.prompt, &tools, &page).await;
@@ -350,9 +350,9 @@ impl Session {
             .into_iter()
             .map(|(id, i)| (id, self.rendered(id, i)))
             .unzip();
+        self.calls(&mut inputs).await?;
         self.delivered.extend(&taken);
         self.sent.extend(&taken);
-        self.calls(&mut inputs).await?;
         self.say(|session| ToBridge::Input { session, inputs })
             .await?;
         for input in taken {
@@ -362,10 +362,10 @@ impl Session {
     }
 
     /// Puts the unread call and meeting facts not yet sent to this conversation ahead of `inputs`,
-    /// as one input that its turn's end answers: every start, naming and end, the newest lines
-    /// within 64 KiB, and how many earlier lines were left out. A call is running only if this
-    /// server started it; a meeting until its end. A rebuild renders none of them, so it sends
-    /// them all again.
+    /// as one input that its turn's end answers, sent where it sits: after a rebuild's context,
+    /// before the batch. It holds every start, naming and end, the newest lines within 64 KiB, and
+    /// how many earlier lines were left out. A call is running only if this server started it; a
+    /// meeting until its end. A rebuild renders none of them, so it sends them all again.
     async fn calls(&mut self, inputs: &mut Vec<BridgeInput>) -> Result<(), Error> {
         let s = self.record.summary();
         let facts = s.voice_calls.iter().copied();
@@ -397,12 +397,12 @@ impl Session {
             room = room.saturating_sub(text.len());
             said.push(text);
         }
-        let mut meetings = s.meetings.iter();
-        let folder = oldest.and_then(|call| meetings.find(|m| m.id == call));
+        let folder = oldest.and_then(|call| s.meetings.iter().find(|m| m.id == call));
         let folder = folder.map(|m| m.folder.as_str());
         said.extend((left_out > 0).then(|| record::calls_left_out(left_out, folder)));
         said.reverse();
         self.delivered.extend(unsent.iter().map(|(id, _)| id));
+        self.sent.push(entry);
         let calls = BridgeInput {
             entry,
             text: said.concat(),
@@ -511,11 +511,12 @@ impl Session {
         let Some((mut line, _held)) = line else {
             return self.closed(None).await;
         };
+        let mut start = false;
         if let Some(c) = &mut self.conversation {
             c.resuming &= matches!(line.says, FromBridge::Closed { .. });
             c.interrupted &= !matches!(line.says, FromBridge::TurnEnd { .. });
             if let FromBridge::Delta { text } = &mut line.says {
-                *text = c.hold.push(text);
+                (*text, start) = c.hold.push(text);
             } else if let FromBridge::Entry {
                 body: Body::Text { .. },
                 ..
@@ -529,7 +530,7 @@ impl Session {
         match line.says {
             FromBridge::Entry { body, native } => self.entry(body, native).await?,
             FromBridge::Delta { text } if text.is_empty() => {}
-            FromBridge::Delta { text } => self.publish(&Live::Delta { text }),
+            FromBridge::Delta { text } => self.publish(&Live::Delta { text, start }),
             FromBridge::Thought { n, text, start } => self.thought(n, text, start, false),
             FromBridge::Void { n } => self.thought(n, String::new(), false, true),
             FromBridge::Run { call, tool, input } => self.run(call, tool, input).await?,
@@ -542,6 +543,7 @@ impl Session {
                 self.context(tokens, window).await?
             }
             FromBridge::TurnEnd {
+                model,
                 success,
                 reason,
                 message,
@@ -549,11 +551,15 @@ impl Session {
                 window,
                 took,
             } => {
+                self.served_model = model;
                 self.reported = Some(window).filter(|w| *w > 0).or(self.reported);
                 self.turn_ended(success, reason, message, usage, took)
                     .await?
             }
-            FromBridge::Settled { usage } => self.settled(usage).await?,
+            FromBridge::Settled { usage, model } => {
+                self.served_model = model;
+                self.settled(usage).await?;
+            }
             FromBridge::Closed { error } => self.closed(error).await?,
             FromBridge::Usage { windows } => lock(&self.c.inner.status).usage(&self.id, windows),
         }

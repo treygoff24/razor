@@ -27,6 +27,7 @@ pub(crate) fn interrupted(gap: Millis) -> Body {
         usage: Usage::default(),
         context: None,
         model: None,
+        served_model: None,
         window: None,
         threshold: None,
         closed: true,

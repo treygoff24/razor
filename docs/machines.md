@@ -1,63 +1,51 @@
 # More machines
 
-Pairing connects the Razor servers on two machines, each holding a key for the other, so that the terminal app on either shows the sessions, questions and deliveries of both, and an agent on one can start a helper on the other or send it mail. Each server keeps its own sessions and records; pairing lets them reach each other.
+Pairing connects the Razor servers on two machines, each knowing the other's key, so that the terminal app on either shows the sessions, questions and deliveries of both, and an agent on one can start a helper on the other or send it mail. Each server keeps its own sessions and records; pairing lets them reach each other.
 
-Paired servers talk plain HTTP with a bearer key on each request, so they must reach each other over a private network that encrypts traffic and decides who can connect. [Tailscale](https://tailscale.com) does both and is what this page uses.
+Paired servers reach each other by key, over connections encrypted end to end between the two servers. They connect directly when the networks between them allow it and through a relay, which forwards packets it cannot read, when they do not. No VPN, address or open port is needed. Without a setting Razor uses the public relays run by iroh's developers; [Running your own relay](relay.md) says how to use yours.
 
-## 1. Put the machines on Tailscale
+## 1. Pair two servers
 
-Install Tailscale on each machine and sign in to the same Tailscale network. Then run on each:
+On one machine, name the other and show a code:
 
 ```sh
-razor setup
+razor devices add laptop
 ```
 
-If the machines belong to different Tailscale networks (tailnets), use [Tailscale node sharing](https://tailscale.com/kb/1084/sharing): a device connects to one tailnet at a time. Share each machine with the user on the other tailnet and accept both invitations, so both Razor servers can start connections to each other. A share in only one direction allows connections to the shared machine, but does not let it start connections back. Check that both tailnets' access rules allow the chosen Razor port before pairing.
+It prints a code, as a QR code and as one line of text, and waits up to ten minutes. On the other machine, name the first and paste the line when asked:
+
+```sh
+razor devices join desk
+```
+
+The first command then says `laptop joined` and both servers list each other. The code works once; anyone who has it before it is used or expires can pair, so show it only where you would show a password. Ctrl-C withdraws it, and a second `razor devices add` replaces it.
+
+A name is 1 to 32 lowercase letters, digits and hyphens. `razor devices` lists every paired server and enrolled program by name, and `razor devices remove <name>` removes one: it stops working at once.
 
 Setup names this server from the system hostname and prints the name and where to change it: `name` under `[server]` in `~/.razor/config.toml`. The name also starts each new session's name; the display label follows it unless you set a separate `label`.
 
-
-With Tailscale running, setup fills an unset `[server] address` with this machine's Tailscale name (or its IP address if the name does not resolve here) and the first available port from 7433 through 7442. Your existing settings survive a rerun. Run `razor restart` if the server was already running when setup added its address. If Tailscale starts later, Razor keeps serving its local terminal and tries the configured address again every five seconds. `razor doctor` reports when it is not listening.
-
-## 2. Find and pair the other server
-
-Run on either machine:
-
-```sh
-razor devices find
-```
-
-It looks for online Razor servers on your tailnet. Suggested names come from Tailscale; the name each server reports appears beside them. Plain `razor devices` lists enrolled devices without scanning. Each discovered server comes with its add command, for example:
-
-```sh
-razor devices add laptop --address 100.104.105.106:7433
-```
-
-This enrolls the laptop on this machine and sends it a pairing request. Razor prints the confirmation command to run on the laptop:
-
-```sh
-razor devices add desk --address 100.101.102.103:7433
-```
-
-Run it there within ten minutes. That server verifies that the request's key belongs to its own enrollment on the server at the address you chose and enrolls this machine with the same key. Both sides require your add command; finding a machine never grants it access. If several machines have the same name, choose a different name in your add command. After a request expires or a server restarts, remove the incomplete enrollment and start again.
-
-If the other server cannot receive the request, Razor prints a command with `--key` instead; run that command on the other machine. Treat the key like a password. Older Razor versions use this manual path too.
-
-## Manual addresses and discovery limits
-
-Without Tailscale, use another private network that encrypts traffic, and set each server's reachable address yourself:
+To use only relays you name, list them on each server:
 
 ```toml
-[server]
-address = "100.101.102.103:7433"
-name = "desk"
+[network]
+relays = ["https://relay.example.net"]
 ```
 
-Then run `razor restart` and `razor devices add laptop --address <laptop-address:port>`. Bind to the private network's address, never `0.0.0.0` or a public address: anyone who can reach the port can try keys against it. With Tailscale you can find the IP using `tailscale ip -4`.
+Set it before pairing: a code carries the relays of the server that made it, and pairing refuses a server whose relays are outside the list. A relay you run yourself can admit only your people, each by a password in the address ([Running your own relay](relay.md)). `razor doctor` reports the relay connection and, for each paired server, whether it is reached directly or through a relay.
 
-Discovery runs only when you call `razor devices find`. It checks ports 7433 through 7442 and this server's configured port on up to 256 online peers, with 64 requests at once, replies up to 1 KiB, and a five-second scan limit after reading Tailscale's status. Large tailnets may return partial results. Custom ports outside that range on other servers need a typed address unless they match this server's port. Tailscale access rules and host firewalls must allow the connection.
+### Servers and apps paired by an earlier version
 
-A name is 1 to 32 lowercase letters, digits and hyphens. `razor devices` lists every paired server and enrolled program by name, and `razor devices remove <name>` removes one: its key stops working at once. Without `--address`, `razor devices add <name>` enrolls a client program rather than a server and shows its key once; treat that key like a password, since it can do anything the local terminal can.
+Earlier versions reached paired servers and the apps at an address on a private network, with a shared key on every request. Those pairs reach nothing now. Pair each one again once by code, under the name `razor devices` already lists for it: the entry is upgraded where it is, so a phone keeps its notification settings and the sessions it follows, and the old key and address are dropped. `[server] address` is no longer used, and `razor doctor` asks you to remove it. A `[remote]` that holds `address` and `key` is refused when you start a session; name the paired server instead ([below](#start-sessions-on-a-paired-server)).
+
+## 2. The phone and Mac apps
+
+The apps connect the same way: by key, encrypted end to end, with no VPN. On each computer the app should reach, name the device and show a code:
+
+```sh
+razor devices add phone
+```
+
+In the app, open Settings and choose Pair a Machine, then scan the QR code or paste the line. Pair the Mac app as `mac-app`. If `razor devices` already lists the phone or the Mac app from an earlier version, use that name, so it keeps its notification settings.
 
 ## What pairing gives you
 
@@ -66,22 +54,29 @@ A name is 1 to 32 lowercase letters, digits and hyphens. `razor devices` lists e
 | One list | Each machine's terminal app lists the other's sessions, questions and inbox beside its own, and opens, steers and stops them as if they were local. |
 | Helpers on another machine | An agent can start a helper on a paired server by naming it; the helper works in that machine's checkout, and merging its branch happens there. |
 | Mail across machines | Any agent can mail any other on a paired server, by name or session id. |
+| One nightly pass | For a project whose memory is shared, one of your paired servers runs the night's pass and reads your sessions from all of them ([Memory](memory.md#several-machines)). |
 | Shared settings | One server can keep the saved arrangements of the agents list (`/views`) and the voice settings for all of them: set `[server] shared` on the others to its id, the contents of `server.id` in its Razor home. |
 
 A server that stops answering keeps its last rows in the list, marked with how long since it was heard from. A Mac's server says it is going to sleep a second before the Mac sleeps, so the servers paired with it mark it at once instead of when their reads time out, and they list it answering again when it wakes. A paired server's key is a full key: it can do on this server anything this server's own terminal can, devices, settings and sign-ins included, so pair only machines you trust as you trust this one. Each pairing is direct: a server shows the servers it has paired, not their pairs.
 
-## Use a terminal without a local server
+## Start sessions on a paired server
 
-To run the terminal on the machine where you sit while its sessions live on another machine, install Razor and Tailscale on both. Give the server a private Tailscale address as above, then run `razor devices add laptop` on the server. Copy the key it prints securely to a private file on the laptop, for example `~/.razor/desk.key` (readable only by you). In the laptop's `~/.razor/config.toml`, set:
+Pair the two servers by code, then name the pair in the terminal machine's `~/.razor/config.toml`:
 
 ```toml
 [remote]
-address = "100.101.102.103:7433"
-key = "desk.key"
-folder = "/home/you/code/project" # optional: a folder on the server
+server = "desk"
+# folder = "/home/me/project"  # Optional path on desk.
 ```
 
-The key path is relative to the config file. Plain `razor`, `--continue`, `--resume` and `--print` connect to that server without starting one on the laptop; commands such as `razor devices` still manage the laptop's own server. New sessions and `--continue` use `folder` when set, otherwise the path of the directory where you launched Razor; that path must exist on the server. The new-agent chooser can also show the server's past folders. Configure `play` and `capture` on the laptop so its speakers and microphone are used; the server supplies speech and transcription. This connection uses the same private network and full-access key precautions as pairing above.
+Plain `razor`, `--continue`, `--resume` and `--print` use the local server's forwarding
+routes to reach `desk`. New sessions and `--continue` use `folder` when set, otherwise
+the path of the directory where you launched Razor; that path must exist on the
+paired server. An unqualified `--resume` id addresses `desk`; an id already written
+as `<id>@<server>` keeps its server. The new-agent chooser can select another folder
+or server.
+Configure `play` and `capture` on the terminal machine so its speakers and microphone
+are used; the session's owner supplies speech and transcription.
 
 ## More than one Razor on one machine
 
@@ -91,4 +86,4 @@ Each Razor home runs its own server, so one machine can hold two separate Razors
 RAZOR_HOME=~/.razor-second razor
 ```
 
-Give each home its own `[server] address` port if both should be reachable. `razor install` registers each home's background service under its own name, the home's folder without its leading dot (`razor` for `~/.razor`, `razor-second` for `~/.razor-second`), so each home can run as a service; it never replaces a service of the same name that runs another home.
+Each home has its own network key, so other machines pair with each one separately. `razor install` registers each home's background service under its own name, the home's folder without its leading dot (`razor` for `~/.razor`, `razor-second` for `~/.razor-second`), so each home can run as a service; it never replaces a service of the same name that runs another home.

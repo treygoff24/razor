@@ -205,6 +205,9 @@ pub enum Body {
     /// The first entry of every session, and only there.
     Start {
         cwd: PathBuf,
+        /// The memory owner at creation, retained when a worktree or folder goes away.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_root: Option<PathBuf>,
         model: String,
         #[serde(flatten)]
         settings: ModelSettings,
@@ -221,6 +224,10 @@ pub enum Body {
     },
     /// The session's new name, from the person or the agent.
     Name {
+        name: String,
+    },
+    /// The session's chosen avatar; empty clears the choice.
+    Avatar {
         name: String,
     },
     /// The person's effort choice, applied without an input or a new turn.
@@ -296,10 +303,12 @@ pub enum Body {
         end: End,
         usage: Usage,
         context: Option<u64>,
-        /// The model the turn ran on, which wrote its replies, and the limits resolved when it
-        /// ended; absent in synthetic ends.
+        /// The turn's chosen family or explicit pin; absent in synthetic ends.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// The actual provider-reported model for this turn, absent when none was reported.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        served_model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

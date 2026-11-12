@@ -4,7 +4,7 @@ Razor uses a small, fixed vocabulary: the same words appear in its settings, its
 
 ## The server and its clients
 
-The server does all the work, and everything else, the terminal app included, is a client of it. The server talks to the models, runs the agents' commands, and writes every record. The terminal app, `razor --print`, the `razor mcp`, `razor login` and `razor devices` commands, and the Razor servers on your other machines that you pair with it (connect to it over a private network, as [More machines](machines.md) explains) all reach it through its API, which needs a key on every request: on this machine through a socket in its home folder, and from other machines at a network address you choose. Your own programs can use it too ([Using Razor from scripts](scripting.md)).
+The server does all the work, and everything else, the terminal app included, is a client of it. The server talks to the models, runs the agents' commands, and writes every record. The terminal app, `razor --print`, the `razor mcp`, `razor login` and `razor devices` commands, and the Razor servers and apps on your other machines and devices that you pair with it ([More machines](machines.md)) all reach it through its API: on this machine through a socket in its home folder, with a key on every request, and from other machines over connections encrypted end to end, which only a paired device's key can open. Your own programs can use it too ([Using Razor from scripts](scripting.md)).
 
 One server runs for each Razor home, the folder that holds its settings, keys and records: `~/.razor`, or wherever `RAZOR_HOME` points. `razor install` registers the server as a service, a background program that systemd (on Linux) or launchd (on macOS) starts when you log in. When no server is running, the terminal app and the other client commands start one: the service if it is installed, otherwise a server in the background. Either keeps running after the app quits; `razor stop` stops it and `razor restart` starts it afresh.
 
@@ -20,6 +20,8 @@ One server runs for each Razor home, the folder that holds its settings, keys an
 Escape stops the current turn and the commands it started. Ctrl-C twice quits the terminal app and leaves the session running.
 
 `/name <new name>` renames the addressed session immediately: its top bar and agents list row update together, including on a paired server. Names are one line of 1 to 64 characters; a helper's name is its parent's to give.
+
+`/avatar <name>` selects an avatar; see [configuration](configuration.md#the-terminal-app) for the selection and clearing rules.
 
 ## The record
 
@@ -43,7 +45,7 @@ Everything earlier stays in the record, one recall away. Razor calls this a rebu
 
 ## Closing a session
 
-`/done` asks the agent for one last turn: it records what it learned, closes finished tasks and writes its own state note, a short note on where the work stands. Later sessions start with the project's merged note and newer sessions' notes; [dreaming](memory.md#dreaming) merges them. In an always-on agent's folder, only its home session writes state notes; a closing thread sends it what to keep. The session closes when that turn ends. `/end` (or `/quit`) closes it at once, with no last turn. `/detach` (or `/background` or `/exit`) leaves the terminal app with the session still running, as Ctrl-C pressed twice does unless [`[ui] quit`](configuration.md#the-terminal-app) says to end it. A closed session reopens when you send it a message.
+`/done` asks the agent for one last turn: it records what it learned, closes finished tasks and writes its own state note, a short note on where the work stands. Later sessions start with the project's merged note and newer sessions' notes; [dreaming](memory.md#dreaming) merges them. An always-on agent's home session writes the state note of its own layer, and a closing thread sends it what to keep; other sessions in its folder write project state notes. The session closes when that turn ends. `/end` (or `/quit`) closes it at once, with no last turn. `/detach` (or `/background` or `/exit`) leaves the terminal app with the session still running, as Ctrl-C pressed twice does unless [`[ui] quit`](configuration.md#the-terminal-app) says to end it. A closed session reopens when you send it a message.
 
 `/done` and `/quit` clear the command from the composer as soon as you send it. If you type more before closing finishes, the terminal stays on the closed session with those words; sending them reopens it.
 
@@ -91,7 +93,7 @@ An always-on agent is an agent you define in your settings that runs as part of 
 
 ## Memory
 
-Each project keeps a memory across sessions. A session starts with its state notes, your rulings quoted in your own words, a list of wiki pages and recent facts and notes, and its tasks. A nightly dreaming pass checks memory against its sources and recent sessions, files lasting knowledge in wiki pages and merges state notes. [Memory](memory.md) explains what is kept and where, and how to run dreaming or turn it off.
+Each project keeps a memory across sessions. A session starts with its state notes, your rulings (each a short rule that keeps your own words), the project's glossary, a list of wiki pages and recent facts and notes, and its tasks. A nightly dreaming pass checks memory against its sources and recent sessions, files lasting knowledge in wiki pages and merges state notes. [Memory](memory.md) explains what is kept and where, and how to run dreaming or turn it off.
 
 ## Settings and packs
 
@@ -150,10 +152,10 @@ The words you meet in Razor's screens, settings and these pages. Words used only
 - **input**: anything that enters a session: your message, a schedule firing, mail from another agent. Every input is admitted, recorded and queued, the same way.
 - **job**: a command the shell started. One that outlives its call has a **handle** the agent uses to wait on it, peek at it, type into it or kill it.
 - **mail**: a note, question or answer from one agent to another. It carries information, never orders.
-- **match**: a repository, folder or session that places a top-level session in a group of a view.
-- **memory**: what a project keeps across sessions: Razor's own memory files in its home's `memory` folder, and its tasks. The **startup page** is what a session reads from it at its start: the project's **state note** (the merged note and newer sessions' handoffs), its **rulings** (what you decided, in your own words; only you can make one), its wiki contents and recent **facts** and **notes**, and the session's tasks.
+- **match**: a repository, folder or session that places a top-level session in a group of a view. A repository is named by its main checkout's folder, so its worktrees carry the same name.
+- **memory**: what a project keeps across sessions: Razor's own memory files in its home's `memory` folder, and its tasks. The **startup page** is what a session reads from it at its start: the project's **state note** (the merged note and newer sessions' handoffs), its **rulings** (what you decided, each a short rule citing your message, with your words kept beneath it; only you can make one), its wiki contents and recent **facts** and **notes**, and the session's tasks. An always-on agent also keeps its own **layer** of memory inside its project's, which only its own sessions read.
 - **pack**: a folder of default settings, prompt files and skills that sits beneath your own settings; Razor ships one, the starter pack, which a new install uses.
-- **pair**: to connect two machines' Razor servers, each holding a key for the other, so each shows and reaches the other's sessions (`razor devices add --address`).
+- **pair**: to connect two machines' Razor servers, each holding a key for the other, so each shows and reaches the other's sessions (`razor devices add` on one shows a code; `razor devices join` on the other takes it).
 - **plugin**: a program or JavaScript file named in the settings that sees **events** (a prompt, an input, a tool call, a rebuild) and may observe, change or refuse them. A **hook** is a plugin written as a program.
 - **provider**: where a group of models is reached on an API key: the API it speaks, its address and the variable holding its key, kept in `keys.toml`; a session names its models `<provider>/<id>` ([Models and sign-in](models.md#providers)).
 - **rebuild**: making a fresh context from the record (your latest requests word for word, the continuation note, what happened since) when the context fills, on `/handover`, after a restart, or at a resident's night.
@@ -163,7 +165,7 @@ The words you meet in Razor's screens, settings and these pages. Words used only
 - **run**: one heartbeat, schedule or night of a resident, followed until the turn that answers it ends.
 - **service**: the background program `razor install` registers with systemd or launchd: the same server `razor serve` runs, started when you log in.
 - **session**: one conversation with one model, with its own record; it has an id and can be reopened. A **top-level** session is one a person started, or one started for the person by a top-level agent; it is not a child.
-- **settle**: the parent's decision on a finished child's work: merge it, discard it, or record that it was merged by hand.
+- **settle**: the parent's decision on a finished or stopped child's work: merge it, discard it, or record that it was merged by hand. When a parent closes, Razor discards its unsettled helpers, preserving their uncommitted work on their branches before removing their worktrees.
 - **skill**: a folder of written instructions, a `SKILL.md` and anything beside it, that an agent loads by name.
 - **state**: one of four per agent: needs you, working, done, stuck.
 - **task**: a piece of work a project keeps across sessions, with a number, a title and a description, open until it is closed with a reason; it may be blocked by other tasks, belong to a parent task, be claimed by one session and be due by a date. Anything owed, an agent's promises included, is a task with a due date.

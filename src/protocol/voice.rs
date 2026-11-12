@@ -16,10 +16,12 @@ pub(crate) static FAMILIES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
 });
 /// Native root id selects one family everywhere; resident threads pass their resident's id.
 pub(crate) fn family(native: &str) -> usize {
+    family_hash(native) as usize % FAMILIES.len()
+}
+pub(crate) fn family_hash(native: &str) -> u32 {
     native.bytes().fold(2166136261u32, |h, c| {
         (h ^ u32::from(c)).wrapping_mul(16777619)
-    }) as usize
-        % FAMILIES.len()
+    })
 }
 /// The person's permission to make voice notes; away permits an explicitly requested one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]

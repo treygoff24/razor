@@ -14,7 +14,7 @@ pub struct Config {
     /// always wins the layering, so a `pack` inside a pack is never read.
     pub pack: Option<PathBuf>,
     /// `[brand]`: the product's name and colours, passed through to clients.
-    pub brand: protocol::Brand,
+    pub brand: protocol::Brand<Avatar>,
 }
 impl Config {
     /// The person's file with its pack beneath it, then today's checks.
@@ -34,16 +34,20 @@ impl Config {
 /// `cwd`) is made absolute against the folder of the file that holds it, and `~/` against the
 /// home folder. A top-level table both files
 /// have merges key by key; every other value comes whole from one file, the person's if he
-/// wrote it.
+/// wrote it. See [configuration](../configuration.md#how-the-files-combine) for the layering rules.
 pub(super) async fn table(home: &Path) -> Result<toml::Table, Error>;
 
 // src/protocol/api.rs
-/// A pack's brand. Nothing in the core reads it.
-pub struct Brand {
+/// A pack's brand. The server reads the avatar pool; clients draw the pictures.
+pub struct Brand<T = String> {
     /// Wherever a client names the product. Default "Razor".
     pub name: String,
     /// Theme colour names (such as `glass` and `violet`) to `#rrggbb`.
     pub colours: BTreeMap<String, String>,
+    /// Config uses `{file, pool}` entries; clients receive base64 PNG strings.
+    pub avatars: BTreeMap<String, T>,
+    /// Each resident's configured avatar, supplied by the server.
+    pub resident_avatars: BTreeMap<SessionId, String>,
 }
 pub enum Live {
     /// Every `agents` snapshot carries the brand of the last good config.
@@ -111,3 +115,11 @@ Glossary lines proposed: **brand**: the product name and colours a pack gives ev
 
 See [configuration.md](../configuration.md) for the commands and their file scopes. For example,
 `razor config set ui.blocks half` changes the person's settings without starting a server.
+
+## Avatar pictures and selection
+
+[Configuration](../configuration.md#the-terminal-app) owns the avatar format, selection
+and inheritance rules. Config uses `Brand<Avatar>`; the stream uses `Brand<String>`
+with base64 PNG bytes. The shared decoder bounds allocation for the config reader
+and terminal. The record's `Avatar {name}` entry folds like `Name`; a row carries only
+its recorded choice. `brand.resident_avatars` names each resident's configured avatar.

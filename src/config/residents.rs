@@ -14,6 +14,7 @@ pub(crate) struct Resident {
     /// Its home: its session's working directory, fixed when the session is made, as any
     /// session's is.
     pub(crate) cwd: PathBuf,
+    pub(crate) avatar: Option<String>,
     /// Its own startup list, in place of the person's `startup`; its persona file is one of the
     /// entries, wherever the person puts it. Absent: the person's list.
     pub(crate) startup: Option<Vec<String>>,
@@ -110,9 +111,9 @@ impl TryFrom<String> for Time {
         match parts.as_deref() {
             Ok(&[h, m]) if h < 24 && m < 60 => Ok(Time(h * 3600 + m * 60)),
             Ok(&[h, m, s]) if h < 24 && m < 60 && s < 60 => Ok(Time(h * 3600 + m * 60 + s)),
-            _ => Err(Error::Invalid(format!(
-                "`{text}` is not a time of day; write it as HH:MM or HH:MM:SS, in local time."
-            ))),
+            _ => Err(Error::Invalid(
+                "not a time of day; write it as HH:MM or HH:MM:SS, in local time".into(),
+            )),
         }
     }
 }

@@ -32,7 +32,10 @@ fn words(key: &str) -> &'static str {
 /// keeps it. A voice note's words follow a line saying a machine heard them, and a video's a
 /// line with its path and length, naming its watcher when it has one. Its images and video are
 /// made absolute; the video goes to the model path only with no watcher, kept for the
-/// conversation's life when it came in mail, which only a watcher's first input does.
+/// conversation's life when it came in mail, which only a watcher's first input does. The
+/// person's words that join a running turn end with a line asking for an answer before the next
+/// call: only a tool boundary delivers an input while a call is open. Words on a live call get
+/// none; its voice has acknowledged them.
 pub(crate) fn heard(me: &Summary, dir: &Path, entry: EntryId, mut input: Input) -> BridgeInput {
     let mut text = skill(input.skill.as_ref(), std::mem::take(&mut input.text));
     if input.voice.is_some() {
@@ -51,9 +54,11 @@ pub(crate) fn heard(me: &Summary, dir: &Path, entry: EntryId, mut input: Input) 
         name.is_none().then_some(path)
     });
     let mut text = header(me, &input.from, text);
+    if input.from.is_person() && input.voice_call.is_none() && !me.unresolved.is_empty() {
+        text += words("steer");
+    }
     for file in &input.files {
-        let path = dir.join(file);
-        text += &words("attached").replace("{path}", &path.to_string_lossy());
+        text += &words("attached").replace("{path}", &dir.join(file).to_string_lossy());
     }
     for origin in &input.image_origins {
         let copy = match origin.copy {
@@ -163,6 +168,7 @@ pub(crate) fn length(duration_ms: u64) -> String {
 
 fn header(me: &Summary, from: &Origin, text: String) -> String {
     let (id, kind, from) = match from {
+        Origin::Mail { from, .. } if from.is_empty() => return text,
         Origin::Mail { id, kind, from } => (id, kind, from),
         Origin::Report { child, status } => {
             let row = me.children.iter().find(|c| c.session == *child);
@@ -177,9 +183,6 @@ fn header(me: &Summary, from: &Origin, text: String) -> String {
         Origin::Razor => return words("razor").to_owned() + &text,
         Origin::Person | Origin::Answer { .. } => return text,
     };
-    if from.is_empty() {
-        return text;
-    }
     if *kind == MailKind::Mention {
         let shown = match text.char_indices().nth(MENTION) {
             Some((at, _)) => format!("{}{}", &text[..at], words("cut")),

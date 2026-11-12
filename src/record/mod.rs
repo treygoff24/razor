@@ -77,6 +77,7 @@ impl Record {
         home: &Path,
         session: &SessionId,
         cwd: PathBuf,
+        project_root: PathBuf,
         model: String,
         settings: ModelSettings,
         profile_version: String,
@@ -117,6 +118,7 @@ impl Record {
             .append(
                 Body::Start {
                     cwd,
+                    project_root: Some(project_root),
                     model,
                     settings,
                     profile_version,

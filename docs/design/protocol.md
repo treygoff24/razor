@@ -176,8 +176,9 @@ pub enum Live {
     /// the session, its state now, and its last entry. The entries after the client's cursor
     /// follow it.
     Attached { session: SessionId, state: State, last: EntryId },
-    /// Text as the model writes it. The `Text` entry for the same block supersedes it.
-    Delta { text: String },
+    /// Text as the model writes it, `start` on the first words shown of each block. The
+    /// `Text` entry for the same block supersedes it.
+    Delta { text: String, start: bool },
     /// The session's state changed.
     State { state: State },
 }
@@ -189,7 +190,7 @@ A record line and a stream line, for the reader who will parse them:
 {"id":4,"at":1761603303123,"kind":"call","call":"toolu_01Hx","name":"Bash","input":{"command":"ls"},"native":{"claude":{"conversation":"6c2f…","uuid":"a1b9…"}}}
 {"id":5,"at":1761603303180,"kind":"result","call":"toolu_01Hx","outcome":"success","output":"a\nb\n","native":{"claude":{"conversation":"6c2f…","uuid":"77d0…"}}}
 {"id":7,"at":1761603305002,"kind":"turn_end","inputs":[2,6],"end":"done","usage":{"input":1200,"output":80,"cache_read":9000,"cache_write":0}}
-{"kind":"delta","text":"Two files"}
+{"kind":"delta","text":"Two files","start":true}
 ```
 
 ## Data flow

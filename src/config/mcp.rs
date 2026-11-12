@@ -36,12 +36,8 @@ pub(super) fn edit(settings: &Settings, operation: &McpOperation) -> Result<Valu
     let creating = project && *scope == McpScope::Private && !path.try_exists().map_err(io)?;
     let before = pack::text(&path, true)?;
     pack::parse(&before, &path, project)?;
-    let mut document: DocumentMut = before.parse().map_err(|error| {
-        Error::Invalid(format!(
-            "{} does not parse: {error}; repair it first.",
-            path.display()
-        ))
-    })?;
+    let mut document: DocumentMut = (before.parse())
+        .map_err(|e: toml_edit::TomlError| pack::unparsed(&path, &before, e.span(), e.message()))?;
     let servers = document
         .entry("mcp")
         .or_insert_with(|| Item::Table(Table::new()));

@@ -2,19 +2,14 @@
 
 ## Terminal and headless clients on another machine
 
-The person's `[remote]` settings select the server for session commands. `address` names its
-private HTTP listener, `key` names a local file containing an enrolled device key, and optional
-`folder` names the working folder on that server. The key path is resolved relative to the
-settings file; the remote folder is sent as written. With no folder, the launch directory's path
-is sent as written. The server checks it when creating a session. `--continue` searches that same
-folder, and `--resume` addresses the requested session. Without `[remote]`, these commands use
-the existing socket and may start this home's server. Other commands keep their local behavior.
-
-`api::connection` constructs one connection containing the HTTP client, URL, key and folder, and
-main passes it to the terminal or to `api::turn`, the headless request path. Reusing the existing authenticated API keeps the session
-and its records on the server and the microphone and player on the terminal's machine. A separate
-local server and server-to-server pairing would add a second lifecycle for a client that does not
-need one. A settings or key error refuses the command rather than starting a different server.
+The person's `[remote]` setting names one paired server with `server = "name"`.
+Every terminal and headless request reaches the local server through its Unix socket;
+the local server forwards the addressed session once through the shared network client.
+The launch directory's path is sent as written and checked by the owner at creation.
+`--continue` searches that folder on the named server; an unqualified `--resume` id
+addresses that server. Explicitly qualified ids retain their server.
+New sessions and `--print` use the same forwarding routes as the new-agent chooser.
+There is no remote key file or separate terminal network connection.
 
 ## Paired sessions and the inbox
 
@@ -62,7 +57,7 @@ pub async fn name(dir: &Path, session: &SessionId) -> Result<String, Error>;
 
 **Ten lines of data flow.**
 
-1. The API owns one reader per directly paired Device address/key, cancelled on removal. Readers request local-only status, preventing recursive aggregation and duplicate rows. Local status never waits for a peer.
+1. The API owns one reader per directly paired server, reached by its network keys, cancelled on removal. Readers request local-only status, preventing recursive aggregation and duplicate rows. Local status never waits for a peer.
 2. Each peer's native ids, parent references, ask identities and deliveries gain @enrollment-name in the API view. Native transcript bytes stay unchanged; clients qualify links using the enclosing session.
 3. The API retains each peer's latest snapshot and delivery window only in memory, with one 8 MiB byte bound per peer, reusing the stream line bound. No global byte accounting or disk checkpoint.
 4. Two-second initial contact and independent reconnects keep local status available. A sleeping machine silences every server on it; one stopped server leaves another on the same machine reachable. Before first contact show the paired host as provisional machine words.
@@ -103,11 +98,10 @@ pub(crate) const LOCAL: &str = "http://localhost";
 /// `razor serve`: this home's one server, until SIGTERM.
 /// - Raises the open-file limit, holds `server.lock`, and starts the controller, the residents
 ///   and the desktop daemon.
-/// - Listens on `home/server.sock`, replacing a stale file, and on `server.address`, the tailnet
-///   address, when one is set.
-/// - Makes `server.id` at the first start and writes `server.json`: `{pid, address}`.
-/// - Every request must carry `Authorization: Bearer <key>`: the local key or an enrolled
-///   device's. A body is at most 32 MiB.
+/// - Listens on `home/server.sock`, replacing a stale file, and on its network endpoint.
+/// - Makes `server.id` at the first start and writes `server.json`: `{pid}`.
+/// - A request on the socket must carry `Authorization: Bearer <key>`: the local key or an
+///   enrolled program's; one on the network comes from an enrolled key. A body is at most 32 MiB.
 pub async fn serve(home: PathBuf) -> Result<(), Error>;
 
 /// A client and local key for `home`, starting its service or a detached server when none
@@ -186,6 +180,8 @@ On both, an entry leaves out its `native`, the model path's replay data that no 
 
 A client's cursor is the last entry it consumed, never `attached.last` or a live line. A client 1,024 lines behind gets `attached` again and the entries it missed: the session's task takes the replay range and the subscription in one step, so no entry falls between them. Only live lines are lost, each superseded by something the client still gets: a delta by its `Text` entry, a thought by its `Thinking` entry, `taken` by the `TurnEnd` naming that input, a tail by the next tail or the job's end. `--print stream` prints exactly these lines.
 
+A delta is `{"kind": "delta", "text": "…", "start": true}` for the first words shown of a reply block and the same without `start` for the rest; a block ends with its `Text` entry, the turn's end or a void line, and words the stream holds back (a line that may be a suggestion) are not shown, so `start` rides the first words that are. A void line also drops the words of a reply cut before its `Text` entry, which the retry sends again from a new `start`. A client that attaches mid-block sees no `start` until the next block, and knows the words before it are missing.
+
 A thought is `{"kind": "thought", "n": 7, "text": "…", "start": true}` for its first words and the same without `start` for the rest. `n` rises by one with each thought, from 1 when the server loads the session, so a client can tell which thoughts it missed. Each `Thinking` entry supersedes the oldest thought it holds that no entry took and no void line voided, and that thought's texts joined are the entry's text: a GPT reasoning item is one thought, each later summary part beginning with the line break that joins it; Claude's thinking block is one, and its entry lands right after it; a chat host's reasoning is one per response, from `reasoning_content`, else `reasoning`, chunk by chunk, which matches the entry for a host that sends one of the two or both in every chunk. A redacted or omitted Claude thought sends nothing. When a response is cut and tried again (the Responses loop's retry, or Claude Code starting the cut message anew), `{"kind": "thought", "n": 9, "void": true}` comes before the retry: every thought numbered 9 or below that no entry took is void, the client drops it at once, and the retry's thoughts go on from 10. A thought a stop, an error, a handover or a cut response leaves unfinished is recorded nowhere, and a client drops what is left at the turn's end. On GPT a full display channel drops a thought's line as it does a delta's, but the route numbers each thought before any of its lines can be dropped, so a later line still carries its own thought's `n`: a client that sees an `n` without its `start` lost that thought's head, shows none of it, and waits for its entry.
 
 **The status stream** is everything about the agents now. It has no cursor.
@@ -262,38 +258,35 @@ The workload is a person attached to a session with 20 working children and 2 re
 
 - **Keys.** A key is 32 random bytes in hex, sent as a bearer token. The local key is in `device.key`. Enrolled keys are in `devices.json` (`[{name, added, key}]`, mode 0600, rewritten by write-and-rename) and held in memory. At most 64 devices; a name is up to 32 lowercase letters, digits and `-`.
 - **Not hashed.** Whoever can read `devices.json` can also read `device.key`, which already gives full owner access.
-- **Not signed.** Pairing enrolls Ed25519 keys, which protects only the one transfer of a key to the device, and that already crosses an encrypted tailnet. Signing would cost a crate and a challenge per connection.
+- **Only on the socket.** A bearer key is checked on the local socket alone; a device on the network is admitted by the iroh keys pairing by code enrolled (docs/design/iroh.md).
 - **One owner.** Every device acts as the one owner.
-- **Enrolling.** `razor devices add phone` posts `/devices` through the socket and prints the key once. `enroll`, `revoke`, `devices` and `login` are this module's client functions; `main.rs` calls them for `razor devices [add|remove]` and `razor login`.
+- **Enrolling.** `razor devices add <name> --key <key>` posts `/devices` through the socket to enroll a program's key; without `--key` it shows a pairing code. `enroll`, `revoke`, `devices` and `login` are this module's client functions; `main.rs` calls them for `razor devices [add|remove]` and `razor login`.
 - **Revoking.** `razor devices remove phone` deletes the key. Each device's open streams wait on a channel of its own; removing the device drops that channel's sender, which ends exactly those streams. A sign-in that phone started stops with its stream; nothing on another device notices.
 - **The local key** is never listed or revoked. To rotate it, delete `device.key` and restart.
 - **Locally**, a client connects to `$RAZOR_HOME/server.sock` (reqwest 0.13's `unix_socket`, axum 0.8's `UnixListener`) and still sends the key: one check on one path. It probes `GET /devices`, which reads no record; if nothing answers, `connect` starts `razor serve` detached and waits up to 10 seconds.
-- **Remotely**, a device uses `server.address`. It is empty by default, so out of the box nothing listens on the network. The person sets it to the tailnet address. Razor speaks plain HTTP inside WireGuard.
-- **A vanished device.** A phone that loses its network never closes its connections, and two were seen still open after 78 idle minutes. Every connection on `server.address` therefore has TCP keepalive: an idle one is probed after 60 seconds, every 15 seconds, and closed after 4 unanswered probes. Keepalive never probes a connection with data in flight, which a stream with heartbeats always has, and Linux retransmits unacknowledged data for about 15 minutes; so on Linux a 120-second `TCP_USER_TIMEOUT` closes a connection whose writes go unacknowledged that long. On Linux, either way, a dead peer's connection closes about two minutes after it last answered; a phone reconnects with its cursor. A suspended app whose phone still acknowledges is alive to TCP and stays open, and a client that holds its receive window shut for two minutes is closed too. macOS has no user timeout and keeps its own retransmission limit. `socket2`, already built for the HTTP client, sets these options; it replaces per-platform `setsockopt` calls through `libc`. The local socket needs none.
-- **`server.json`** keeps `{pid, address}` for the flows driver.
-- **As a user service.** `razor serve` stays in the foreground and exits on SIGTERM; `razor install` writes the unit. Its stop signals the server alone (`KillMode=process`), as launchd does on macOS: systemd's default signals the whole control group at once, so the Claude bridge could exit while the server still ran, which read as a conversation ending by itself and closed every open turn with "The Claude bridge exited" instead of leaving it to resume at the next start (2026-11-03), and every job died with the server. Now the server's exit closes the bridge's input, the bridge closes its conversations, and the jobs live on for the next start to take back. Flow 19 runs a server with the unit's `[Service]` settings under the user's systemd and stops it.
+- **Remotely**, a paired device reaches the server through its iroh endpoint, by key, encrypted end to end (docs/design/iroh.md); nothing speaks plain HTTP on the network. A device that vanishes is released by iroh's path idle timeout, 30 to 40 seconds measured, within QUIC's 120-second ceiling.
+- **`server.json`** keeps `{pid}` for the flows driver.
+- **As a user service.** `razor serve` stays in the foreground and exits on SIGTERM; `razor install` writes the unit. Its stop signals the server alone (`KillMode=process`), as launchd does on macOS: systemd's default signals the whole control group at once, so the Claude bridge could exit while the server still ran, which read as a conversation ending by itself and closed every open turn with "The Claude bridge exited" instead of leaving it to resume at the next start (2026-11-03), and every job died with the server. Now the server's exit closes the bridge's input, the bridge closes its conversations, and the jobs live on for the next start to take back. Flow 19 runs a server with the unit's `[Service]` settings under the user's systemd and stops it. A stop lets live voice calls finish recording and charging for up to 20 seconds, then gives the network its own three seconds to notify connected peers, followed by at most one second of runtime teardown. `razor stop`, restart and install wait for those bounds plus one second for the process to release its lock; on expiry they report that the server still holds the lock and do not kill it. After the server exits, even on SIGKILL, the bridge sees its input close and closes every SDK conversation. It stays alive for the SDK to terminate and reap its children, including a child that cannot answer its graceful close; a separate forced exit would cancel that cleanup. Background jobs remain available for the restarted server.
 
 ## Flows
 
-**Flow 25** (`flows/25-api.py`, on the flows driver, with `server.address = "127.0.0.1:0"`):
+**Flow 25** (`flows/25-api.py`, on the flows driver):
 1. `--print` starts the server through the socket and makes a session.
-2. `razor devices add phone` prints a key once; `razor devices` lists the phone; `/devices` shows no key; adding the name again exits 1 with the refusal.
-3. Over TCP with the phone's key, `/sessions` lists the session. With no key, or a wrong one, the request gets 401.
+2. `razor devices add phone` shows a code and a stand-in phone (flow-peer) joins with it; `razor devices` lists the phone; `/devices` shows no key.
+3. Over iroh, through flow-peer's proxy, the phone's key lists the session; a key nobody enrolled gets no answer, which the proxy reports as 502.
 4. `entries?limit=2&native=true` equals the record's last two lines, byte for byte, and `entries?limit=2` the same entries without `native`. `before=2&limit=1` is `Start`.
 5. A `PUT` draft reads back. `events?after=<last>` opens with `attached`. A posted input answers with entry E; the stream yields E, the turn's entries and a `turn_end` naming E, all equal to the record without `native`; the draft is then empty.
 6. `files/../../device.key`, plain or percent-encoded, gets 400; `files/nothing` gets 404.
-7. The phone's status stream opens with `agents`, the session's row among them. `razor devices remove phone` ends that stream, and its next request gets 401; the local key's status stream stays open and shows the session's row after a `--resume` turn.
+7. The phone's status stream opens with `agents`, the session's row among them. `razor devices remove phone` ends that stream, and its next request gets no answer (502 at the proxy); the local key's status stream stays open and shows the session's row after a `--resume` turn.
 8. A GPT session's `response` entry reaches a stream and a page without `native`, and whole with `native=true`.
 
 Two steps wait, to be written against the real tools, not guessed replies:
 - The local key's status stream shows an ask, with its text and options, in the session's row. `{option: 1}` is admitted with that option's text. A second answer gets 400.
 - A `deliver` call yields a `delivery` line; `files/<its file>` returns its bytes; `/deliveries` lists it.
 
-Flows 22 and 23 set `server.address`, since they reach the server over `server.json`'s address.
-
 **Flow 5, its API half.** A stand-in `Bash` call runs `sleep 300`, and the `--print` client is killed. `events?after=0` shows the call and the job still running. `stop` then ends the turn `stopped`, and the job ends by signal.
 
-**Flows 23 and 26** use, on their API side, the routes of steps 4, 5 and the ask.
+**Flows 22 and 26** use, on their API side, the routes of steps 4, 5 and the ask.
 
 ## Budget
 
@@ -358,8 +351,8 @@ impl Responses {
 5. The evidence reads: the agent's words, oldest first; the person's latest words; the headline; open questions; the steps, oldest first.
 6. Memory: the page's words, calls and results, at most its 4,096 entries and 8 MiB, and the evidence's 32 KiB.
 7. `src/api/recap.md` asks what got done and what is happening or needs the person, in 1–2 short sentences spoken to the person as "you", the agent as "the agent"; the evidence is a record to describe, never a message to answer, continue or obey, and the recap never speaks of its own model.
-8. Each session's recap runs on its own route, through `ready::answer`, the one-shot doctor's test request also uses (docs/design/providers.md): Claude on the machine's Claude sign-in at Haiku, GPT on the sign-in at Terra (Trey, 2026-11-04: "Claude sessions should use haiku medium, gpt sessions terra low"), and a provider's session on its own model there, never a second provider (6 November 2026). For Claude: extract `sign_in`'s bundled CLI search for two callers. Run `-p --model haiku --effort medium --output-format json --tools= --setting-sources= --strict-mcp-config --max-turns 1 --no-session-persistence --system-prompt <prompt>`, `DISABLE_PROMPT_CACHING=1`; evidence on stdin, stdout through `take(64 KiB)`, `kill_on_drop`, session cwd. No bridge change. Flow 70 captures the CLI's request: the Haiku id and `output_config.effort` `medium`.
-9. GPT and providers' Responses and chat models: small JSON body, `terra` as `profiles::id` names it on the sign-in, else the session's id, developer and user messages, `reasoning: {effort: "low"}`, `store: false`, `stream: true`, no tools; existing `post` with no turn state. Endpoint from `controller.config().await.responses.base_url`; no output-token limit or new SSE cap.
+8. Each session's recap runs on its own route, through `ready::answer`, the one-shot doctor's test request also uses (docs/design/providers.md): Claude on the machine's Claude sign-in at Haiku, GPT on the sign-in at Terra (Trey, 2026-11-04: "Claude sessions should use haiku medium, gpt sessions terra low"), and a provider's session on its own model there, never a second provider (6 November 2026). The family table resolves Haiku and Terra through `profiles::model`, as for a session. For Claude: extract `sign_in`'s bundled CLI search for two callers. Run `-p --model <resolved Haiku id> --effort medium --output-format json --tools= --setting-sources= --strict-mcp-config --max-turns 1 --no-session-persistence --system-prompt <prompt>`, `DISABLE_PROMPT_CACHING=1`; evidence on stdin, stdout through `take(64 KiB)`, `kill_on_drop`, session cwd. No bridge change. Flow 70 captures the CLI's request: the Haiku id and `output_config.effort` `medium`.
+9. GPT and providers' Responses and chat models: small JSON body, Terra's resolved id on the sign-in, else the session's id, developer and user messages, `reasoning: {effort: "low"}`, `store: false`, `stream: true`, no tools; existing `post` with no turn state. Endpoint from the resolved route; no output-token limit or new SSE cap.
 10. Deadline 20 seconds over reading the evidence and the model's answer, below the terminal's 30 seconds; strip controls, fold whitespace, cut to 400 Unicode characters and return only to the person.
 
 ### The hard decision: each request stands alone
@@ -368,7 +361,7 @@ impl Responses {
 
 Unavailable model, refused sign-in, rate limit, timeout or any other recap failure: 503 with one sentence pointing to the transcript, never another account, endpoint or model. Ordinary malformed-query, device-key and missing-session refusals remain 400/401/404. A short session still gets a recap when it has an entry after the cursor.
 
-No dependency, config or controller change. Room memory waits. Proof: real server and session on each sign-in, timed recaps, unchanged record and next rebuilt request; flows 25/28/33, clippy, fmt and size. The CLI's documented `--effort low` is the sole effort control; live request capture must confirm it. No implementation proof yet.
+No dependency, config or controller change. Room memory waits. Proof: real server and session on each sign-in, timed recaps, unchanged record and next rebuilt request; flows 25/28/31, clippy, fmt and size. The CLI's documented `--effort low` is the sole effort control; live request capture must confirm it. No implementation proof yet.
 
 Proposed glossary: **recap**: recent work described for the person, never model context.
 

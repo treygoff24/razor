@@ -9,9 +9,9 @@ fn rank(a: &AgentView) -> u8 {
     match a.state {
         _ if !a.asks.is_empty() || a.interrupted => 0,
         State::Stuck => 1,
-        State::Working if !a.closing => 2,
+        // A closing session keeps the place it had when the close was asked.
+        State::Working if !a.closing || a.closing_working => 2,
         State::Done if a.close_reason != Some(CloseReason::Idle) => 4,
-        // A closing turn and an idle close are invisible: the session keeps an idle one's place.
         _ => 3,
     }
 }

@@ -10,30 +10,34 @@ impl Residents {
         let Ok(projects) = c.memory().dream_sessions(c, None).await else {
             return;
         };
+        let mut all = true;
         for project in projects {
             let root = project.root.clone();
-            match self.dream(project, Some(due)).await {
+            match self.dream(project, Some(due), &mut all).await {
                 Ok(answer) => {
-                    let Some(id) = answer["session"]
-                        .as_str()
-                        .and_then(|s| SessionId::try_from(s.to_owned()).ok())
-                    else {
-                        continue;
-                    };
-                    // Snapshot plus updates has no gap, including a run that closed before subscription.
-                    let mut status = c.status();
-                    while let Some(line) = status.recv().await {
-                        let changed = match line {
-                            crate::protocol::Live::Agent(row) => row.session == id,
-                            crate::protocol::Live::Agents { .. } => true,
-                            _ => false,
-                        };
-                        if changed && c.summary(&id).await.is_ok_and(|s| s.closed) {
-                            break;
-                        }
+                    let id = answer["session"].as_str();
+                    if let Some(id) = id.and_then(|s| SessionId::try_from(s.to_owned()).ok()) {
+                        self.closed(&id).await;
                     }
                 }
                 Err(e) => eprintln!("razor: dreaming in {}: {e}", root.display()),
+            }
+        }
+    }
+
+    /// Returns once session `id` has closed.
+    async fn closed(&self, id: &SessionId) {
+        let c = &self.inner.controller;
+        // Snapshot plus updates has no gap, including a run that closed before subscription.
+        let mut status = c.status();
+        while let Some(line) = status.recv().await {
+            let changed = match line {
+                crate::protocol::Live::Agent(row) => row.session == *id,
+                crate::protocol::Live::Agents { .. } => true,
+                _ => false,
+            };
+            if changed && c.summary(id).await.is_ok_and(|s| s.closed) {
+                break;
             }
         }
     }
@@ -50,10 +54,15 @@ impl Residents {
             .dream_sessions(c, Some(project))
             .await
             .map_err(other("listing dreaming's sessions"))?;
-        self.dream(projects.remove(0), None).await
+        self.dream(projects.remove(0), None, &mut false).await
     }
 
-    async fn dream(&self, p: crate::memory::Dream, due: Option<Millis>) -> Result<Value, Error> {
+    async fn dream(
+        &self,
+        p: crate::memory::Dream,
+        due: Option<Millis>,
+        all: &mut bool,
+    ) -> Result<Value, Error> {
         let c = &self.inner.controller;
         let config = self.config().await;
         if matches!(config.memory.night, DreamNight::Off(_)) {
@@ -64,21 +73,19 @@ impl Residents {
         {
             return Ok(json!({"session": run}));
         }
-        if due.is_some_and(|d| d <= p.since) {
+        if due.is_some_and(|d| d <= p.claimed) {
             return Ok(json!({"already_run": true}));
         }
-        let mut sessions = Vec::new();
-        for id in &p.sessions {
-            let Ok(summary) = c.summary(id).await else {
-                continue;
-            };
-            if crate::memory::dreaming(&summary) {
-                continue;
-            }
-            sessions.push((summary.at, id));
+        // The pass reads the person's other servers too. A night is left to a server that will
+        // run it as the project's resident, since only that pass tidies the resident's own layer.
+        let nights = c.memory().dream_peers(c, &p).await;
+        if due.is_some() && p.resident.is_none() && nights.iter().any(|(_, n)| n.resident) {
+            return Ok(json!({"deferred": true}));
         }
+        let there = nights.iter().flat_map(|(_, n)| &n.sessions);
+        let mut sessions: Vec<_> = p.sessions.iter().chain(there).collect();
         sessions.sort_by_key(|s| std::cmp::Reverse(s.0));
-        let text = c.memory().dream_input(c, &p.root).await;
+        let text = c.memory().dream_input(c, &p.root, *all).await;
         let ids = sessions
             .iter()
             .map(|(_, id)| format!("- {id}\n"))
@@ -100,28 +107,37 @@ impl Residents {
         if count < sessions.len() {
             text.push_str("\nOldest sessions have ids alone; recall each one.\n");
         }
-        for (_, id) in sessions.iter().take(count) {
-            let digest = crate::record::digest(c.home(), id, bytes.saturating_sub(32))
-                .await
-                .map_err(other("reading a dreaming digest"))?;
-            text.push_str(&format!("\n- {id}\n{digest}"));
+        let mut unread = std::collections::BTreeSet::new();
+        for (index, (_, id)) in sessions.iter().enumerate() {
+            if index >= count {
+                unread.insert(id.address().map(|(_, name)| name));
+                continue;
+            }
+            match crate::children::digest(c, id, bytes.saturating_sub(32)).await {
+                Ok(digest) => text.push_str(&format!("\n- {id}\n{digest}")),
+                // Recall may recover it, but the server cannot certify that; keep its read mark.
+                Err(_) if id.address().is_some() => {
+                    unread.insert(id.address().map(|(_, name)| name));
+                }
+                Err(e) => return Err(other("reading a dreaming digest")(e)),
+            }
         }
         if due.is_some() && sessions.is_empty() {
             return Ok(json!({"inactive": true}));
         }
         let at = now();
         let id = SessionId::new();
-        // Record the scan's start, so activity while earlier projects dream reaches the next pass.
+        let covered = nights.iter().map(|(_, n)| n.server.clone()).collect();
         if !c
             .memory()
-            .dream_stamp(c, &p.root, p.through, p.since, &id)
+            .dream_stamp(c, &p, &id, covered)
             .await
             .map_err(other("claiming dreaming"))?
         {
             return Ok(json!({"already_run": true}));
         }
         let model = config.memory.model.map(crate::profiles::id);
-        let session = if let Some(resident) = p.resident {
+        let session = if let Some(resident) = &p.resident {
             // Dreaming uses the server defaults, rather than a resident's own model override.
             let schedule = Schedule {
                 at: Vec::new(),
@@ -132,14 +148,14 @@ impl Residents {
                 deliver: Deliver::None,
                 fresh: true,
             };
-            self.schedule(&resident, "dream", &schedule, at, Some(id))
+            self.schedule(resident, "dream", &schedule, at, Some(id))
                 .await?
                 .1
         } else {
             let model = Some(model.unwrap_or(config.model));
             let id = c
                 .create(
-                    p.root,
+                    p.root.clone(),
                     model,
                     (Some(config.effort), None),
                     Some(id),
@@ -161,6 +177,23 @@ impl Residents {
                 .map_err(other("admitting dreaming"))?;
             id
         };
+        *all = false;
+        // Only a pass that ended has read its sessions; a crash leaves them for the next night.
+        let read = nights
+            .iter()
+            .filter(|(name, _)| !unread.contains(&Some(name.as_str())))
+            .map(|(_, n)| (n.server.clone(), n.through));
+        let read = read
+            .chain((!unread.contains(&None)).then(|| (p.server.clone(), p.through)))
+            .collect();
+        let (residents, ended) = (self.clone(), session.clone());
+        tokio::spawn(async move {
+            residents.closed(&ended).await;
+            let c = &residents.inner.controller;
+            if let Err(e) = c.memory().dream_read(c, &p, read).await {
+                eprintln!("razor: marking dreaming's sessions read: {e}");
+            }
+        });
         Ok(json!({"session": session}))
     }
 }

@@ -235,7 +235,7 @@ impl Session {
 5. Each model path places them as it places the person's words: Responses after every output of the batch, Claude's SDK when its running calls finish.
 6. The turn's end answers them, as any delivered input.
 
-**Why no new origin.** The test is "a Razor input other than `/done`'s", which needs no record change. The other Razor inputs never wait in `pending` while a turn runs: the threshold input and MCP news are delivered at once, and the nudge is admitted only to a waiting session, which it starts. `/done`'s input keeps waiting, so the closeout stays a turn of its own. A new `Origin::Job` would say the same thing more plainly but costs a record schema change, and flows 05, 07, 19 and 35 match the notice's origin by name.
+**Why no new origin.** The test is "a Razor input other than `/done`'s", which needs no record change. The other Razor inputs never wait in `pending` while a turn runs: the threshold input and MCP news are delivered at once, and the nudge is admitted only to a waiting session, which it starts. `/done`'s input keeps waiting, so the closeout stays a turn of its own. A new `Origin::Job` would say the same thing more plainly but costs a record schema change, and flows 05, 07 and 19 match the notice's origin by name.
 
 **The one hard part: an end the model already sees.** Today a notice waits for the turn's end, so a Result that shows the same end (a `wait`, `bash`, `send` or `kill` that saw the job finish) drops it first. Now that the notice moves at the next boundary, two orderings matter:
 
@@ -252,7 +252,7 @@ impl Session {
 
 **As built.** The session controller went from 2,510 to 2,515 of 2,600; no protocol, record or config change. A scratch run against the debug build and the stand-in, outside the repository, checked the case no flow reaches. A GPT turn started a background job that ends after one second, then called `sleep 3`. The notice was admitted at that call's end and sent with its output, so the next request carried `Job job-1`, and the turn's one end answered it.
 
-**Flows.** 07 (job notices), 05 and 36 (stop), 19 (restart), 35 (unknown outcome), 11 and 40 (children holding inputs), 42 (the mail rule's case) and 25. No flow ends a job during a later call of the same turn; that case was exercised in a scratch run against the built binary and the stand-in, outside the repository.
+**Flows.** 07 (job notices), 05 and 36 (stop), 19 (restart and unknown outcome), 11 and 40 (children holding inputs), 43 (the mail rule's case) and 25. No flow ends a job during a later call of the same turn; that case was exercised in a scratch run against the built binary and the stand-in, outside the repository.
 
 ## Admission counts what the model has not read (30 October)
 
@@ -313,7 +313,7 @@ impl Session {
 ### Data flow
 
 1. Admission, `flush_notices`, the threshold input and MCP news test `full()`. A threshold reading that finds no room asks again at the next reading; the person's `/handover` is refused `Full`; MCP news waits for the next finished action.
-2. `deliver` appends each input to `sent` as it sends it; a rebuild's context is the new conversation's only sent input, alone in a fresh conversation.
+2. `deliver` appends each input of a message to `sent` in the message's order, a call's unsent facts included, so the input the path names drains every one before it; a rebuild's context comes first, since the rebuild leaves it alone in `sent`.
 3. Responses: `request()` takes every input the task holds into the request and keeps the last as the turn's `took`; each response's `Context` names it as `read`. An input in a request Escape drops is in the native history and is not sent again, so the stopped turn's `took` names it.
 4. Claude: the CLI writes a `command_lifecycle` frame with state `started` when it takes an input in, whether that input opens a turn or joins between tool rounds, before the request that carries it. That is a candidate. It becomes the turn's `took` when the reply to that request begins: the first top-level `message_start` stream event or assistant frame after it, an API error's own frame included. At a turn's end the candidate is the turn's `took` too, Escape's included: an input whose request Escape aborted before any reply is in the CLI's conversation, followed by "[Request interrupted by user]", and the next request carries it. Escape's receipt (`still_queued`, sdk.d.ts:4836-4850) lists only inputs the CLI has not yet taken in, which stay sent and run later, and, in the first command's startup window, a batch it delivers once into a turn that starts aborted, whose own end answers it; so the bridge does not read the receipt. The first assistant frame of each new message, where the bridge already sends `Context`, names the turn's `took` as `read`. The bridge's map from an SDK uuid to its batch's entries goes: a batch's uuid is made from its last entry, and the latest is all the controller uses.
 5. `context()` calls `read` before its threshold test, so a threshold input sent there waits for the next report.
@@ -358,7 +358,7 @@ One field: `Result.inputs`, empty and omitted on every Result but a waiting call
 - **batch-overflow.py**: its `extra` input would be the 65th the model has not read, so it is refused (409), and the script's assertion expects the refusal. The turn ends done, having sent all 64 in its second request, with no overflow and nothing answered unseen.
 - **synthetic-overflow.py**, inverted: the person's `/handover` with 64 sent and unread is refused `Full`, the turn has no Size error, and every note is in a request before its turn ends.
 
-**Flows.** 05, 07, 16, 17, 19, 20, 34 and 36-stop, scratch runs of the reproductions, a turn of 70+ inputs on each route, and the Escape probe.
+**Flows.** 05, 07, 11, 17, 19, 20, 34 and 36-stop, scratch runs of the reproductions, a turn of 70+ inputs on each route, and the Escape probe.
 
 The case where the CLI puts an input back could not be driven from outside: the window between the CLI taking an input in and its request leaving is too short. Escape while a reply is held before its first event does stop the turn (the first probe of it never held the reply). Before this rule, that stopped turn answered nothing, the input stayed sent, and the session took no further turn.
 
@@ -412,4 +412,4 @@ Job-end notices use the same waiter admission as mail and reports (2026-11-02). 
 
 **The rule.** A wait answers `null` at once while `sent` holds anything: an input on the model path that no request with a begun reply has carried reaches the model only after the batch's results, whatever its origin. That covers the handover request the threshold guard was there for (sent at once, read only by the next request, on GPT with the very response that calls the wait), so the guard goes; after the model has read the request, a wait waits as any other. The person's input admitted after the call and still in `pending` ends the call as before.
 
-**Flows.** 67-wait-unread, on both routes: the person writes during a reply streamed slowly before its `agent wait` call (20 s timeout); the wait answers `null` within 10 s, the request that carries that `null` (on Claude the bridge's yield after `PostToolBatch`) carries the input after it, and the turn's end answers it. On the code before this change both routes waited the full 20 s. 18-handover's threshold check passes on the `sent` rule alone.
+**Flows.** 66-stuck, during its idle minute, on both routes: the person writes during a reply streamed slowly before its `agent wait` call (20 s timeout); the wait answers `null` within 10 s, the request that carries that `null` (on Claude the bridge's yield after `PostToolBatch`) carries the input after it, and the turn's end answers it. On the code before this change both routes waited the full 20 s. 18-handover's threshold check passes on the `sent` rule alone.

@@ -42,6 +42,7 @@ impl Session {
         let mut batch: Vec<_> = self.pending.drain(..count).collect();
         self.opening = batch.iter().map(|(id, _)| *id).collect();
         self.turn.start();
+        self.served_model = None;
         self.reconcile();
         let changed = self.model != model;
         self.reported.take_if(|_| changed);
@@ -199,11 +200,14 @@ impl Session {
         inputs.sort_unstable();
         inputs.dedup();
         // Entry 0 is `/quit`'s: the turn ending now is the last.
-        let closed = self.done.is_some_and(|d| d.0 == 0 || inputs.contains(&d));
-        let close_reason = (closed && self.done != s.job() && !crate::memory::dreaming(s))
+        let done = self.done.map(|(entry, _)| entry);
+        let closed =
+            crate::memory::dreaming(s) || done.is_some_and(|d| d.0 == 0 || inputs.contains(&d));
+        let close_reason = (closed && done != s.job() && !crate::memory::dreaming(s))
             .then_some(CloseReason::Person);
         if closed {
             self.close_out(&inputs).await?;
+            self.c.inner.children.closed(&self.c, self.record.summary());
             close(self.c.clone(), self.id.clone(), None);
         }
         let (window, threshold) = limits(&self.model, &self.settings.config, self.reported);
@@ -215,6 +219,7 @@ impl Session {
             usage,
             context: self.context,
             model: Some(model.clone()),
+            served_model: self.served_model.take(),
             window,
             threshold: Some(threshold),
             closed,

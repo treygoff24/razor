@@ -56,7 +56,7 @@ razor --print --model sonnet --effort low "Which files changed most this month?"
 {"error": "Claude is not signed in; run razor setup.", "session": "20261104-211641-6cae"}
 ```
 
-`--print=stream` prints the session as it happens, one JSON object a line, and stops after the line that ends the turn. Every line has a `kind`. The first is `attached`; then come the record's entries as they are written, each with its `id`: the `input` you sent, the agent's `text`, each tool `call` and its `result`, and finally `turn_end`, whose `end` is `"done"`, `"stopped"` or `{"error": "<sentence>"}` and whose `model` names the model the turn ran on. Between them come lines that are never recorded: `delta` (reply text as it streams), `thought` (a thinking summary as it streams, numbered by `n`, `start` on its first words; one with `void` drops the unfinished thoughts through its `n`, before a cut response is tried again), `taken` (a waiting message reached the agent), `pending` (the messages still waiting) and `tail` (a running command's latest output). A turn that failed for want of a sign-in looks like this:
+`--print=stream` prints the session as it happens, one JSON object a line, and stops after the line that ends the turn. Every line has a `kind`. The first is `attached`; then come the record's entries as they are written, each with its `id`: the `input` you sent, the agent's `text`, each tool `call` and its `result`, and finally `turn_end`, whose `end` is `"done"`, `"stopped"` or `{"error": "<sentence>"}` and whose `model` names the model the turn ran on. Between them come lines that are never recorded: `delta` (reply text as it streams, `start` on each reply block's first words), `thought` (a thinking summary as it streams, numbered by `n`, `start` on its first words; one with `void` drops the unfinished thoughts through its `n` and any reply words no `text` took, before a cut response is tried again), `taken` (a waiting message reached the agent), `pending` (the messages still waiting) and `tail` (a running command's latest output). A turn that failed for want of a sign-in looks like this:
 
 ```text
 {"kind":"attached","session":"20261104-211641-6cae","last":6,"pending":[]}
@@ -101,13 +101,15 @@ The routes a script needs:
 | `POST /v1/sessions/<id>/input` | `{"text": "…"}`, and optionally `model`, `effort`, `speed`, `from`, `request`, `images`, `skill` | `{"entry": <n>}` once the message is recorded. A message sent mid-turn reaches the agent before its next step. |
 | `GET /v1/sessions/<id>/events?after=<entry>` | | The session as JSON lines: `attached`, then every entry after that id, then each new line as it happens, until you close the connection. `--print=stream` prints exactly this. Entries leave out `native`, the model's own replay data, and a reply's `text` leaves out its suggested next message, given as `suggestion`; add `&native=true` for both as recorded. Add `&follow=true` to follow it as a view: it does not mark the session looked at or stop the person's finished-turn pushes. Add `&heartbeat=true` to get `{"kind":"heartbeat"}` after every 15 seconds without a line, so you can tell a quiet session from a dropped connection. |
 | `GET /v1/sessions/<id>/entries?before=<entry>&limit=<n>` | | One page of the record as JSON lines, oldest first, ending before that entry (or at the end); 256 entries unless `limit` says otherwise, at most 1,024. `&native=true` as on `events`. |
-| `GET /v1/sessions/<id>/digest` | | One JSON string, at most 24 KiB of text: inputs and replies, failed calls with their error's first line, memory and task calls with their JSON arguments, and changed files, in entry order. Includes helpers and fresh runs. Newest failures have priority, then newest other entries; a last line counts omissions. Each entry is at most 1 KiB, with longer entries clipped and marked. |
+| `GET /v1/sessions/<id>/digest?limit=<bytes>` | | One JSON string, at most 24 KiB of text, or `limit` bytes when that is less: inputs and replies, failed calls with their error's first line, memory and task calls with their JSON arguments, and changed files, in entry order. Includes helpers and fresh runs. Newest failures have priority, then newest other entries; a last line counts omissions. Each entry is at most 1 KiB, with longer entries clipped and marked. |
+| `GET /v1/dream/<id>` | | For a paired server running a shared project's nightly pass: this server's id, its person's email in the project's checkout, whether its own night runs the pass as the project's always-on agent, its clock, and the project's sessions not yet read, each with when it last changed. `<id>` is the first commit of the shared memory's history ([Memory](memory.md#several-machines)). |
 | `POST /v1/sessions/<id>/asks/<entry>` | `{"option": <n>}`, counting from 0, or `{"text": "…"}` | `{"entry": <n>}`: the answer, recorded as the session's next input. Refused once the question has an answer. |
 | `POST /v1/sessions/<id>/stop` | | `{}`: what Escape does. The turn and the command it is running stop; background commands and helpers keep going. |
 | `DELETE /v1/sessions/<id>/input/<entry>` | | `{}`: withdraws a message the agent has not taken yet. |
 | `POST /v1/sessions/<id>/done` | | `{"entry": <n>}`: what `/done` does. The closing turn runs on in the server, and the session closes when it ends. |
 | `POST /v1/sessions/<id>/quit` | | `{}`: what `/end` does. The session closes now, with no closing turn. |
 | `PUT /v1/sessions/<id>/name` | the new name, as plain text | `{}`. |
+| `PUT /v1/sessions/<id>/avatar` | an avatar name from `[brand.avatars]`, as plain text; empty clears the session's choice | `{}`; 400 for an unknown avatar. See [avatar rules](configuration.md#the-terminal-app). |
 | `GET /v1/sessions/<id>/files/<name>` | | A file in the session's folder, such as one an agent delivered, a command's saved output, or `startup.md`. |
 | `GET /v1/sessions/<id>/agent` | | The session's row as the status stream gives it, with `changed_files`, the paths it changed, and `children`, a row for each of its direct helpers, settled ones included. |
 | `GET /v1/sessions/<id>/tasks?filter=<ready, open or closed>` | | `{"project": "<folder>", "tasks": […], "more": <n>}`: the tasks of the session's project as that session sees them. 50 unless `limit` says otherwise, at most 200, and `more` counts the rest. `ready`, the default, and `open` list the tasks the session holds first, then by priority, due date and number, and `open` adds `counts` by state; `closed` lists the newest close first, and `mine=true` keeps the ones this session closed. `q=<words>` keeps the tasks whose title or description hold them. Each row has `id`, `title`, `priority`, `state`, `claim`, `claimant` (the claiming session's id), `held` (whether this session holds it), `due`, `parent`, `blocked_by`, `closed` and `closed_by`. |
@@ -125,6 +127,14 @@ Four optional fields of an input are for programs:
 - `images` is a list of pictures as plain base64, JPEG, PNG or WebP, at most 20 to a message and 10 MB of base64 each.
 - `skill` is the name of a skill to load, such as `"razor"`. Razor resolves it at admission and records the resulting name and text as the `skill` object described above.
 
+An agent row's optional `avatar` is its recorded choice. The `brand` on every
+`agents` snapshot carries `resident_avatars`, a map from resident name to avatar
+name. Clients use the row's choice, else that map's entry for `resident` (or the
+session id for a resident's home). Add `?avatars=true` to the status stream to
+receive `brand.avatars`, a map from name to base64 PNG bytes, on every `agents`
+snapshot. Without the flag this map is empty. Pool settings never travel. See [configuration](configuration.md#the-terminal-app) for selection,
+inheritance, reload and missing-picture rules.
+
 The status stream carries the agents of the live list: the always-on agents, every session at work, asking or stuck, an idle one with an unread delivery, your input in the last twelve hours, a terminal open on it or a reply you have not looked at, and their helpers. The rest stay on disk, read a page at a time with `GET /v1/agents`. After the first line, the stream sends:
 
 - `agent`, one row, when an agent in the list changes or joins it;
@@ -137,21 +147,21 @@ To answer a question, find it in `GET /v1/status`: each row's `asks` lists its o
 
 ## From another machine or program
 
-A program on this machine can use the socket and the local key, as above. To give a program a key of its own, which you can take back without touching anything else, enroll it:
+A program on this machine can use the socket and the local key, as above. To give a program a key of its own, which you can take back without touching anything else, make one and enroll the program with it:
 
 ```sh
-razor devices add nightly
+KEY=$(openssl rand -hex 32)
+razor devices add nightly --key "$KEY"
 ```
 
-```text
-nightly is enrolled. Its key, shown only now:
-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-```
+Without `--key`, `razor devices add` shows a pairing code for another Razor server instead ([More machines](machines.md#1-pair-two-servers)).
 
-The name is 1 to 32 lowercase letters, digits and hyphens. Keep the key like a password: it can do anything the terminal app can, sign-ins and settings included. The program can use it on the socket, and, once you give the server an address, from another machine over HTTP. Set `[server] address` to this machine's address on a private network such as Tailscale, never `0.0.0.0` or a public address, run `razor restart`, and send the key on every request ([More machines](machines.md#2-give-each-server-an-address)):
+The name is 1 to 32 lowercase letters, digits and hyphens. Keep the key like a password: it can do anything the terminal app can, sign-ins and settings included. The key works only on this machine's socket, in place of the local key:
 
 ```sh
-curl -sS -H "Authorization: Bearer $KEY" 'http://100.101.102.103:7433/v1/sessions?limit=5'
+curl -sS --unix-socket ~/.razor/server.sock -H "Authorization: Bearer $KEY" 'http://localhost/v1/sessions?limit=5'
 ```
 
-The traffic is plain HTTP, so the private network is what keeps it secret. `razor devices` lists every enrolled program and paired server, and `razor devices remove nightly` revokes the key at once: its next request gets 401, and its open streams end.
+`razor devices` lists every enrolled program and paired device, and `razor devices remove nightly` revokes the key at once: its next request gets 401, and its open streams end.
+
+A program on another machine reaches Razor as the phone and Mac apps do, through Razor's network library: it is paired by a code from `razor devices add` and sends each request over a connection encrypted end to end ([More machines](machines.md)). Nothing on the network speaks plain HTTP to Razor.

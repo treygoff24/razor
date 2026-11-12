@@ -8,18 +8,10 @@
 use super::pack::{self, replace};
 use super::{Config, Error};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use serde_json::Value;
 use std::io::{self, IsTerminal};
-use std::net::{IpAddr, SocketAddr};
-use std::ops::RangeInclusive;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::Command;
 use toml_edit::DocumentMut;
-
-/// The ports setup gives a tailnet address and `razor devices find` looks for servers on, besides the
-/// server's own.
-pub(crate) const PORTS: RangeInclusive<u16> = 7433..=7442;
 
 /// The optional keys `razor keys` asks for: the web providers' and ElevenLabs' for voice.
 pub(crate) fn names() -> impl Iterator<Item = &'static str> {
@@ -168,8 +160,7 @@ pub async fn run(home: &Path, console: bool) -> Result<bool, Error> {
     } else if !claude && settings.get("model").is_none() {
         settings["model"] = toml_edit::value("sol");
     }
-    let connect = !only && yes("Connect to your Razor servers on other machines")?;
-    reach(&mut settings, &file, &loaded.server, connect).await;
+    name(&mut settings, &file, &loaded.server);
     let after = settings.to_string();
     if after != before {
         replace(&file, &before, &after)?;
@@ -322,11 +313,8 @@ fn implicit<'a>(settings: &'a mut DocumentMut, name: &str) -> &'a mut toml_edit:
     item
 }
 
-/// Names this server where the settings do not, and with `connect` and Tailscale running gives
-/// it an address other machines reach where they set none; says what it wrote and where to
-/// change it.
-async fn reach(settings: &mut DocumentMut, file: &Path, server: &super::Server, connect: bool) {
-    let shown = file.display();
+/// Names this server where the settings do not, and says what it wrote and where to change it.
+fn name(settings: &mut DocumentMut, file: &Path, server: &super::Server) {
     let name = device_name(&crate::profiles::machine());
     if settings.get("server").and_then(|s| s.get("name")).is_none()
         && server.name.is_empty()
@@ -334,28 +322,9 @@ async fn reach(settings: &mut DocumentMut, file: &Path, server: &super::Server, 
     {
         settings["server"]["name"] = toml_edit::value(&name);
         eprintln!(
-            "This server is named {name}: other machines pair with it under that name, and new sessions here start with it. To change it, edit name under [server] in {shown}."
+            "This server is named {name}: other machines pair with it under that name, and new sessions here start with it. To change it, edit name under [server] in {}.",
+            file.display()
         );
-    }
-    if !connect
-        || settings
-            .get("server")
-            .and_then(|s| s.get("address"))
-            .is_some()
-        || server.address.is_some()
-    {
-        return;
-    }
-    match address().await {
-        Some(address) => {
-            settings["server"]["address"] = toml_edit::value(&address);
-            eprintln!(
-                "Other machines on your tailnet reach this server at {address}. To change it, edit address under [server] in {shown}, then run razor restart."
-            );
-        }
-        None => eprintln!(
-            "No Tailscale address is available here, so other machines cannot reach this server yet. To pair two machines, put both on one tailnet (tailscale.com) and run razor setup on each, or set address under [server] in {shown} to an address the other can reach."
-        ),
     }
 }
 
@@ -373,64 +342,6 @@ fn device_name(host: &str) -> String {
         }
     }
     name.trim_end_matches('-').into()
-}
-
-/// This machine's tailnet address with the first port of `PORTS` free on it: its MagicDNS name
-/// when that resolves here to its Tailscale IPv4, else that IPv4.
-async fn address() -> Option<String> {
-    let status = tailnet().await?;
-    let ip: IpAddr = status["Self"]["TailscaleIPs"]
-        .as_array()?
-        .iter()
-        .filter_map(|ip| ip.as_str()?.parse::<IpAddr>().ok())
-        .find(IpAddr::is_ipv4)?;
-    let mut port = None;
-    for candidate in PORTS {
-        if tokio::net::TcpListener::bind((ip, candidate)).await.is_ok() {
-            port = Some(candidate);
-            break;
-        }
-    }
-    let port = port?;
-    let name = status["Self"]["DNSName"].as_str().unwrap_or_default();
-    let named = format!("{}:{port}", name.trim_end_matches('.'));
-    let found = tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host(&named)).await;
-    Some(
-        match found.is_ok_and(|found| found.is_ok_and(|mut found| found.any(|a| a.ip() == ip))) {
-            true => named,
-            false => SocketAddr::new(ip, port).to_string(),
-        },
-    )
-}
-
-/// `tailscale status --json`, from PATH or the macOS app, within 5 seconds; None when Tailscale is
-/// absent, fails or is not running.
-pub(crate) async fn tailnet() -> Option<Value> {
-    for program in [
-        "tailscale",
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    ] {
-        let mut command = tokio::process::Command::new(program);
-        // The macOS app's program opens its window unless told it is a command.
-        command
-            .args(["status", "--json"])
-            .env("TAILSCALE_BE_CLI", "1");
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        let Ok(Ok(output)) = tokio::time::timeout(Duration::from_secs(5), command.output()).await
-        else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
-        }
-        let status: Value = serde_json::from_slice(&output.stdout).ok()?;
-        return (status["BackendState"] == "Running").then_some(status);
-    }
-    None
 }
 
 /// What the person typed, as letters and digits: a terminal's escape sequence (a focus report,

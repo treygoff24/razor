@@ -37,11 +37,20 @@ impl Controller {
             .as_ref()
             .and_then(|c| c.worktree.as_ref())
             .map_or(cwd.as_path(), |w| w.origin.as_path());
-        let config = if child.is_some() && !tokio::fs::try_exists(root).await? {
-            settings.config
-        } else {
-            settings.project(root)?.config
-        };
+        if !tokio::fs::metadata(root).await.is_ok_and(|m| m.is_dir()) {
+            return Err(Error::Invalid(format!(
+                "The session folder {} does not exist; choose an existing folder.",
+                root.display()
+            )));
+        }
+        let root = root.to_owned();
+        let (config, project_root) = tokio::task::spawn_blocking(move || {
+            let (project_root, _) =
+                crate::memory::root(&settings, &root).map_err(|e| Error::Invalid(e.to_string()))?;
+            Ok::<_, Error>((settings.project(&root)?.config, project_root))
+        })
+        .await
+        .map_err(other("reading the session's project"))??;
         let model = model.unwrap_or_else(|| config.model.clone());
         let actions = config.web.actions().collect::<Vec<_>>().into();
         let home = &self.inner.home;
@@ -83,6 +92,7 @@ impl Controller {
                 &self.inner.home,
                 &session,
                 cwd.clone(),
+                project_root.clone(),
                 model.clone(),
                 ModelSettings { effort, speed },
                 version.clone(),
@@ -92,7 +102,14 @@ impl Controller {
             )
             .await
             {
-                Ok(record) => {
+                Ok(mut record) => {
+                    if id.is_none()
+                        && child.is_none()
+                        && thread.is_none()
+                        && let Some(name) = config.brand.draw(session.as_str())
+                    {
+                        record.append(Body::Avatar { name }, None).await?;
+                    }
                     // A child's Start precedes its checkout; load its settings only at admission,
                     // after Children has made that folder and its linked-worktree pointer.
                     if child.is_none() {
@@ -168,7 +185,7 @@ impl Controller {
         for row in candidates {
             if !sessions.contains_key(&row.session)
                 && row.terminals == 0
-                && status.agents.get(&row.session) == Some(row)
+                && status.agents.get(&row.session).is_some_and(|r| r == row)
             {
                 status.agents.remove(&row.session);
             }
@@ -186,7 +203,7 @@ impl Controller {
         let config = self.inner.config.lock().await;
         let limits = crate::profiles::limits(&summary.model, &config.config, summary.window);
         let state = [State::NeedsYou, State::Done][usize::from(summary.done())];
-        lock(&self.inner.status).build(summary, state, None, false, limits)
+        lock(&self.inner.status).build(summary, state, None, None, limits)
     }
 
     /// One session's display row, without inserting it into the live status map.
@@ -289,6 +306,7 @@ impl Controller {
                 | Body::MailSent { .. }
                 | Body::Question { .. }
                 | Body::Name { .. }
+                | Body::Avatar { .. }
                 | Body::Fresh { .. }
         ) {
             return invalid("Inputs use admission; only fact entries can be appended.");

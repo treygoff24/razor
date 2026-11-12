@@ -11,3 +11,4 @@ __pycache__/
 
 # Local vendor docs cache
 /references/
+/network/apple/build/

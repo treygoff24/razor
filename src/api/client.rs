@@ -12,63 +12,43 @@ use std::process::{Child, ExitStatus, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-/// A client's server: its base URL, which ends in `/`, the key every request carries, and the
-/// folder there that new sessions start in.
+/// A local socket client and the default paired destination for session commands.
 pub struct Connection {
     pub http: reqwest::Client,
     pub url: reqwest::Url,
     pub key: String,
     pub cwd: PathBuf,
-    pub remote: bool,
+    pub server: String,
 }
 
-/// The server the session commands use: `[remote]`'s over HTTP, which never starts one here,
-/// else this home's own through its socket; and the folder new sessions start in there.
+/// Session commands use the local socket; a configured pair is reached by one-hop forwarding.
 pub async fn connection(home: &Path) -> Result<Connection, Error> {
     // Settings that do not load leave the local server to start, fail and name why in its log.
     let config = crate::config::Config::load(home).await.ok();
+    let remote = config.as_ref().and_then(|c| c.remote.as_ref());
+    let server = remote.map(|r| r.server.clone()).unwrap_or_default();
+    if remote.is_some() && !crate::devices::valid_name(&server) {
+        return Err(Error::Refused("[remote] names a paired server, as server = \"<its name in razor devices>\", and holds no address or key (docs/machines.md).".into()));
+    }
+    if !server.is_empty() && config.as_ref().is_some_and(|c| c.provider_only) {
+        return Err(Error::Refused(
+            "provider_only is on; remove [remote] or set provider_only = false.".into(),
+        ));
+    }
     let unreadable =
         "The working directory could not be read; start Razor in an existing directory.";
-    let launched = || std::env::current_dir().map_err(|_| Error::Refused(unreadable.into()));
-    if config
-        .as_ref()
-        .is_some_and(|c| c.provider_only && c.remote.is_some())
-    {
-        let why = "provider_only is on, so Razor sends nothing to the [remote] server; remove [remote] or set provider_only = false.";
-        return Err(Error::Refused(why.into()));
-    }
-    let remote = config.and_then(|c| c.remote);
-    let is_remote = remote.is_some();
-    let (http, base, key, cwd) = match remote {
-        None => {
-            let (http, key) = connect(home).await?;
-            (http, LOCAL.to_owned(), key, launched()?)
-        }
-        Some(remote) => {
-            let key = tokio::fs::read_to_string(&remote.key).await.map_err(|e| {
-                let file = remote.key.display();
-                Error::Refused(format!("[remote] key {file} cannot be read: {e}."))
-            })?;
-            let cwd = remote.folder.map_or_else(launched, Ok)?;
-            let (http, address) = (client(reqwest::Client::builder())?, remote.address);
-            (http, format!("http://{address}"), key.trim().into(), cwd)
-        }
-    };
-    let url = reqwest::Url::parse(&base).map_err(|e| {
-        Error::Refused(format!(
-            "{base} is not a server; set [remote] address to host:port: {e}."
-        ))
-    })?;
-    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
-        let why = "Set [remote] address to host:port, without a path or query.";
-        return Err(Error::Refused(why.into()));
-    }
+    let cwd = remote.and_then(|r| r.folder.clone()).map_or_else(
+        || std::env::current_dir().map_err(|_| Error::Refused(unreadable.into())),
+        Ok,
+    )?;
+    let (http, key) = connect(home).await?;
+    let url = reqwest::Url::parse(LOCAL).map_err(other("Making the local server address"))?;
     Ok(Connection {
-        remote: is_remote,
         http,
         url,
         key,
         cwd,
+        server,
     })
 }
 
@@ -241,10 +221,11 @@ pub async fn newest(c: &Connection) -> Result<SessionId, Error> {
     let listed = c
         .http
         .get(format!("{}v1/sessions", c.url))
+        .query(&[("server", &c.server)])
         .bearer_auth(&c.key);
     let listed: Value = json(listed.query(&[("cwd", cwd.as_ref()), ("limit", "1")])).await?;
     let none = || Error::Refused("There is no session in this directory to continue.".into());
-    session(listed[0]["session"].as_str().ok_or_else(none)?)
+    session(listed[0]["session"].as_str().ok_or_else(none)?).map(|s| s.on(&c.server))
 }
 
 fn session(id: &str) -> Result<SessionId, Error> {
@@ -265,13 +246,15 @@ pub async fn turn(
         let request = c.http.post(format!("{}{path}", c.url));
         request.bearer_auth(&c.key).json(&body)
     };
+    let session = session.map(|s| s.on(&c.server));
     let (model, effort, speed) = (&input.model, input.effort, input.speed);
     let session = match session {
         Some(session) => session,
         None => {
             let body = json!({ "cwd": c.cwd, "model": model, "effort": effort, "speed": speed });
-            let created: Value = json(post("v1/sessions", body)).await?;
-            self::session(created["session"].as_str().unwrap_or_default())?
+            let created: Value =
+                json(post(&format!("v1/sessions?server={}", c.server), body)).await?;
+            self::session(created["session"].as_str().unwrap_or_default())?.on(&c.server)
         }
     };
     // Subscribe before admitting input. A cursor beyond the record skips old turns while
@@ -367,63 +350,22 @@ pub async fn devices(client: &reqwest::Client, key: &str) -> Result<String, Erro
     Ok(names.collect::<Vec<_>>().join("\n"))
 }
 
-/// `razor devices find`: online tailnet servers and their pairing commands.
-pub async fn find(client: &reqwest::Client, key: &str) -> Result<String, Error> {
-    let found: Value = json(client.get(format!("{LOCAL}/v1/discover")).bearer_auth(key)).await?;
-    let mut text = String::new();
-    for server in found["servers"].as_array().into_iter().flatten() {
-        if let (Some(name), Some(address), Some(suggested)) = (
-            server["name"].as_str(),
-            server["address"].as_str(),
-            server["suggested"].as_str(),
-        ) {
-            text.push_str(&format!(
-                "\nFound {suggested} (reports {name}) at {address}; to pair: razor devices add {suggested} --address {address}"
-            ));
-        }
-    }
-    if let Some(notice) = found["notice"].as_str().filter(|n| !n.is_empty()) {
-        text.push_str(&format!("\n{notice}"));
-    }
-    Ok(text)
-}
-
-/// `razor devices add <name> [--address <host:port>] [--key <key>]`: what to print. A device
-/// with an address is another server, paired with one key: without `--key` this makes it, and
-/// the text ends with the command that pairs this server, at `own`, on the other side.
+/// `razor devices add <name> --key <key>`: a program that sends `given` on this machine's socket.
 pub async fn enroll(
     client: &reqwest::Client,
     key: &str,
     name: &str,
-    address: Option<&str>,
-    given: Option<&str>,
+    given: &str,
 ) -> Result<String, Error> {
     let request = client.post(format!("{LOCAL}/v1/devices")).bearer_auth(key);
-    let body = json!({ "name": name, "address": address, "key": given });
-    let device: Value = json(request.json(&body)).await?;
-    let key = device["key"].as_str().unwrap_or_default();
-    let own = device["own"].as_str().unwrap_or_default();
-    let pairing = match device["pairing"].as_str() {
-        Some(line) => format!("To pair the phone app, paste this line into it:\n{line}"),
-        None => format!(
-            "To pair a phone, set server.address to this computer's tailnet name and port, restart Razor, then remove {name} and add it again."
-        ),
-    };
-    Ok(match (address, given) {
-        (None, _) => format!("{name} is enrolled. Its key, shown only now:\n{key}\n{pairing}"),
-        (Some(_), Some(_)) => format!("{name} is paired."),
-        (Some(_), None) if device["answered"] == true => format!("{name} is paired."),
-        (Some(_), None) if device["requested"] == true => format!(
-            "{name} received the pairing request. On {name}, confirm it with the name it will call this server:\nrazor devices add <name> --address {own}"
-        ),
-        (Some(_), None) => format!(
-            "{name} is paired. On {name}, run this, with the name {name} will call this server:\nrazor devices add <name> --address {own} --key {key}"
-        ),
-    })
+    json::<Value>(request.json(&json!({ "name": name, "key": given }))).await?;
+    Ok(format!(
+        "{name} is enrolled; its key works on the local socket."
+    ))
 }
 
 /// How `razor devices` is used.
-pub const DEVICES_USE: &str = "Use razor login, razor devices, razor devices find, razor devices add <name> [--address <host:port>] [--key <key>], or razor devices remove <name>.";
+pub const DEVICES_USE: &str = "Use razor login, razor devices, razor devices add <name> (it shows a code; the other server runs razor devices join <name> and pastes it), razor devices add <name> --key <key> for a program on this machine, or razor devices remove <name>.";
 
 /// `razor devices remove <name>`: what to print once the key no longer works.
 pub async fn revoke(client: &reqwest::Client, key: &str, name: &str) -> Result<String, Error> {

@@ -11,6 +11,7 @@ pub(super) fn routes() -> Router<App> {
         .route("/v1/residents/{name}/projects/{id}", patch(project))
         .route("/v1/residents/{name}/{change}", post(resident))
         .route("/v1/residents/{name}/run/{schedule}", post(run))
+        .route("/v1/dream/{id}", get(night))
         .route("/v1/residents/{name}/memory", get(memory))
         .route("/v1/residents/{name}/memory/{id}", delete(forget))
 }
@@ -48,6 +49,13 @@ async fn project(
     let named = app.residents.name_project(&at.name, id, &n.name, made);
     let status = id.map_or(StatusCode::CREATED, |_| StatusCode::OK);
     Ok((status, Json(named.await?)))
+}
+
+/// This server's part of a shared project's night, for the paired server that runs it.
+async fn night(State(app): State<App>, Path(id): Path<String>) -> Reply<crate::memory::Night> {
+    let c = &app.controller;
+    let night = c.memory().dream_night(c, &id).await;
+    Ok(Json(night.map_err(|e| bad(e.to_string()))?))
 }
 
 /// Run now: the schedule's entry in the resident's home session.

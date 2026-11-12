@@ -2,7 +2,7 @@
 
 ![Razor's terminal app: the agents list on the left with a tree of helpers at work, a conversation in the middle, and the status pane on the right](docs/razor.png)
 
-Razor is an agent harness, like Claude Code or Codex, built for running a crew of agents rather than one. It runs Claude through Anthropic's Agent SDK, which is Claude Code underneath, and GPT through the same ChatGPT sign-in Codex uses, so the subscription you already have is enough. Razor's conversations run on a server rather than inside the terminal you type in, so many run at once and each keeps going after you close the terminal, and an agent can hand work to helpers that each work on their own git branch, then merge what they bring back. It also has agents that wake on a schedule, memory that each project keeps, and one list of every agent on every machine you pair, which means connecting the machines' Razor servers to each other over a private network.
+Razor is an agent harness, like Claude Code or Codex, built for running a crew of agents rather than one. It runs Claude through Anthropic's Agent SDK, which is Claude Code underneath, and GPT through the same ChatGPT sign-in Codex uses, so the subscription you already have is enough. Razor's conversations run on a server rather than inside the terminal you type in, so many run at once and each keeps going after you close the terminal, and an agent can hand work to helpers that each work on their own git branch, then merge what they bring back. It also has agents that wake on a schedule, memory that each project keeps, and one list of every agent on every machine you pair, which means connecting the machines' Razor servers to each other by a code, over connections encrypted end to end.
 
 After installing you have a `razor` command that opens a terminal app in any project, and a server in the background that keeps your sessions running after you close it. The installer then runs `razor setup` in your terminal, which signs you in, or, with no terminal, prints the command to run. Razor runs on Linux (x86_64 or arm64) and on Macs with Apple silicon.
 
@@ -70,10 +70,10 @@ Escape stops what the agent is doing. Ctrl-C twice quits the app; the session ke
 | Sessions that keep going | Each conversation is saved on disk and reopens with `razor --resume <id>`; a message you send mid-task reaches the agent before its next step. |
 | Helpers on their own branches | An agent hands a task to a helper that works in its own git worktree and reports back; its work is then merged or discarded. |
 | Agents on a schedule | An agent defined in your settings wakes at set times, in its own folder with its own memory, and sends you notes or questions. |
-| Memory | Each session keeps its own handoff, alongside your decisions in your own words. A nightly dreaming pass checks sources, merges handoffs and files lasting knowledge into wiki pages; new sessions start with the state, rulings and memory contents. |
+| Memory | Each session keeps its own handoff, alongside your decisions as short rules that keep your own words. A nightly dreaming pass checks sources, merges handoffs and files lasting knowledge into wiki pages; new sessions start with the state, rulings and memory contents. |
 | Voice | Replies read aloud, voice notes you record, and spoken notes from agents. |
 | A browser, desktop apps and web search | Agents drive a real browser with [agent-browser](https://github.com/vercel-labs/agent-browser) and operate desktop apps with [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-driver), both shipped with Razor, and search the web through Exa, Parallel or Firecrawl, or their model's own search. |
-| Several machines | Pair the Razor servers on your machines over Tailscale, and see each one's agents from the others. |
+| Several machines | Pair the Razor servers on your machines by a code, with no VPN or open port, and see each one's agents from the others. |
 | Extensions | MCP servers, your own scripts as tools, plugins that can change or refuse what agents do, and `razor --print` for scripts. |
 
 ## How the code is kept small and correct
@@ -100,7 +100,7 @@ The [docs index](docs/README.md) lists every page; an installed Razor carries th
 - [Configuration](docs/configuration.md): every setting, its default and what it does.
 - [Memory](docs/memory.md): what is kept, how your decisions are recorded, and where the files are.
 - [Always-on agents and schedules](docs/always-on-agents.md): an agent that wakes on a schedule and keeps its own memory.
-- [More machines](docs/machines.md): pairing the Razor servers on several machines over Tailscale.
+- [More machines](docs/machines.md): pairing the Razor servers on several machines.
 - [Security](docs/security.md): what the server exposes, where keys live, and what agents can run.
 - [Browser, voice and search](docs/browser-voice-search.md): agent-browser, Cua Driver, the voice programs and the search providers.
 - [Using Razor from scripts](docs/scripting.md): `razor --print`, its JSON and streamed output, and the local API.

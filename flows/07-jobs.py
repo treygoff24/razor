@@ -4,10 +4,11 @@ the session (docs/design/claude.md). Then a GPT turn, in which a job's end joins
 (docs/design/controller.md)."""
 import json
 import os
+import threading
 import time
 from driver import REPLIES, Reply, flow
 from responses import PLAIN, call, done, response
-from server import until
+from server import until, wait
 
 names = ("jobs-start", "jobs-wait", "jobs-peek", "jobs-kill", "jobs-second", "done", "done")
 jobs = [call("bash", json.dumps({"command": f"sleep {seconds}; printf retained-output", "wait_ms": 0}), id)
@@ -16,6 +17,13 @@ gpt = [response(jobs), response([call("wait", json.dumps({"job": 1, "timeout_ms"
        response([call("kill", json.dumps({"job": 1}), "call_kill")]),
        done()]
 with flow([Reply((REPLIES / f"{name}.sse").read_bytes()) for name in names] + gpt, config=PLAIN) as f:
+    def release():
+        """The job prints `ready` once the model's wait on it is recorded: the wait must match it."""
+        sessions = f.home / ".razor/sessions"
+        wait(lambda: any('"mcp__razor__terminal"' in p.read_text() for p in sessions.glob("*/record.jsonl")))
+        (f.cwd / "go07").touch()
+
+    threading.Thread(target=release, daemon=True).start()
     session = f.ask("Start the background command; wait, look, stop it; start another.")["session"]
     entries = list(f.record(session))
     calls = [e for e in entries if e["kind"] == "call"]
@@ -26,6 +34,8 @@ with flow([Reply((REPLIES / f"{name}.sse").read_bytes()) for name in names] + gp
     assert all(e["outcome"] == "success" for e in outputs), outputs
     assert "job-1" in outputs[0]["output"], outputs[0]
     assert "ready" in outputs[1]["output"] and "ready" in outputs[2]["output"], outputs[1:3]
+    # The wait matched `ready` rather than reaching its 10 s default timeout.
+    assert outputs[1]["at"] - calls[1]["at"] < 5000, (calls[1], outputs[1])
     assert "job-1" in outputs[3]["output"], outputs[3]
     assert "job-2" in outputs[4]["output"], outputs[4]
     # The second job is stopped at its one-second timeout, and no

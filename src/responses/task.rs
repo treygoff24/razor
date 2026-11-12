@@ -38,6 +38,7 @@ struct Turn {
     /// Running exec, wait and nested `web__run` calls.
     cells: FuturesUnordered<BoxFuture<'static, (CallId, Result<String, code_mode::Error>)>>,
     turn_state: Option<String>,
+    model: Option<String>,
     usage: Usage,
     /// The latest input a request of this turn carried.
     took: Option<EntryId>,
@@ -348,6 +349,7 @@ impl Task {
         };
         let usage = response.usage;
         turn.turn_state = response.turn_state;
+        turn.model = response.model.or(turn.model.take());
         let total = &mut turn.usage;
         total.input = total.input.saturating_add(usage.input);
         total.output = total.output.saturating_add(usage.output);
@@ -572,10 +574,10 @@ impl Task {
 
     /// Ends the turn and stops its cells; `None` settles the conversation instead.
     async fn end(&mut self, end: Option<End>, reason: Option<&str>) -> Result<(), Error> {
-        let Some(turn) = self.turn.take() else {
+        let Some(mut turn) = self.turn.take() else {
             return Ok(());
         };
-        let (usage, took) = (turn.usage, turn.took);
+        let (usage, took, model) = (turn.usage, turn.took, turn.model.take());
         drop(turn);
         if matches!(end, Some(End::Done)) {
             self.conversation.spend(&self.profile.borrow());
@@ -583,7 +585,7 @@ impl Task {
         let (success, reason, message) = match end {
             None => {
                 self.settled = true;
-                return self.emit(FromBridge::Settled { usage }).await;
+                return self.emit(FromBridge::Settled { usage, model }).await;
             }
             Some(End::Done) => (true, None, String::new()),
             Some(End::Stopped) => (
@@ -594,6 +596,7 @@ impl Task {
             Some(End::Error(message)) => (false, Some(reason.unwrap_or("error").into()), message),
         };
         self.emit(FromBridge::TurnEnd {
+            model,
             success,
             reason,
             message,

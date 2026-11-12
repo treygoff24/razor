@@ -7,9 +7,10 @@
 
 # What every conversation is told at its start, in order: this pack's persona.md, Razor's own text,
 # your ~/.razor/about.md if you wrote one, the project's AGENTS.md and CLAUDE.md files, then
-# this pack's rules.md. To change it, copy the list into your file and persona.md and rules.md
-# beside your file, where they are yours to edit: a relative path counts from the file naming it.
-startup = ["persona.md", "razor", "about", "project", "rules.md"]
+# this pack's rules.md and code-quality.md. To change it, copy the list into your file and the
+# files it names beside your file, where they are yours to edit: a relative path counts from the
+# file naming it.
+startup = ["persona.md", "razor", "about", "project", "rules.md", "code-quality.md"]
 
 # The notes and questions agents send you, as desktop notifications: osascript on macOS,
 # notify-send on Linux, nothing on a machine with neither, such as a server with no screen. On

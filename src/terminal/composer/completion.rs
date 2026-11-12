@@ -17,13 +17,18 @@ use ratatui::{
 use reqwest::Method;
 
 /// Each command: its name, what it is for, and its arguments when it takes any.
-const COMMANDS: [(&str, &str, Option<&str>); 36] = [
+const COMMANDS: [(&str, &str, Option<&str>); 37] = [
     ("agents", "all agents beside a session", None),
     ("goto", "find any agent or past conversation", None),
     (
         "name",
         "rename the addressed session now",
         Some("<new name>"),
+    ),
+    (
+        "avatar",
+        "choose or clear this session's avatar",
+        Some("[name]"),
     ),
     ("new", "start a new agent on any server", None),
     (

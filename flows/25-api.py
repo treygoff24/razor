@@ -46,7 +46,7 @@ pack = Path(tempfile.mkdtemp()) / "pack"
 with flow([reply("Reply with the flow marker.", "Bash", {"command": "true"}),
            reply("Reply with the flow marker.", "Bash", {"command": "exit 1"}),
            *[Reply(hello) for _ in range(4)]],
-          config=f'pack = {json.dumps(str(pack))}\n[server]\naddress = "127.0.0.1:0"') as f:
+          config=f'pack = {json.dumps(str(pack))}') as f:
     # 1. --print starts the server through the socket and makes a session. It starts under a
     # soft limit of 64 open files and raises it, since twenty agents' pipes pass macOS's 256.
     hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
@@ -58,54 +58,46 @@ with flow([reply("Reply with the flow marker.", "Bash", {"command": "true"}),
     state = f.home / ".razor"
     key = (state / "device.key").read_text().strip()
     running = json.loads((state / "server.json").read_text())
-    host, port = running["address"].rsplit(":", 1)
     soft = next(line.split()[3] for line in open(f"/proc/{running['pid']}/limits") if line.startswith("Max open files"))
     assert int(soft) == min(hard, 65_536), soft
 
     def local():
         return server.Local(state / "server.sock")
 
-    def remote():
-        return http.client.HTTPConnection(host, int(port), timeout=10)
-
-    # 2. razor devices enrolls a phone and shows its key once; the list never shows a key.
-    added = f.run("devices", "add", "phone")
-    assert added.returncode == 0, added.stderr
-    phone = added.stdout.splitlines()[1]
-    assert len(phone) == 64 and phone != key, added.stdout
+    # 2. razor devices add shows a code and a phone joins with it; the list never shows a key.
+    remote = server.phone(f, "phone")
     assert f.run("devices").stdout == "phone\n"
     status, body = call(local, "GET", "/devices", key)
     assert [d["key"] for d in json.loads(body)] == [None], body
 
-    # 3. Over TCP the phone's key lists the session; no key, or a wrong one, gets 401.
-    status, body = call(remote, "GET", "/sessions", phone)
+    # 3. Over iroh the phone's key lists the session; a key nobody enrolled gets no answer (the
+    # proxy says 502), and a refused key stays refused.
+    status, body = call(remote, "GET", "/sessions", None)
     assert status == 200 and [s["session"] for s in json.loads(body)] == [session], body
-    for wrong in (None, "0" * 64):
-        status, body = call(remote, "GET", "/sessions", wrong)
-        assert status == 401 and json.loads(body)["error"], (status, body)
+    stranger = server.through(f, f.home / "stranger.key")
+    status, body = call(stranger, "GET", "/sessions", None)
+    assert status == 502 and not body.startswith(b"["), (status, body)
 
     # 4. A page with `native=true` is the record's own lines, byte for byte (step 10 reads one
     # without); entry 1 alone is Start.
     stored = (state / "sessions" / session / "record.jsonl").read_bytes().splitlines(True)
-    status, body = call(remote, "GET", f"/sessions/{session}/entries?limit=2&native=true", phone)
+    status, body = call(remote, "GET", f"/sessions/{session}/entries?limit=2&native=true", None)
     assert status == 200 and body == b"".join(stored[-2:]), (status, body)
-    status, body = call(remote, "GET", f"/sessions/{session}/entries?before=2&limit=1",
-                        phone)
+    status, body = call(remote, "GET", f"/sessions/{session}/entries?before=2&limit=1", None)
     assert status == 200 and json.loads(body)["kind"] == "start", (status, body)
 
     # 5. A draft reads back; attach after the last entry; an input handed the skill `hi` holds
     # its resolved text separately from its words, renders it, and clears the sent draft.
-    status, body = call(remote, "GET", f"/sessions/{session}/skills", phone)
+    status, body = call(remote, "GET", f"/sessions/{session}/skills", None)
     assert json.loads(body) == [{"name": "hi", "description": "Says hi."}], (status, body)
     draft = f"/sessions/{session}/draft"
-    status, body = call(remote, "PUT", draft, phone, "half a thought")
+    status, body = call(remote, "PUT", draft, None, "half a thought")
     assert status == 200, (status, body)
-    assert call(remote, "GET", draft, phone) == (200, b"half a thought")
-    events = open_(remote, "GET", f"/sessions/{session}/events?after={len(stored)}",
-                   phone)
+    assert call(remote, "GET", draft, None) == (200, b"half a thought")
+    events = open_(remote, "GET", f"/sessions/{session}/events?after={len(stored)}", None)
     attached = lines(events)
     assert attached == {"kind": "attached", "session": session, "last": len(stored), "pending": []}, attached
-    status, body = call(remote, "POST", f"/sessions/{session}/input", phone,
+    status, body = call(remote, "POST", f"/sessions/{session}/input", None,
                         {"text": "Again.", "skill": "hi"})
     assert status == 200, (status, body)
     entry = json.loads(body)["entry"]
@@ -123,24 +115,24 @@ with flow([reply("Reply with the flow marker.", "Bash", {"command": "true"}),
                for part in message["content"] if isinstance(part, dict)), f.request(4)
     assert streamed[-1]["inputs"] == [entry], streamed[-1]
     assert streamed == [bare(e) for e in f.record(session)][len(stored):], streamed
-    assert call(remote, "GET", draft, phone) == (200, b"")
+    assert call(remote, "GET", draft, None) == (200, b"")
     # Handing the skill alone sends none of the saved draft, so admission leaves it intact.
-    assert call(remote, "PUT", draft, phone, "still composing")[0] == 200
-    assert call(remote, "POST", f"/sessions/{session}/input", phone, {"text": "", "skill": "hi"})[0] == 200
+    assert call(remote, "PUT", draft, None, "still composing")[0] == 200
+    assert call(remote, "POST", f"/sessions/{session}/input", None, {"text": "", "skill": "hi"})[0] == 200
     while lines(events)["kind"] != "turn_end":
         pass
-    assert call(remote, "GET", draft, phone) == (200, b"still composing")
+    assert call(remote, "GET", draft, None) == (200, b"still composing")
 
     # 6. No file name leaves the session's directory; a file that is not there is 404.
     for name, refused in (("../../device.key", 400), ("..%2F..%2Fdevice.key", 400),
                           ("nothing", 404)):
-        status, body = call(remote, "GET", f"/sessions/{session}/files/{name}", phone)
+        status, body = call(remote, "GET", f"/sessions/{session}/files/{name}", None)
         assert status == refused and json.loads(body)["error"], (name, status, body)
 
     # 7. The stream carries live rows with their newest cache share; an idle row's membership
     # coalesces within one second. Removing the phone ends its stream and key, no other device's.
     watch = remote()
-    watched = open_(lambda: watch, "GET", "/status", phone)
+    watched = open_(lambda: watch, "GET", "/status", None)
     rows = lines(watched)
     assert rows["kind"] == "agents", rows
     deadline = time.monotonic() + 2
@@ -160,7 +152,7 @@ with flow([reply("Reply with the flow marker.", "Bash", {"command": "true"}),
     removed = f.run("devices", "remove", "phone")
     assert removed.returncode == 0, removed.stderr
     assert lines(watched) is None, "the phone's status stream outlived its key"
-    assert call(remote, "GET", "/sessions", phone)[0] == 401
+    assert call(remote, "GET", "/sessions", None)[0] == 502
     f.ask("--resume", session, "Once more.")
     line = {}
     while session not in [row.get("session") for row in line.get("agents", [line])]:
@@ -198,9 +190,45 @@ with flow([reply("Reply with the flow marker.", "Bash", {"command": "true"}),
     assert "seen" not in rows[session] and "looked_at" not in rows[session], rows[session]
     assert json.loads(server.send(f, "GET", f"/sessions/{plain}/agent").read()).get("calls_made") == 0
 
-# Closing releases the row; looks and seen survive until restart, and records remain readable.
+# One model-less server, first with no sessions at all.
 with flow([]) as f:
     server.start(f)
+    # The session list (docs/design/api.md): roots newest first, narrowed to a folder, the limit
+    # counted after that; a cut first line, a session folder with no record, a child and a stray
+    # file are left out; no sessions folder at all is an empty list.
+    sessions = f.home / ".razor/sessions"
+
+    def listing(query=""):
+        answer = server.send(f, "GET", "/sessions" + query)
+        body = answer.read()
+        assert answer.status == 200, body
+        return [(row["name"], row["session"]) for row in json.loads(body)]
+
+    assert not sessions.exists() and listing() == []
+    # A real root's first line is every fixture's, with its folder and name changed.
+    seed = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    start = json.loads((sessions / seed / "record.jsonl").read_bytes().split(b"\n")[0])
+    a, b = f.cwd / "a", f.cwd / "b"
+    a.mkdir()
+    b.mkdir()
+    kid = {"parent": seed, "name": "kid", "worktree": None, "launched": 1}
+    made = {start["name"]: seed}
+    # Made in no order but the list's, so a directory's own order cannot pass for it.
+    for n in (4, 1, 8, 3, 6, 2, 7, 5):
+        folder = b if n in (2, 8) else a
+        made[f"{folder.name}{n}"] = session = f"20260101-000000-000{n}"
+        (sessions / session).mkdir()
+        if n != 6:  # Its folder was made, its record never.
+            text = json.dumps({**start, "cwd": str(folder), "name": f"{folder.name}{n}",
+                               **({"child": kid} if n == 7 else {})}).encode()
+            (sessions / session / "record.jsonl").write_bytes(text[:len(text) // 2] if n == 5 else text + b"\n")
+    (sessions / ".DS_Store").write_text("")
+    rows = lambda *names: [(name, made[name]) for name in names]
+    # Newer roots of `b`, a cut record, a missing one and a child all come before the newest two of `a`.
+    assert listing(f"?cwd={a}&limit=2") == rows("a4", "a3"), listing(f"?cwd={a}&limit=2")
+    assert listing(f"?cwd={a}") == rows("a4", "a3", "a1")
+    assert listing("?limit=100") == rows(start["name"], "b8", "a4", "a3", "b2", "a1")
+    # Closing releases the row; looks and seen survive until restart, and records remain readable.
     sid = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
     row = lambda: json.load(server.send(f, "GET", f"/sessions/{sid}/agent"))
     events = server.send(f, "GET", f"/sessions/{sid}/events?terminal=true")
@@ -227,58 +255,8 @@ with flow([]) as f:
         assert lines(reopened)["kind"] == "attached"
         assert row()["looked_at"] and row()["terminal"]
         assert sid not in server.agents(f), "a quit root rejoined the live feed"
-
-# 10. A GPT response entry, about 100 KB of replay data on the sign-in, reaches a stream and a
-# page without `native` by default and whole with `native=true`.
-with flow([done()], model="gpt-6.1-sol") as f:
-    server.start(f)
-    session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
-    streams = [server.send(f, "GET", f"/sessions/{session}/events?after=0{flag}") for flag in ("", "&native=true")]
-    server.post(f, f"/sessions/{session}/input", {"text": "Say done."})
-    stored = next(e for e in server.until(f, session, lambda es: es[-1]["kind"] == "turn_end") if e["kind"] == "response")
-    got = [next(line for line in iter(lambda s=s: lines(s), None) if line["kind"] == "response") for s in streams]
-    assert stored["native"]["responses"]["items"] and got == [bare(stored), stored], got
-    line = (f.home / ".razor/sessions" / session / "record.jsonl").read_bytes().splitlines(True)[stored["id"] - 1]
-    page = f"/sessions/{session}/entries?before={stored['id'] + 1}&limit=1"
-    assert server.send(f, "GET", page + "&native=true").read() == line
-    assert json.loads(server.send(f, "GET", page).read()) == bare(stored)
-
-# Paired enrollment remains authoritative if its file becomes unreadable at runtime;
-# search still reports the unavailable peer, and revocation immediately removes it.
-with flow([], config='[server]\naddress="127.0.0.1:0"') as f:
-    server.start(f)
-    assert f.run("devices", "add", "down", "--address", "127.0.0.1:1").returncode == 0
-    path = f.home / ".razor/devices.json"
-    original = path.read_bytes()
-    for failure in ("parse", "read"):
-        if failure == "parse":
-            path.write_text("{broken")
-        else:
-            path.unlink()
-            path.mkdir()
-        answer = json.loads(server.send(f, "GET", "/search?q=enrollment").read())
-        assert answer["partial"], answer
-        if failure == "read":
-            path.rmdir()
-        path.write_bytes(original)
-    assert f.run("devices", "remove", "down").returncode == 0
-    assert not json.loads(server.send(f, "GET", "/search?q=enrollment").read())["partial"]
-
-# Invalid enrollment must refuse startup rather than silently forget paired servers.
-for failure in ("parse", "read"):
-    with flow([]) as f:
-        path = f.home / ".razor/devices.json"
-        if failure == "parse":
-            path.write_text("{broken")
-        else:
-            path.mkdir()
-        result = f.run("serve", timeout=5)
-        assert result.returncode != 0 and "devices.json" in result.stderr, result
-
-# A live row with an open terminal joins an existing stream; closed before any once-a-second
-# publication retained it, it still leaves that stream at the next publication.
-with flow([]) as f:
-    server.start(f)
+    # A live row with an open terminal joins an existing stream; closed before any once-a-second
+    # publication retained it, it still leaves that stream at the next publication.
     watch = server.Local(f.home / ".razor/server.sock")
     stream = open_(lambda: watch, "GET", "/status?views=true", (f.home / ".razor/device.key").read_text().strip())
     listed = lambda line: {r["session"] for l in line["layouts"] for s in l["sections"] for r in s["sessions"]}
@@ -299,6 +277,52 @@ with flow([]) as f:
             watch.sock.settimeout(max(0.001, deadline - time.monotonic()))
     except TimeoutError:
         raise AssertionError("the closed row stayed on its existing stream") from None
+    # Paired enrollment remains authoritative if its file becomes unreadable at runtime;
+    # search still reports the unavailable peer, and revocation immediately removes it.
+    server.device(f, "down", "0" * 32)
+    path = f.home / ".razor/devices.json"
+    original = path.read_bytes()
+    for failure in ("parse", "read"):
+        if failure == "parse":
+            path.write_text("{broken")
+        else:
+            path.unlink()
+            path.mkdir()
+        answer = json.loads(server.send(f, "GET", "/search?q=enrollment").read())
+        assert answer["partial"], answer
+        if failure == "read":
+            path.rmdir()
+        path.write_bytes(original)
+    assert f.run("devices", "remove", "down").returncode == 0
+    assert not json.loads(server.send(f, "GET", "/search?q=enrollment").read())["partial"]
+
+
+# 10. A GPT response entry, about 100 KB of replay data on the sign-in, reaches a stream and a
+# page without `native` by default and whole with `native=true`.
+with flow([done()], model="gpt-6.1-sol") as f:
+    server.start(f)
+    session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    streams = [server.send(f, "GET", f"/sessions/{session}/events?after=0{flag}") for flag in ("", "&native=true")]
+    server.post(f, f"/sessions/{session}/input", {"text": "Say done."})
+    stored = next(e for e in server.until(f, session, lambda es: es[-1]["kind"] == "turn_end") if e["kind"] == "response")
+    got = [next(line for line in iter(lambda s=s: lines(s), None) if line["kind"] == "response") for s in streams]
+    assert stored["native"]["responses"]["items"] and got == [bare(stored), stored], got
+    line = (f.home / ".razor/sessions" / session / "record.jsonl").read_bytes().splitlines(True)[stored["id"] - 1]
+    page = f"/sessions/{session}/entries?before={stored['id'] + 1}&limit=1"
+    assert server.send(f, "GET", page + "&native=true").read() == line
+    assert json.loads(server.send(f, "GET", page).read()) == bare(stored)
+
+# Invalid enrollment must refuse startup rather than silently forget paired servers.
+with flow([]) as f:
+    path = f.home / ".razor/devices.json"
+    for failure in ("parse", "read"):
+        if failure == "parse":
+            path.write_text("{broken")
+        else:
+            path.unlink()
+            path.mkdir()
+        result = f.run("serve", timeout=5)
+        assert result.returncode != 0 and "devices.json" in result.stderr, (failure, result)
 
 # The feed owns skill order, latest-load links and worn state, including after recovery.
 from claude import reply as skill_reply

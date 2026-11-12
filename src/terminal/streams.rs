@@ -169,7 +169,7 @@ impl App {
                 self.trim();
             }
             ApiEvent::Live(Live::Attached { .. }) => t.attached(),
-            ApiEvent::Live(Live::Delta { text }) => {
+            ApiEvent::Live(Live::Delta { text, .. }) => {
                 if !t.delta(&text, now, keep.1) {
                     self.say(
                         "The streaming reply exceeds 8 MiB; read it with recall when it completes.",
@@ -199,8 +199,11 @@ impl App {
                 if servers.is_empty() {
                     servers.push(*server);
                 }
+                if self.brand.avatars != brand.avatars {
+                    self.stage.brand(&brand);
+                }
                 let keys_changed = self.ui.keys != ui.keys;
-                (self.config, self.brand, self.ui) = (config, brand::read(brand), *ui);
+                (self.config, self.brand, self.ui) = (config, brand::read(*brand), *ui);
                 if keys_changed {
                     bindings::reload(self);
                 }

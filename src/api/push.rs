@@ -1,4 +1,4 @@
-//! Apple's push service: an alert to each device with a token whose level and mutes let it
+//! Push services: an alert to each device with a token whose level and mutes let it
 //! through when a question opens, a root notes something to the person or delivers, or a
 //! top-level session that is not a resident finishes its turn or gets stuck; and each followed
 //! session's Live Activity updates. Events come from the controller's status stream and the
@@ -9,7 +9,7 @@ use super::{App, Error};
 use crate::config::{self, PushKey};
 use crate::protocol::{
     AgentView, Body, CloseReason, End, Entry, EntryId, Environment, Follow, Following, Input, Live,
-    Millis, NotificationLevel, Push, SessionId, State, now,
+    Millis, NotificationLevel, Push, PushService, SessionId, State, now,
 };
 use crate::record::Summary;
 use aws_lc_rs::rand::SystemRandom;
@@ -37,6 +37,8 @@ const STALE: u64 = 15 * 60;
 /// An alert's open question ids, newest first, and the bytes of its whole payload.
 const OPEN: usize = 50;
 const PAYLOAD: usize = 4096;
+/// A queued message expires after one day on either service.
+const EXPIRE: u64 = 86_400;
 /// The person is in a session while a client has its stream open and their last input to it is
 /// this recent: a conversation's next message usually comes within a few minutes of the reply,
 /// and a stream left open in an idle pane says nothing after that.
@@ -62,9 +64,10 @@ struct Row {
 /// person's inputs its turn answered.
 type Alert = (&'static str, SessionId, Option<EntryId>, Vec<String>);
 
-/// One send waiting for its turn: the device's name and token, the push type (`alert` or
-/// `liveactivity`), the priority and the payload.
-struct Message(String, Push, &'static str, u8, Value);
+/// A queued device registration, followed session (None for alerts), priority and payload.
+struct Message(String, Push, Option<SessionId>, u8, Value);
+
+mod fcm;
 
 /// A follow's accepted content and next attempt, with its end kept until queued.
 #[derive(Default)]
@@ -79,8 +82,8 @@ struct Sender {
     queue: mpsc::Sender<Message>,
     /// Exactly the status stream's rows; ordered, so a session's children come in one order.
     rows: BTreeMap<SessionId, Row>,
-    /// By the follow's token; only the follows the devices hold (at most 64 × 8).
-    shown: HashMap<String, Shown>,
+    /// By device, session and registration; at most the devices' 64 × 8 follows.
+    shown: HashMap<(String, SessionId, Push), Shown>,
     /// No `agents` line has come yet.
     first: bool,
     /// Followed sessions read at the first `agents` line that had finished: each row is marked
@@ -95,12 +98,14 @@ pub(super) async fn send(app: App) {
         eprintln!("razor: The push sender has no HTTP/2 client, so it sends nothing.");
         return std::future::pending().await;
     };
-    let apple = Apple {
+    let provider = Provider {
         client,
         tokens: Mutex::new(HashMap::new()),
+        fcm: fcm::Fcm::default(),
     };
     let (queue, waiting) = mpsc::channel(WAITING);
-    let posting = super::received(waiting).for_each_concurrent(AT_ONCE, |m| apple.post(&app, m));
+    let posting = super::received(waiting).for_each_concurrent(AT_ONCE, |m| provider.post(&app, m));
+    let mut changes = app.devices.changes();
     let (mut lines, mut deliveries) = (app.controller.status(), app.deliveries.subscribe());
     let mut sender = Sender {
         app: app.clone(),
@@ -116,6 +121,7 @@ pub(super) async fn send(app: App) {
             let wake = due.unwrap_or_else(Instant::now);
             tokio::select! {
                 Some(line) = lines.recv() => sender.line(line).await,
+                Ok(()) = changes.changed() => sender.follow().await,
                 delivery = deliveries.recv() => match delivery {
                     Ok((d, true)) => {
                         let silent = matches!(d.sound, Some(crate::protocol::Sound::Terminal | crate::protocol::Sound::Silent));
@@ -134,13 +140,21 @@ pub(super) async fn send(app: App) {
 }
 
 /// `{}` when this server can send to `environment`, else `{"unsent": "<why>"}`.
-pub(super) async fn unsent(app: &App, environment: Environment) -> Value {
+pub(super) async fn unsent(app: &App, registration: &Push) -> Value {
     let push = app.controller.config().await.push;
-    let why = match push.as_ref().and_then(|p| Some((p, key(p, environment)?))) {
-        Some((push, key)) => sign(push, key).await.err().map(|e| e.to_string()),
-        None => Some(format!(
-            "This server's config has no [push] key for {environment:?} builds, so it sends this device nothing yet; the token is kept."
-        )),
+    let environment = registration.environment;
+    let why = match registration.service {
+        PushService::Fcm => match push.as_ref().and_then(|p| p.fcm_credentials.as_deref()) {
+            Some(_) => None,
+            None => Some("This server has no [push] fcm_credentials, so it sends this device nothing yet; the token is kept.".into()),
+        },
+        PushService::Apns => match push.as_ref().and_then(|p| Some((p, key(p, environment?)?))) {
+            Some((push, key)) => sign(push, key).await.err().map(|e| e.to_string()),
+            None => Some(format!(
+                "This server's config has no [push] key for {} builds, so it sends this device nothing yet; the token is kept.",
+                environment.map_or_else(|| "APNs".into(), |e| format!("{e:?}"))
+            )),
+        },
     };
     why.map_or_else(|| json!({}), |why| json!({ "unsent": why }))
 }
@@ -337,7 +351,10 @@ impl Sender {
             if !silent {
                 payload["aps"]["sound"] = json!("default");
             }
-            if open.pop().is_none() || payload.to_string().len() <= PAYLOAD {
+            if open.pop().is_none()
+                || payload.to_string().len() <= PAYLOAD
+                    && fcm::data(&payload, None).to_string().len() <= PAYLOAD
+            {
                 break payload;
             }
             more = true;
@@ -349,7 +366,7 @@ impl Sender {
                 payload["aps"]["interruption-level"] =
                     json!(["active", "passive"][usize::from(here)]);
             }
-            enqueue(&self.queue, Message(device, push, "alert", 10, payload));
+            enqueue(&self.queue, Message(device, push, None, 10, payload));
         }
     }
 
@@ -368,10 +385,14 @@ impl Sender {
     /// works.
     async fn follow(&mut self) {
         let follows = self.app.devices.follows().await;
-        self.shown
-            .retain(|token, _| follows.iter().any(|(_, f)| f.push.token == *token));
+        self.shown.retain(|(device, session, push), _| {
+            follows
+                .iter()
+                .any(|(d, f)| d == device && f.session == *session && f.push == *push)
+        });
         for (device, Follow { session, push }) in follows {
-            let ending = self.shown.get(&push.token).and_then(|s| s.end.clone());
+            let id = (device.clone(), session.clone(), push.clone());
+            let ending = self.shown.get(&id).and_then(|s| s.end.clone());
             let (following, ended) = if let Some(following) = ending {
                 (following, true)
             } else {
@@ -380,7 +401,7 @@ impl Sender {
                     .get(&session)
                     .filter(|r| r.close_reason != Some(CloseReason::Idle))
                 else {
-                    self.shown.remove(&push.token);
+                    self.shown.remove(&id);
                     continue;
                 };
                 let children = self
@@ -399,19 +420,26 @@ impl Sender {
                 let ended = row.state == State::Done || row.finished && !working;
                 (following, ended)
             };
-            let shown = self.shown.entry(push.token.clone()).or_default();
+            let shown = self.shown.entry(id.clone()).or_default();
             if ended {
                 shown.end = Some(following.clone());
                 shown.waiting = Some(Instant::now() + EVERY);
                 let Ok(permit) = self.queue.try_reserve() else {
                     continue;
                 };
-                if let Err(e) = self.app.devices.forget(&device, &push.token).await {
+                if let Err(e) = self
+                    .app
+                    .devices
+                    .change(&device, |d| {
+                        d.follows.retain(|f| f.session != session || f.push != push);
+                    })
+                    .await
+                {
                     eprintln!("razor: {e}");
                     continue;
                 }
-                self.shown.remove(&push.token);
-                permit.send(activity(device, push, &following, "end", 10));
+                self.shown.remove(&id);
+                permit.send(activity(device, push, session, &following, "end", 10));
                 continue;
             }
             let last = shown.sent.as_ref().map(|(f, _)| f);
@@ -430,7 +458,9 @@ impl Sender {
                     continue;
                 };
                 let priority = if urgent { 10 } else { 5 };
-                permit.send(activity(device, push, &following, "update", priority));
+                permit.send(activity(
+                    device, push, session, &following, "update", priority,
+                ));
                 (shown.sent, shown.waiting) = (Some((following, Instant::now())), None);
             } else {
                 shown.waiting = shown.sent.as_ref().map(|(_, at)| *at + EVERY);
@@ -466,6 +496,7 @@ impl Sender {
 fn activity(
     device: String,
     push: Push,
+    session: SessionId,
     following: &Following,
     event: &str,
     priority: u8,
@@ -474,7 +505,7 @@ fn activity(
     let date = ["stale-date", "dismissal-date"][usize::from(event == "end")];
     let mut payload = json!({"aps": {"timestamp": at, "event": event, "content-state": following}});
     payload["aps"][date] = json!(at + STALE);
-    Message(device, push, "liveactivity", priority, payload)
+    Message(device, push, Some(session), priority, payload)
 }
 
 fn enqueue(queue: &mpsc::Sender<Message>, message: Message) {
@@ -485,56 +516,80 @@ fn enqueue(queue: &mpsc::Sender<Message>, message: Message) {
 
 /// The HTTP/2 client and each environment's provider token: the team and key it was made with,
 /// when, and the token.
-struct Apple {
+struct Provider {
     client: reqwest::Client,
     tokens: Mutex<HashMap<Environment, (String, PushKey, Instant, String)>>,
+    fcm: fcm::Fcm,
 }
 
-impl Apple {
-    /// Posts one message with a fresh `[push]`. A device token Apple calls gone (410) leaves its
-    /// device; any other refusal or failure drops the message with a log line.
-    async fn post(&self, app: &App, Message(device, push, kind, priority, payload): Message) {
+impl Provider {
+    /// Posts through the registration's service; only an invalid registration is forgotten.
+    async fn post(&self, app: &App, message: Message) {
+        let Message(device, push, ..) = &message;
         let config = app.controller.config().await.push;
-        let Some((config, key)) = config
-            .as_ref()
-            .and_then(|c| Some((c, key(c, push.environment)?)))
-        else {
+        let Some(config) = config.as_ref() else {
             return;
         };
-        let host = match (&config.endpoint, push.environment) {
-            (Some(endpoint), _) => endpoint.as_str(),
-            (None, Environment::Development) => "https://api.sandbox.push.apple.com",
-            (None, Environment::Production) => "https://api.push.apple.com",
+        let request = match push.service {
+            PushService::Apns => self.apple(config, &message).await,
+            PushService::Fcm => self.fcm.request(&self.client, config, &message).await,
         };
-        let topic = match kind {
-            "alert" => config.bundle.clone(),
-            kind => format!("{}.push-type.{kind}", config.bundle),
-        };
-        let token = match self.token(config, key, push.environment).await {
-            Ok(token) => token,
+        let request = match request {
+            Ok(Some(request)) => request,
+            Ok(None) => return,
             Err(e) => return eprintln!("razor: {e}"),
         };
-        let request = (self.client.post(format!("{host}/3/device/{}", push.token)))
-            .header("authorization", format!("bearer {token}"))
-            .header("apns-push-type", kind)
-            .header("apns-topic", topic)
-            .header("apns-priority", priority.to_string())
-            .header("apns-expiration", (now() / 1000 + 86_400).to_string())
-            .json(&payload);
         let answer = match request.send().await {
             Ok(answer) if answer.status().is_success() => return,
             Ok(answer) => answer,
             Err(e) => return eprintln!("razor: A push to {device} failed: {}.", e.without_url()),
         };
         let status = answer.status();
-        if status == StatusCode::GONE
-            && let Err(e) = app.devices.forget(&device, &push.token).await
-        {
+        let gone = match push.service {
+            PushService::Apns => status == StatusCode::GONE,
+            PushService::Fcm => fcm::gone(status, answer).await,
+        };
+        if gone && let Err(e) = app.devices.forget(device, push).await {
             eprintln!("razor: {e}");
         }
-        let reason: Value = answer.json().await.unwrap_or_default();
-        let reason = reason["reason"].as_str().unwrap_or_default();
-        eprintln!("razor: Apple's push service refused a push to {device}: {status} {reason}.");
+        eprintln!(
+            "razor: {:?} refused a push to {device}: {status}.",
+            push.service
+        );
+    }
+
+    async fn apple(
+        &self,
+        config: &config::Push,
+        Message(_, push, session, priority, payload): &Message,
+    ) -> Result<Option<reqwest::RequestBuilder>, Error> {
+        let Some((environment, key)) = push.environment.and_then(|e| Some((e, key(config, e)?)))
+        else {
+            return Ok(None);
+        };
+        let host = match (&config.endpoint, environment) {
+            (Some(endpoint), _) => endpoint.as_str(),
+            (None, Environment::Development) => "https://api.sandbox.push.apple.com",
+            (None, Environment::Production) => "https://api.push.apple.com",
+        };
+        let (kind, topic) = match session {
+            None => ("alert", config.bundle.clone()),
+            Some(_) => (
+                "liveactivity",
+                format!("{}.push-type.liveactivity", config.bundle),
+            ),
+        };
+        let token = self.token(config, key, environment).await?;
+        Ok(Some(
+            self.client
+                .post(format!("{host}/3/device/{}", push.token))
+                .header("authorization", format!("bearer {token}"))
+                .header("apns-push-type", kind)
+                .header("apns-topic", topic)
+                .header("apns-priority", priority.to_string())
+                .header("apns-expiration", (now() / 1000 + EXPIRE).to_string())
+                .json(payload),
+        ))
     }
 
     /// The environment's provider token, made again when the team or key changed (its id or
@@ -571,8 +626,7 @@ async fn sign(push: &config::Push, key: &PushKey) -> Result<String, Error> {
     let refused = |why: &str| Error::Refused(format!("The push key {file} {why}."));
     let pem = tokio::fs::read_to_string(&key.key).await;
     let pem = pem.map_err(|e| refused(&format!("does not read: {e}")))?;
-    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
-    let der = STANDARD.decode(body.trim()).ok();
+    let der = pkcs8(&pem);
     let pair =
         der.and_then(|d| EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &d).ok());
     let pair = pair.ok_or_else(|| refused("is not an ES256 key; use the .p8 file Apple made"))?;
@@ -586,4 +640,10 @@ async fn sign(push: &config::Push, key: &PushKey) -> Result<String, Error> {
         "{signed}.{}",
         URL_SAFE_NO_PAD.encode(signature.as_ref())
     ))
+}
+
+/// Both services issue PEM-encoded PKCS#8 private keys.
+fn pkcs8(pem: &str) -> Option<Vec<u8>> {
+    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+    STANDARD.decode(body.trim()).ok()
 }

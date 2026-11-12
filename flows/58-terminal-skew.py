@@ -45,40 +45,20 @@ with flow([done()], model="gpt-6.1-sol") as f:
 
 
 # A newer paired server's status stream opens on the same line; the reader skips it and hears the rest.
-peer = socket.create_server(('127.0.0.1', 0))
-
-
-def answer():
-    while True:
-        conn = peer.accept()[0]
-        status = conn.recv(65536).startswith(b'GET /v1/status')
-        conn.sendall(b'HTTP/1.0 200 OK\r\n\r\n' + (LINE + b'{"kind":"server","id":"s58","label":"S","name":"","machine":"","realm":"","transcribe":false,"shared":false,"video":false}\n' if status else b'[]'))
-        threading.Timer(30 * status, conn.close).start()
-
-
-threading.Thread(target=answer, daemon=True).start()
-with flow([], config='[server]\naddress = "127.0.0.1:0"') as f:
+SERVER = '{"kind":"server","id":"s58","label":"S","name":"","machine":"","realm":"","transcribe":false,"shared":false,"video":false}'
+with flow([]) as f:
     server.start(f)
-    assert f.run('devices', 'add', 'stand', '--address', '127.0.0.1:%d' % peer.getsockname()[1]).returncode == 0
+    server.stand(f, 'stand', LINE.decode().strip(), SERVER)
     server.wait(lambda: any(s['name'] == 'stand' and s['silent'] is None for s in json.loads(server.send(f, 'GET', '/status').readline())['servers']),
                 15, "the peer's unknown line kept it silent")
 
-    line, held = json.loads(server.send(f, 'GET', '/status').readline()), []
+    line = json.loads(server.send(f, 'GET', '/status').readline())
     line['server'].update(id='s58z', silent=1); line['servers'] = []
-    sleepy = socket.create_server(('127.0.0.1', 0))
-
-    def doze():
-        while True:
-            conn = sleepy.accept()[0]
-            status = conn.recv(65536).startswith(b'GET /v1/status')
-            conn.sendall(b'HTTP/1.0 200 OK\r\n\r\n' + (json.dumps(line).encode() + b'\n' if status else b'[]'))
-            held.append(conn) if status else conn.close()
+    sleepy = server.stand(f, 'sleepy', json.dumps(line))
 
     def listed():
         return next((s['silent'] for s in json.loads(server.send(f, 'GET', '/status').readline())['servers'] if s['name'] == 'sleepy'), 0)
 
-    threading.Thread(target=doze, daemon=True).start()
-    assert f.run('devices', 'add', 'sleepy', '--address', '127.0.0.1:%d' % sleepy.getsockname()[1]).returncode == 0
     server.wait(lambda: listed() == 1, 15, "the peer's own word that it is going to sleep was dropped")
-    held[-1].sendall(json.dumps({'kind': 'server', **line['server'], 'silent': None}).encode() + b'\n')
+    server.say(sleepy, json.dumps({'kind': 'server', **line['server'], 'silent': None}))
     server.wait(lambda: listed() is None, 15, "a line without silent left the peer silent")

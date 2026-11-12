@@ -3,7 +3,7 @@ or FAIL."""
 
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import json
 import os
@@ -25,12 +25,20 @@ if not os.environ.get("RAZOR_BIN"):
 BINARY = os.path.abspath(os.environ["RAZOR_BIN"])
 # A GPT sign-in whose access token, {"exp": 4102444800}, never needs a refresh.
 AUTH = {"tokens": {"access_token": "flow.eyJleHAiOjQxMDI0NDQ4MDB9.flow", "account_id": "flow-account"}}
+# Mirror api::SHUTDOWN_TIMEOUT, controller::CLOSE_TIMEOUT and residents::TEARDOWN_TIMEOUT.
+SHUTDOWN_TIMEOUT, CLOSE_TIMEOUT, TEARDOWN_TIMEOUT = 20, 3, 1
+# @anthropic-ai/claude-agent-sdk 0.3.321 sdk.mjs: ProcessTransport.close uses jXe=2000,
+# then sends TERM and schedules KILL 5000 ms later. Its process handle keeps Node alive.
+SDK_CLOSE_GRACE, SDK_KILL_GRACE = 2, 5
+SCHEDULING_MARGIN = 4  # Let the OS schedule exits and reap children on a loaded runner.
+NETWORK_STOP_TIMEOUT = CLOSE_TIMEOUT + TEARDOWN_TIMEOUT + SDK_CLOSE_GRACE + SDK_KILL_GRACE + SCHEDULING_MARGIN
+STOP_TIMEOUT = SHUTDOWN_TIMEOUT + NETWORK_STOP_TIMEOUT
+
 
 
 @dataclass
 class Flow:
-    """One flow's scratch home and working directory, the environment Razor runs in, and the
-    folder where the stand-in spools every model request."""
+    """One scratch home, working directory, environment and folder of model requests."""
 
     home: Path
     cwd: Path
@@ -61,6 +69,20 @@ class Flow:
         self.git("add", "--", "base", *files)
         self.git("-c", "user.name=Flow", "-c", "user.email=flow@example.invalid", "commit", "-m", "Base")
 
+    def home_at(self, name: str, cwd: Path | None = None):
+        """Another scratch home and checkout, copying only the stand-in config and sign-in."""
+        state = self.home / name / ".razor"
+        if not state.exists():
+            shutil.copytree(self.home / ".razor", state,
+                            ignore=lambda _, names: set(names) - {"config.toml", "auth.json"})
+        cwd = cwd or self.cwd.parent / name
+        cwd.mkdir()
+        other = replace(self, home=state.parent, cwd=cwd, env={**self.env, "RAZOR_HOME": str(state)})
+        other.base()
+        other.git("config", "user.name", name.title())
+        other.git("config", "user.email", f"{name}@example.invalid")
+        return other
+
     def sent(self) -> list[str]:
         """The body of each model request (each POST) the stand-in has had, oldest first."""
         return [path.read_text() for path in sorted(self.requests.glob("[0-9]*.body"))]
@@ -70,8 +92,7 @@ class Flow:
         return json.loads((self.requests / f"{n:03}.body").read_bytes())
 
     def record(self, session: str) -> Iterator[dict]:
-        """The session's record entries in the flow's RAZOR_HOME as written so far; a line still
-        being written is left out."""
+        """The session's complete record entries in this flow's RAZOR_HOME."""
         path = Path(self.env["RAZOR_HOME"]) / "sessions" / session / "record.jsonl"
         return map(json.loads, path.read_bytes().split(b"\n")[:-1])
 
@@ -87,9 +108,8 @@ def _processes(groups):
 
 
 def _stop(home):
-    """Stops the servers alone, as their service does (a signalled CLI may start one more request),
-    then live jobs' groups, whose end could wake a turn; kills and names any alive 10 s later.
-    Every server whose state is under `home` counts, a flow's second server included."""
+    """Stop servers under home, then jobs; kill and report any alive after STOP_TIMEOUT."""
+    # Signal servers alone, as services do: a signalled CLI may start another request.
     server = {json.loads(info.read_text())["pid"] for info in home.rglob("server.json")}
     jobs = set()
     for record in home.rglob("sessions/*/record.jsonl"):
@@ -101,7 +121,7 @@ def _stop(home):
                 else:
                     live.pop(entry["job"], None)
         jobs.update(live.values())
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + STOP_TIMEOUT
     for groups, kill in ((server, os.kill), (jobs, os.killpg)):
         for pid in groups:
             with suppress(ProcessLookupError):
@@ -118,11 +138,9 @@ def _stop(home):
 @contextmanager
 def flow(replies: list[Reply], *, model: str = "opus", config: str = "",
          env: dict[str, str] | None = None) -> Iterator[Flow]:
-    """Yields a Flow whose model requests the stand-in answers from `replies`, with `model` and
-    `config` in its config file, `{standin}` in it standing for the stand-in's URL. Then stops
-    the server: a process of the flow's alive 10 s later fails it. Prints PASS and the script's
-    name, or FAIL, where the first failure was raised (each flows file and line from the script
-    inward), its message as written and the scratch folder, which is kept, and exits 1."""
+    """Run a scratch server against replies, using model/config and replacing {standin} with its URL.
+    Teardown fails on processes alive after STOP_TIMEOUT. Print PASS and the script name, or FAIL
+    with its frame, message and retained scratch folder; exit 1 on failure."""
     scratch = Path(tempfile.mkdtemp(prefix="razor-flow-"))
     home, cwd = scratch / "home", scratch / "cwd"
     (home / ".razor").mkdir(parents=True)
@@ -142,8 +160,11 @@ def flow(replies: list[Reply], *, model: str = "opus", config: str = "",
     stopper = subprocess.Popen([sys.executable, __file__, home], stdin=subprocess.PIPE, start_new_session=True)
     try:
         with serve(replies, scratch / "requests") as url:
+            # Servers reach each other only through the run's local relay, when scripts/flows.sh started one.
+            relay = os.environ.get("RAZOR_FLOW_RELAY")
+            network = f'[network]\nrelays = ["{relay}"]\n' if relay and "[network]" not in config else ""
             (home / ".razor/config.toml").write_text(
-                f"skill_updates = false\nmodel = {json.dumps(model)}\n{config.replace('{standin}', url)}\n[responses]\nbase_url = {json.dumps(url)}\n")
+                f"skill_updates = false\nmodel = {json.dumps(model)}\n{config.replace('{standin}', url)}\n{network}[responses]\nbase_url = {json.dumps(url)}\n")
             (home / ".razor/auth.json").write_text(json.dumps(AUTH))
             try:
                 yield Flow(home, cwd, scratch / "requests", {

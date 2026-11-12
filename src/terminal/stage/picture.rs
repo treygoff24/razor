@@ -28,6 +28,7 @@ pub(super) enum Sky {
 #[derive(Clone, Debug, Default)]
 pub(super) struct Actor {
     pub(super) who: usize,
+    pub(super) avatar: Option<std::sync::Arc<[Sprite; 8]>>,
     pub(super) name: String,
     pub(super) state: ActorState,
     pub(super) x: f64,
@@ -44,6 +45,19 @@ pub(super) struct Actor {
     pub(super) tag_at: Option<f64>,
     pub(super) wear: Option<Placed>,
     pub(super) accent: usize,
+}
+impl Actor {
+    fn sprite(&self, pose: Pose, octant: bool) -> &Sprite {
+        if let Some(poses) = &self.avatar {
+            return &poses
+                [(if pose as usize > 3 { 0 } else { pose as usize }) + usize::from(!octant) * 4];
+        }
+        art::actor(
+            self.who,
+            self.accent,
+            &format!("{}/{}", pose as usize, art::density(octant)),
+        )
+    }
 }
 /// A named exported prop, centred horizontally and placed by its foot.
 #[derive(Clone, Debug, Default)]
@@ -108,7 +122,11 @@ pub(super) fn paint(sc: &Scene, octant: bool) -> Sprite {
     rect(&mut bench, 0, top + k as i64, wide, k as i64, rgb(0x2b3238));
     light_ground(&mut bench, sc, k, false);
     c.blit(&bench, 0, 0, false);
-    for a in sc.actors.iter().filter(|a| !a.hidden && a.asleep) {
+    for a in sc
+        .actors
+        .iter()
+        .filter(|a| !a.hidden && a.asleep && a.avatar.is_none())
+    {
         let mask = art::actor(a.who, a.accent, &format!("sleep/{}", art::density(octant)));
         let mask = light_sprite(mask.clone(), light_on(a.x, SEAT_Y, sc.lamp, sc.bright), sc);
         c.blit(&mask, rd((a.x - 5.0) * k as f64), 0, false);
@@ -293,8 +311,7 @@ fn window(sc: &Scene, k: usize, octant: bool) -> Sprite {
 fn actor(c: &mut Sprite, sc: &Scene, a: &Actor, octant: bool) {
     let y = a.y.unwrap_or(SEAT_Y + if a.asleep { 3.0 } else { 0.0 });
     let pose = if a.asleep { Pose::Sleep } else { a.pose };
-    let picture = format!("{}/{}", pose as usize, art::density(octant));
-    let mut body = art::actor(a.who, a.accent, &picture).clone();
+    let mut body = a.sprite(pose, octant).clone();
     if a.dim > 0.0 {
         for p in body.px.iter_mut().flatten() {
             *p = mix(*p, [13, 19, 24], a.dim);
@@ -311,7 +328,7 @@ fn actor(c: &mut Sprite, sc: &Scene, a: &Actor, octant: bool) {
     } else {
         c.blit(&body, rd(a.x - 5.0), rd(y), a.flip);
     }
-    if a.arm_up {
+    if a.arm_up && a.avatar.is_none() {
         let mask = art::actor(a.who, a.accent, &format!("arm/{}", art::density(octant)));
         let mask = light_sprite(mask.clone(), lit, sc);
         if octant {
@@ -359,13 +376,15 @@ fn attachment(c: &mut Sprite, sc: &Scene, a: &Actor, p: &Placed, y: f64, octant:
         if octant {
             layer.blit(s, rd(x), rd(top * k + 29.0 - s.h as f64), false);
         }
-        let hand = art::actor(a.who, a.accent, &format!("hand/{}", art::density(octant)));
-        layer.blit(
-            hand,
-            rd(hx - if octant { 1.0 } else { 0.0 }),
-            rd(top * k + if octant { 24.0 } else { 8.0 }),
-            false,
-        );
+        if a.avatar.is_none() {
+            let hand = art::actor(a.who, a.accent, &format!("hand/{}", art::density(octant)));
+            layer.blit(
+                hand,
+                rd(hx - if octant { 1.0 } else { 0.0 }),
+                rd(top * k + if octant { 24.0 } else { 8.0 }),
+                false,
+            );
+        }
         // At cell density the prop covers the holding pixel; painted paws cover the grip.
         if !octant {
             layer.blit(s, rd(x), rd(top * k + 10.0 - s.h as f64), false);

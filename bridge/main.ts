@@ -90,6 +90,7 @@ class Conversation {
   thought = false; // A thinking block began and has sent no words yet: its first words start a thought.
   thoughts = 0; // Thoughts begun in this conversation; each one's lines carry its number.
   landed = 0; // The newest thought whose entry was sent; one after it at a message_start was cut.
+  spoken = false; // Reply words were sent that no Text entry has taken; at a message_start they were cut.
   announced = false;
   window = 0; // The SDK's raw context window, asked at init so the first turn has it, and at a switch.
   // The latest input the CLI took in, a candidate until the reply to its request begins or its
@@ -110,6 +111,7 @@ class Conversation {
   requests = 0; // The turn's model requests whose reply began, over every CLI turn it spans.
   closed = false;
   fast = false;
+  servedModel: string | null = null;
   model: string; // The model the CLI runs now, a kept switch's after it.
   fastState?: string;
   windows = new Map<string, UsageWindow>(); // At most 32 named windows, not a reading history.
@@ -128,7 +130,7 @@ class Conversation {
     const builtins = tools.filter(isBuiltin);
     const server = createSdkMcpServer({ name: 'razor' });
     this.razor = server.instance.server;
-    this.serve(tools.filter((t): t is Tool => !isBuiltin(t)));
+    for (const tool of tools) if (!isBuiltin(tool)) this.served.set(tool.name, alwaysLoaded(tool));
     this.razor.registerCapabilities({ tools: { listChanged: true } });
     this.razor.setRequestHandler(ListToolsRequestSchema, () => {
       this.relist?.resolve(); this.relist = undefined;
@@ -217,9 +219,6 @@ class Conversation {
     for (const gate of this.gates.values()) gate.resolve({ refused: refusals.stopped });
     this.runs.clear();
   }
-  serve(tools: Tool[]) {
-    for (const tool of tools) this.served.set(tool.name, alwaysLoaded(tool));
-  }
   enqueue(step: () => Promise<unknown>) {
     this.queue = this.queue.then(() => this.closed ? undefined : step())
       .catch((e) => console.error(`razor bridge: session ${this.session}: ${this.bare(e instanceof Error ? e.message : String(e))}`));
@@ -227,7 +226,7 @@ class Conversation {
   bare(text: string) { return this.key ? text.replaceAll(this.key, '[key removed]') : text; }
   async add(tools: Tool[]) {
     if (tools.every((tool) => JSON.stringify(this.served.get(tool.name)) === JSON.stringify(alwaysLoaded(tool)))) return;
-    this.serve(tools);
+    for (const tool of tools) this.served.set(tool.name, alwaysLoaded(tool));
     const relist = this.relist ??= Promise.withResolvers<void>();
     await this.razor.sendToolListChanged();
     await relist.promise;
@@ -341,6 +340,7 @@ class Conversation {
       case 'assistant': {
         if (m.parent_tool_use_id === null) this.took = this.started; // An API error's own frame too.
         if (m.parent_tool_use_id !== null || m.error) return;
+        this.servedModel = m.message.model;
         const native = { claude: { conversation: m.session_id, uuid: m.uuid } };
         if (this.sized !== m.message.id) {
           this.sized = m.message.id;
@@ -354,6 +354,7 @@ class Conversation {
             : undefined;
           if (body) await this.send({ type: 'entry', body, native });
           if (body?.kind === 'thinking') this.landed = this.thoughts;
+          this.spoken &&= body?.kind !== 'text';
         }
         return;
       }
@@ -376,14 +377,14 @@ class Conversation {
           this.additions = null;
           if (tools) this.enqueue(() => this.add(tools));
           [this.took, this.requests] = [this.started, this.requests + 1];
-          // The CLI tries a cut message again as a new one: the cut one's thoughts have no entries.
-          if (this.landed < this.thoughts) await this.send({ type: 'void', n: this.thoughts });
-          this.landed = this.thoughts;
+          // The CLI tries a cut message again as a new one: the cut one's thoughts and words have no entries.
+          if (this.landed < this.thoughts || this.spoken) await this.send({ type: 'void', n: this.thoughts });
+          [this.landed, this.spoken] = [this.thoughts, false];
         }
         // A redacted or omitted thought has no words, so it sends nothing.
         if (m.event.type === 'content_block_start') this.thought = m.event.content_block.type === 'thinking';
         if (m.event.type !== 'content_block_delta') return;
-        if (m.event.delta.type === 'text_delta') await this.send({ type: 'delta', text: m.event.delta.text });
+        if (m.event.delta.type === 'text_delta') { this.spoken = true; await this.send({ type: 'delta', text: m.event.delta.text }); }
         if (m.event.delta.type === 'thinking_delta' && m.event.delta.thinking) {
           this.thoughts += Number(this.thought);
           await this.send({ type: 'thought', n: this.thoughts, text: m.event.delta.thinking, start: this.thought });
@@ -404,7 +405,7 @@ class Conversation {
         const usage = { ...tokens, requests: this.requests, waited: 0 };
         if (this.settling) {
           this.close();
-          await this.send({ type: 'settled', usage }, true);
+          await this.send({ type: 'settled', usage, model: this.servedModel }, true);
           return;
         }
         const { held, yielded, escaped } = this;
@@ -416,11 +417,12 @@ class Conversation {
         [this.carried, this.requests] = [{ input: 0, output: 0, cache_read: 0, cache_write: 0 }, 0];
         // An input whose request Escape aborted is in the conversation, and the next request reads it.
         // Escape after the batch yielded finds the CLI's turn ended cleanly: it is still stopped.
-        const sent = this.send({ type: 'turn_end', success: m.subtype === 'success' && !m.is_error && !yielded, reason: yielded ? 'stopped' : m.subtype === 'success' && m.is_error && (m.api_error_status === 401 || m.api_error_status === 403) ? 'authentication_failed' : m.terminal_reason ?? null,
+        const sent = this.send({ type: 'turn_end', model: this.servedModel, success: m.subtype === 'success' && !m.is_error && !yielded, reason: yielded ? 'stopped' : m.subtype === 'success' && m.is_error && (m.api_error_status === 401 || m.api_error_status === 403) ? 'authentication_failed' : m.terminal_reason ?? null,
           // The CLI's advice for a missing sign-in names its own /login, which Razor does not have.
           message: (m.subtype !== 'success' ? this.bare(m.errors.join(' ')) : m.is_error ? this.bare(m.result) : m.result).replace(/Not logged in[^\n]*\/login/, 'Claude is not signed in; run razor setup'), usage,
           window: Math.max(0, ...Object.values(m.modelUsage).map((usage) => usage.contextWindow)), took: this.started });
         this.took = null;
+        this.servedModel = null;
         // What arrived too late for a batch opens the CLI's next turn, as the controller expects,
         // before the line's drain: an input arriving during it must queue behind this one.
         if (held) held.content = held.content.filter((b) => b !== effortNotice);
@@ -488,4 +490,8 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
   }
 }
 for (const conversation of [...conversations.values()]) conversation.close();
-setTimeout(() => process.exit(0), 5000).unref();
+// SDK 0.3.321 sdk.mjs ProcessTransport.close: TERM after 2 s, then KILL after 5 s.
+// An earlier exit cancels KILL, leaving a stopped CLI behind. Allow one more second, then
+// leave even if an unkillable CLI or its descendants' inherited pipes still hold Node open.
+const SDK_CLOSE_GRACE = 2000, SDK_KILL_GRACE = 5000, EXIT_MARGIN = 1000;
+setTimeout(() => process.exit(0), SDK_CLOSE_GRACE + SDK_KILL_GRACE + EXIT_MARGIN).unref();

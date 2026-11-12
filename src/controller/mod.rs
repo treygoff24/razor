@@ -3,6 +3,7 @@
 //! speak the same conversation messages.
 
 mod files;
+mod network;
 mod questions;
 mod session;
 mod surface;
@@ -30,6 +31,10 @@ use std::{error, fmt, io};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 
+/// Bounds the network lock wait and iroh's drain, even with an inflated QUIC probe timeout.
+/// iroh 1.4.1 src/endpoint.rs:1713–1716 gives three seconds for a conservative normal close.
+pub(crate) const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Every session this server has loaded. Cheap to clone; any task may call any method.
 #[derive(Clone)]
 pub struct Controller {
@@ -40,9 +45,9 @@ struct Inner {
     home: PathBuf,
     /// The last good config; holding its lock also serializes reloads.
     config: tokio::sync::Mutex<Settings>,
+    network: tokio::sync::Mutex<network::Network>,
     mcp_auth: Auth,
     mcp_revision: AtomicU64,
-    address: Option<String>,
     responses: Arc<Responses>,
     bridge: crate::claude::SharedBridge,
     children: children::Children,
@@ -87,6 +92,18 @@ struct Status {
 type Work = Box<dyn for<'a> FnOnce(&'a mut Session) -> BoxFuture<'a, Result<(), Error>> + Send>;
 
 impl Controller {
+    /// Ends peer connections before this server stops; later config reads cannot reopen them.
+    pub(crate) async fn shutdown(&self) {
+        let connected = self.inner.devices.stop();
+        let closing = async { self.inner.network.lock().await.close(connected).await };
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT, closing).await;
+    }
+
+    /// Each replacement is published after binding; disabling publishes None before closing.
+    pub(crate) async fn endpoint(&self) -> tokio::sync::watch::Receiver<Option<iroh::Endpoint>> {
+        self.inner.network.lock().await.endpoint.subscribe()
+    }
+
     /// Start on the state directory `home`. Each session `record::live` names is loaded: calls
     /// with no result get `Unknown`, lost jobs end `Unknown` with their notices held for the
     /// next input, a session whose turn was open is rebuilt (`Restart`) and goes on, and one
@@ -102,12 +119,15 @@ impl Controller {
             readings: BTreeMap::new(),
             remote: BTreeMap::new(),
             config: None,
-            shown: (config.brand, config.ui, config.phone),
+            shown: (
+                config.brand.shown(&config.residents),
+                config.ui,
+                config.phone,
+            ),
             lines: broadcast::channel(1024).0,
         };
         let controller = Controller {
             inner: Arc::new(Inner {
-                address: config.server.address.clone(),
                 children: children::Children::open(home.clone()),
                 devices: Arc::new(
                     crate::devices::Devices::open(&home)
@@ -116,6 +136,7 @@ impl Controller {
                 ),
                 plugins: crate::extensions::Plugins::new(home.clone()),
                 config: tokio::sync::Mutex::new(settings),
+                network: Default::default(),
                 mcp_auth: Auth::new(home.clone()),
                 mcp_revision: AtomicU64::new(0),
                 bridge: crate::claude::SharedBridge::new(&home),
@@ -133,8 +154,7 @@ impl Controller {
                 space: Notify::new(),
             }),
         };
-        let quiet = &controller.inner.devices.quiet;
-        quiet.store(config.provider_only, Ordering::Relaxed);
+        controller.inner.devices.set_quiet(config.provider_only);
         controller.inner.children.post.start(&controller);
         for session in record::live(&controller.inner.home).await? {
             let _ = controller.tell(&session, |s| Box::pin(s.restart())).await;
@@ -376,17 +396,21 @@ impl Controller {
         self.inner
             .summaries
             .configure(config.residents.keys().cloned());
-        let quiet = &self.inner.devices.quiet;
-        quiet.store(config.provider_only, Ordering::Relaxed);
-        let notice = if !settings.errors.is_empty() {
-            Some(settings.errors.join(" "))
-        } else {
-            (config.server.address != self.inner.address)
-                .then(|| "server.address changed; restart Razor to apply it.".into())
-        };
+        self.inner.devices.set_quiet(config.provider_only);
         let plugins = self.inner.plugins.load(&config.plugins).await;
-        let notice = notice
-            .into_iter()
+        let network = self
+            .inner
+            .network
+            .lock()
+            .await
+            .configure(&self.inner.home, config, self.inner.devices.clone())
+            .await;
+        let notice = settings
+            .errors
+            .iter()
+            .chain(&settings.notices)
+            .cloned()
+            .chain(network.err().map(|e| e.to_string()))
             .chain(plugins)
             .reduce(|a, b| format!("{a} {b}"));
         let mut status = lock(&self.inner.status);
@@ -395,7 +419,7 @@ impl Controller {
             eprintln!("razor: {shown}");
         }
         let shown = (
-            config.brand.clone(),
+            config.brand.shown(&config.residents),
             config.ui.clone(),
             config.phone.clone(),
         );
@@ -496,13 +520,13 @@ impl Controller {
                 row.state == State::Working
                     && std::iter::successors(row.parent.as_ref(), up).any(|p| *p == id)
             });
-            let Status { agents, lines, .. } = &mut *status;
-            if let Some(row) = agents.get_mut(&id)
+            if let Some(row) = status.agents.get_mut(&id)
                 && row.state == State::Working
                 && !descendant
             {
                 row.state = State::Stuck;
-                let _ = lines.send(Live::Agent(Box::new(row.clone())));
+                let row = row.clone();
+                let _ = status.lines.send(Live::Agent(Box::new(row)));
             }
         }
     }
@@ -549,7 +573,7 @@ impl Status {
         Live::Agents {
             agents: self.agents.values().cloned().collect(),
             config: self.config.clone(),
-            brand: self.shown.0.clone(),
+            brand: Box::new(self.shown.0.clone()),
             ui: Box::new(self.shown.1.clone()),
             phone: self.shown.2.clone(),
             server: Default::default(),
@@ -597,7 +621,7 @@ impl Status {
         s: &Summary,
         state: State,
         context: Option<u64>,
-        closing: bool,
+        closing: Option<bool>,
         (window, threshold): (Option<u64>, f64),
     ) -> AgentView {
         let (child, old) = (s.child.as_ref(), self.agents.get(&s.session));
@@ -607,15 +631,18 @@ impl Status {
             .map(|(at, seen)| (Some(*at), *seen))
             .unwrap_or_default();
         AgentView {
+            served_model: s.served_model.clone(),
             session: s.session.clone(),
             parent: child.map(|c| c.parent.clone()),
             launched: child.map(|c| c.launched),
             name: s.name.clone(),
+            avatar: s.avatar.clone(),
             model: s.model.clone(),
             effort: s.settings.effort,
             speed: s.settings.speed,
             state,
-            closing,
+            closing: closing.is_some(),
+            closing_working: closing == Some(true),
             close_reason: s.close_reason,
             headline: s.headline.clone(),
             headline_at: s.headline_at,
@@ -662,7 +689,7 @@ impl Status {
         s: &Summary,
         state: State,
         context: Option<u64>,
-        closing: bool,
+        closing: Option<bool>,
         limits: (Option<u64>, f64),
     ) {
         let first = !self.agents.contains_key(&s.session);
@@ -703,7 +730,8 @@ impl Status {
                 row.state = State::NeedsYou;
             }
             if *row != before {
-                let _ = self.lines.send(Live::Agent(Box::new(row.clone())));
+                let row = row.clone();
+                let _ = self.lines.send(Live::Agent(Box::new(row)));
             }
         }
     }

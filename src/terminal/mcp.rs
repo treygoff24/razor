@@ -128,10 +128,11 @@ pub fn read(app: &mut App, after: Duration) {
     };
     mcp.asked += 1;
     let asked = mcp.asked;
-    let body = json!({"op": "list", "cwd": app.cwd, "session": app.focus});
+    let (path, session) = destination(app);
+    let body = json!({"op": "list", "cwd": app.cwd, "session": session});
     app.spawn(move |api| async move {
         tokio::time::sleep(after).await;
-        let read = api.json(Method::POST, "v1/mcp", Some(body)).await;
+        let read = api.json(Method::POST, &path, Some(body)).await;
         let invalid = "The server sent an invalid MCP list; reconnect to the server.";
         let rows = read.and_then(|v| serde_json::from_value(v).map_err(fail(invalid)));
         move |app: &mut App| listed(app, asked, rows)
@@ -166,12 +167,13 @@ fn post(app: &mut App, operations: Vec<Value>) {
     if operations.is_empty() {
         return;
     }
-    let (cwd, session) = (json!(app.cwd), json!(app.focus));
+    let (path, session) = destination(app);
+    let (cwd, session) = (json!(app.cwd), json!(session));
     app.spawn(|api| async move {
         let mut answers = Vec::new();
         for mut operation in operations {
             (operation["cwd"], operation["session"]) = (cwd.clone(), session.clone());
-            let answer = api.json(Method::POST, "v1/mcp", Some(operation.clone()));
+            let answer = api.json(Method::POST, &path, Some(operation.clone()));
             answers.push((operation, answer.await));
         }
         move |app: &mut App| {
@@ -506,9 +508,16 @@ pub(super) fn home(path: &Path) -> String {
     }
 }
 
+fn destination(app: &App) -> (String, Option<crate::protocol::SessionId>) {
+    match app.focus.as_ref().and_then(|id| id.address()) {
+        Some((id, server)) => (format!("v1/mcp?server={server}"), Some(id)),
+        None => ("v1/mcp".into(), app.focus.clone()),
+    }
+}
+
 fn remote_home(app: &App, path: &str) -> bool {
     path.starts_with("~/")
-        && (app.remote || app.focus.as_ref().is_some_and(|id| id.address().is_some()))
+        && (!app.server.is_empty() || app.focus.as_ref().is_some_and(|id| id.address().is_some()))
 }
 
 /// A typed path: `~/` is the home directory, and a relative one is under the terminal's.

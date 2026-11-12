@@ -42,11 +42,11 @@ impl Session {
         let s = self.record.summary();
         let at = s.idle_since?;
         let sessions = &self.settings.config.sessions;
-        (sessions.handover_minutes > 0
+        (sessions.handover_minutes > 0.0
             && !s.idle_handover
             && self.context.is_some_and(|n| n >= sessions.handover_tokens)
             && s.last_rebuild.is_none_or(|(_, rebuilt)| rebuilt < at))
-        .then_some(at.saturating_add(sessions.handover_minutes.saturating_mul(60_000)))
+        .then_some(at.saturating_add((sessions.handover_minutes * 60_000.0) as Millis))
     }
 
     /// The remaining close deadline; children and resident homes never have one.
@@ -55,8 +55,8 @@ impl Session {
         let at = s.idle_since?;
         let config = &self.settings.config;
         let minutes = config.sessions.close_minutes;
-        (minutes > 0 && s.child.is_none() && !config.residents.contains_key(&self.id))
-            .then_some(at.saturating_add(minutes.saturating_mul(60_000)))
+        (minutes > 0.0 && s.child.is_none() && !config.residents.contains_key(&self.id))
+            .then_some(at.saturating_add((minutes * 60_000.0) as Millis))
     }
 
     /// Closes only an idle conversation: its handover note reports to its resident without a turn.
@@ -81,6 +81,7 @@ impl Session {
                 usage: Usage::default(),
                 context: self.context,
                 model: None,
+                served_model: None,
                 window,
                 threshold: Some(threshold),
                 closed: true,

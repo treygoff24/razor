@@ -62,17 +62,12 @@ with flow([tool(None, "search", query="setup saved key"), reply(None)]) as f:
     ending = [("background when you log in", ""), ("Open Razor for your first message", "")]
     saved, person, you = (f.home / ".razor" / name for name in ("keys.toml", "config.toml", "about.md"))
     before = tomllib.loads(person.read_text())
-    tailscale = f.home / "tailscale"
-    tailscale.write_text("#!/bin/sh\necho '{\"BackendState\":\"Running\",\"Self\":{\"TailscaleIPs\":[\"127.0.0.1\"]},\"Peer\":{}}'\n")
-    tailscale.chmod(0o755)
-    terminal(f, ["setup"], [("Use Claude, ChatGPT, both, or an API key", "chatgpt"), ("other machines", "y"), *ending])
+    terminal(f, ["setup"], [("Use Claude, ChatGPT, both, or an API key", "chatgpt"), *ending])
     settings = tomllib.loads(person.read_text())
     server = settings.pop("server")
     assert not saved.exists() and not you.exists() and settings == before, "setup changed unrelated settings"
     expected = re.sub("-+", "-", re.sub("[^a-z0-9]", "-", socket.gethostname().split(".")[0].lower()))[:32].strip("-")
-    assert server["name"] == expected and "label" not in server, server
-    host, port = server["address"].rsplit(":", 1)
-    assert host == "127.0.0.1" and 7433 <= int(port) <= 7442, server
+    assert server == {"name": expected}, server
     person.write_text(person.read_text().replace(f'name = "{server["name"]}"', 'name = "chosen59"'))
     before = person.read_bytes()
     # Keys are typed hidden, saved together at 0600, and Enter keeps a saved one.
@@ -83,7 +78,7 @@ with flow([tool(None, "search", query="setup saved key"), reply(None)]) as f:
     kept = saved.read_bytes()
     terminal(f, ["keys"], [(p, "") for p, _ in keys])
     assert saved.read_bytes() == kept and saved.stat().st_mode & 0o777 == 0o600, "Enter did not keep the saved key"
-    terminal(f, ["setup"], [("Use Claude, ChatGPT, both, or an API key", ""), ("other machines", ""), *ending])
+    terminal(f, ["setup"], [("Use Claude, ChatGPT, both, or an API key", ""), *ending])
     assert [p.read_bytes() for p in (saved, person)] == [kept, before], "rerunning setup overwrote saved files"
     # A newly spawned serve must read keys.toml itself. No key is in the client's environment.
     with serve([Reply(b'{"results":[{"title":"Found","url":"https://example.invalid","text":"saved key works"}]}')],
@@ -104,7 +99,7 @@ with flow([tool(None, "search", query="setup saved key"), reply(None)]) as f:
     shutil.copy2(BINARY, bundle / "razor")
     calls = f.home / "claude-calls"
     for option in ([], ["--console"]):
-        terminal(f, ["setup", *option], [("Use Claude, ChatGPT, both, or an API key", ""), ("other machines", ""), *ending], bundle / "razor")
+        terminal(f, ["setup", *option], [("Use Claude, ChatGPT, both, or an API key", ""), *ending], bundle / "razor")
         logins = [l for l in (calls.read_text() if calls.exists() else "").splitlines() if l.startswith("auth login")]
         assert logins == (["auth login --console"] if option else []), (option, logins)
     saved.write_text('EXA_API_KEY = "flow-nul-prefix\\u0000flow-nul-suffix"\n')
@@ -129,7 +124,7 @@ with flow([chat.reply({"content": "OK"}), Reply(b'{"error":{"message":"bad key"}
     assert settings["provider_only"] and settings["model"] == "local/gateway59", settings
     keys = f.home / ".razor/keys.toml"
     assert tomllib.loads(keys.read_text())["LOCAL_API_KEY"] == secret and keys.stat().st_mode & 0o777 == 0o600
-    assert secret.encode() not in screen and b"Connect to your Razor servers" not in screen, screen
+    assert secret.encode() not in screen, screen
     assert not (f.home / "browser-installed").exists(), "provider_only installed a browser"
     sent = f.request(1)
     meta = json.loads((f.requests / "001.json").read_text())

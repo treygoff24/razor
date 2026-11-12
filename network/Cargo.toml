@@ -1,0 +1,19 @@
+[package]
+name = "razor-network"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.91"
+description = "Razor's encrypted connections between machines."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+iroh = { workspace = true }
+hyper = { version = "1.12", default-features = false, features = ["client", "http1"] }
+http = "1"
+bytes = "1"
+http-body-util = "0.1"
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "net", "sync", "time", "io-util", "macros"] }

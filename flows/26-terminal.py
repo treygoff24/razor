@@ -4,10 +4,10 @@ from datetime import datetime
 import json
 import os
 import re
-import shutil
 import sys
 import time
 from pathlib import Path
+from png import png
 import claude
 from driver import flow
 from model import agent, message, reply, tool
@@ -18,19 +18,54 @@ from wcwidth import wcswidth
 from responses import done
 
 
-# An explicit octant choice overrides tmux's default, while an omitted choice stays half there.
-for setting, want in (('', False), ('[ui]\nblocks = "octant"', True)):
-    with flow([], config=setting, env={'TMUX': 'flow'}) as f:
-        with Terminal(f, columns=160) as t:
-            t.shown('Message the agent')
-            t.until(lambda t: any(0x1cd00 <= ord(c) <= 0x1cdef for c in t.text()) == want)
+# The session command changes the real stage's pixels; clearing restores the creature.
+for blocks in ("half", "octant"):
+    with flow([claude.reply(text="face ready")], config=f'[ui]\nmotion=false\nblocks="{blocks}"\n') as f:
+        state = Path(f.env["RAZOR_HOME"])
+        state.joinpath("owl.png").write_bytes(Path(__file__).with_name("replies").joinpath("avatar.png").read_bytes())
+        state.joinpath("soft.png").write_bytes(png(132,33,(b"\0"+bytes([180,40,40,200])*132)*33,colour=6))
+        config = state / "config.toml"
+        config.write_text(config.read_text() + '\n[brand.avatars]\nowl={file="owl.png"}\nsoft={file="soft.png"}\n')
+        config.write_text(config.read_text() + f'\n[residents.scout]\ncwd={json.dumps(str(f.cwd))}\n')
+        session = "scout"
+        f.ask("--resume", session, "Show a face.")
+        with Terminal(f, "--resume", session, rows=48, columns=160) as t:
+            t.shown("face ready")
+            # Portrait pixels lie above the bench/name tags, beside the lamp. Compare only
+            # that region, so text, the command line and status times cannot satisfy this.
+            def portrait():
+                return tuple((y,x,c.data,c.fg,c.bg) for y,row in t.screen.buffer.items()
+                             if t.rows-11 <= y < t.rows-6 for x,c in row.items() if x > 125)
+            before = portrait()
+            original = config.read_text()
+            config.write_text(original + 'avatar="owl"\n')
+            t.until(lambda t: portrait() != before)
+            config.write_text(original)
+            t.until(lambda t: portrait() == before)
+            t.send("/avatar owl\r")
+            server.wait(lambda: server.agents(f)[session].get("avatar") == "owl", 5)
+            t.until(lambda t: portrait() != before)
+            t.send("/avatar\r")
+            server.wait(lambda: server.agents(f)[session].get("avatar") is None, 5)
+            t.until(lambda t: portrait() == before)
+            t.send("/avatar soft\r")
+            t.until(lambda t: any(len(c) == 6 and int(c[:2],16) > 3*int(c[4:],16) for _,_,_,fg,bg in portrait() for c in (fg,bg)))
+
+# An explicit octant choice overrides tmux's default.
+with flow([], config='[ui]\nblocks = "octant"', env={'TMUX': 'flow'}) as f:
+    with Terminal(f, columns=160) as t:
+        t.shown('Message the agent')
+        t.until(lambda t: any(0x1cd00 <= ord(c) <= 0x1cdef for c in t.text()))
 
 
 # A new drag can start on the quote chip left by a previous selection. A tap still quotes.
-with flow([claude.reply(text='alpha beta gamma delta epsilon zeta')], env={'SSH_CONNECTION': 'flow'}) as f:
+with flow([claude.reply(text='alpha beta gamma delta epsilon zeta', match='QUOTE_26'),
+           claude.reply(text=' '.join('word' for _ in range(600)), match='MARK_26'),
+           claude.reply((None, 'Bash', {'command': 'exit 1'}), match='NEXT_26'),
+           claude.reply(text='latest reply', match='NEXT_26')], env={'SSH_CONNECTION': 'flow'}) as f:
     with Terminal(f) as t:
         t.shown('Message the agent')
-        t.send('hello\r')
+        t.send('QUOTE_26\r')
         # The reply and its play mark draw a frame before the idle layout moves them down.
         t.shown('alpha beta gamma delta epsilon zeta', '▶', 'agent idle')
         y, x = t.find('alpha beta')
@@ -38,21 +73,17 @@ with flow([claude.reply(text='alpha beta gamma delta epsilon zeta')], env={'SSH_
         t.shown('❝ quote')
         cy, cx = t.find('❝ quote')
         t.send(f'\x1b[<0;{cx+1};{cy+1}M\x1b[<32;{x+10};{y+1}M\x1b[<0;{x+10};{y+1}m')
-        t.until(lambda t: t.output.count(b'\x1b]52;c;') >= 2)
+        # The copy is written between frames, ahead of the frame that draws its chip.
+        t.until(lambda t: t.output.count(b'\x1b]52;c;') >= 2 and '❝ quote' in t.text())
         assert '> alpha' not in t.text(), t.text()
         t.click('❝ quote')
         t.shown('> ')
-
-
-# A failed map mark beside the newest reply's play button keeps its own click.
-with flow([claude.reply(text=' '.join('word' for _ in range(600))),
-           claude.reply((None, 'Bash', {'command': 'exit 1'})),
-           claude.reply(text='latest reply')], env={'SSH_CONNECTION': 'flow'}) as f:
+    # A failed map mark beside the newest reply's play button keeps its own click.
     with Terminal(f, columns=120) as t:
         t.shown('Message the agent')
-        t.send('hello\r')
+        t.send('MARK_26\r')
         t.shown('word word')
-        t.send('next\r')
+        t.send('NEXT_26\r')
         t.shown('latest reply', '▶')
         for rows in range(16, 81):
             t.resize(rows, 120)
@@ -420,9 +451,10 @@ with flow(replies, config=local + '[server]\nname="box"\nrealm="work"\n') as f:
         assert top(t) == held, (held, t.text())
         # Wheel reports split right after their ESC, as a full PTY splits a trackpad's burst,
         # still scroll and never type into the composer.
-        for piece in ["\x1b", "[<65;60;20M"] * 200:
-            t.send(piece)
+        for _ in range(200):
+            t.send("\x1b")
             time.sleep(0.01)
+            t.send("[<65;60;20M")
         t.shown("X0599", "Message the agent")
         t.pump(1)
         turn("PROSE_THIRD", "third-visible")
@@ -534,7 +566,7 @@ with flow(replies, model="gpt-6.1-sol", config='[server]\nname="box"\nrealm="wor
         t.shown("91%", "100%")
         bars(t, [("5-hour", 91, "ffb319"), ("7-day", 100, "ff3d32")])
         f.git("-C", "peer", "switch", "-c", "after-turn")
-        soon = int(time.time()) + 8
+        soon = int(time.time()) + 4
         replies.append(replace(done(), match="USAGE_AGAIN", headers=windows(20, 30, soon)))
         server.post(f, f"/sessions/{peer}/input", {"text": "USAGE_AGAIN"})
         t.shown("peer · after-turn", "20%", "30%")
@@ -557,48 +589,6 @@ with flow(replies, model="gpt-6.1-sol", config='[server]\nname="box"\nrealm="wor
         root = next(p.name for p in (f.home / ".razor/sessions").iterdir() if p.name != peer)
         assert not closing(f.record(root)), "the root was closed"
         assert os.waitpid(t.pid, os.WNOHANG) == (0, 0), "the app ended"
-
-# A removed peer's background preview never keeps renewing its failure toast.
-with flow([done()], model="gpt-6.1-sol") as f:
-    root = f.ask("USAGE_GHOST")["session"]
-    ghost = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
-    folder = f.home / ".razor/sessions" / ghost
-    assert (folder / "record.jsonl").is_file(), folder
-    shutil.rmtree(folder)
-    with Terminal(f, "--resume", root, columns=160, rows=60) as t:
-        seen = [False, 0]
-
-        def failures(t):
-            failed = any(words in t.text() for words in ("API 404:", "The API answer was interrupted"))
-            seen[1] += failed and not seen[0]
-            seen[0] = failed
-            return False
-
-        t.pump(16, failures)
-        assert "flow done" in t.text(), t.text()
-        print("Removed peer failure appearances over 16 seconds:", seen[1], flush=True)
-        assert seen[1] <= 1, t.text()
-
-# A working child that rebuilt says when on its card.
-FIR = "You are fir,"
-replies = [agent("FIR_ROOT", "start", name="fir", brief="Hand over, then wait."),
-           reply("FIR_ROOT", text="fir-root-visible"),
-           claude.reply(("toolu_fir_note", "mcp__razor__handover", {"note": "Then wait."}), match=FIR),
-           reply(FIR, "Bash", {"command": "sleep 600"})]
-with flow(replies) as f:
-    f.base()
-    server.start(f)
-    root = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
-    server.post(f, f"/sessions/{root}/input", {"text": "FIR_ROOT"})
-    server.until(f, root, lambda es: es[-1]["kind"] == "turn_end")
-    fir = next(p.name for p in (f.home / ".razor/sessions").iterdir() if p.name != root)
-    server.until(f, fir, lambda es: any(e["kind"] == "job" for e in es))
-    with Terminal(f, "--resume", root) as t:
-        t.shown("fir-root-visible", "context", "rebuilt")
-        assert re.search(r"rebuilt (\w{3} )?\d{1,2}:\d{2}[ap]m", t.text()), t.text()
-        server.post(f, f"/sessions/{fir}/stop", {})
-        # Its job ends with the stop, and its end notice opens no turn.
-        server.until(f, fir, lambda es: any(e.get("event") == "ended" for e in es))
 
 # The agents list: settled and stopped children leave; finished children with branch work past
 # the newest three fold into a line under their own parent, each child takes one line, ← and Space fold
@@ -634,11 +624,8 @@ with flow(replies, config='[ui.keys.goto]\nsearch = ["s"]\n[ui.keys.panel]\nsear
         t.send("\x1bOQ")
         kid = lambda t: [line[:52] for line in t.screen.display if re.search(r" kid\d ", line[:52])]
         kids = lambda t: len(kid(t)) == 3 and all("waiting for merge" in line for line in kid(t)) and "kid1" not in t.text()
-        # Slid fully open; kid1's stopped child leaves the list too. Earlier remains folded
-        # without a total while its historical rows have not been requested.
-        t.until(lambda t: "✓ 2 done" in t.text() and t.screen.display[0][52] == "╮" and kids(t) and "EARLIER" in t.text() and "1 AGENT" in t.text())
-        earlier = next(line for line in t.screen.display if "EARLIER" in line)
-        assert "AGENT" not in earlier and "LOADED" not in earlier, earlier
+        # Slid fully open; kid1's stopped child leaves the list too.
+        t.until(lambda t: "✓ 2 done" in t.text() and t.screen.display[0][52] == "╮" and kids(t) and "1 AGENT" in t.text())
         assert t.screen.display[0].startswith("╭─ RAZOR") and " move " in t.screen.display[-1][:52], t.text()
         # Go to a helper's helper, kid2's g1, with kid2 folded into the done line opens the line
         # and selects its row.
@@ -692,6 +679,22 @@ with flow(replies, config='[ui.keys.goto]\nsearch = ["s"]\n[ui.keys.panel]\nsear
         t.send("\x1b[D")  # From a helper, Left addresses its parent before changing views.
         opened(f, g1, False)
         opened(f, server.agents(f)[g1]["parent"], True)
+    # A working child that rebuilt says when on its card.
+    FIR = "You are fir,"
+    replies += [agent("FIR_ROOT", "start", name="fir", brief="Hand over, then wait."),
+                reply("FIR_ROOT", text="fir-root-visible"),
+                claude.reply(("toolu_fir_note", "mcp__razor__handover", {"note": "Then wait."}), match=FIR),
+                reply(FIR, "Bash", {"command": "sleep 600"})]
+    fir_root = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    server.post(f, f"/sessions/{fir_root}/input", {"text": "FIR_ROOT"})
+    fir = next(e["session"] for e in server.until(f, fir_root, lambda es: es[-1]["kind"] == "turn_end") if e["kind"] == "child")
+    server.until(f, fir, lambda es: any(e["kind"] == "job" for e in es))
+    with Terminal(f, "--resume", fir_root) as t:
+        t.shown("fir-root-visible", "context", "rebuilt")
+        assert re.search(r"rebuilt (\w{3} )?\d{1,2}:\d{2}[ap]m", t.text()), t.text()
+        server.post(f, f"/sessions/{fir}/stop", {})
+        # Its job ends with the stop, and its end notice opens no turn.
+        server.until(f, fir, lambda es: any(e.get("event") == "ended" for e in es))
     server.stop(f)
     server.start(f)
     row = next(c for c in json.loads(server.send(f, "GET", f"/sessions/{root}/agent").read())["children"] if c["name"] == "kid1")

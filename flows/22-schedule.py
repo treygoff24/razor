@@ -3,18 +3,16 @@ the person as a note through the notify command, or as an ask the status stream 
 model turn sends a note without a model tool call; a fresh run's thread is a root whose row names
 its resident, listed only among its resident's sessions; a resident's projects (one per request,
 renamed in place, never through a link) and its `sky` file, passed through on its row unless bad
-(docs/design/residents.md). A fresh run's row is read directly outside the live feed."""
+(docs/design/residents.md). A fresh run's row is read directly outside the live feed. Schedules
+here run through the run-now route, which admits them as the timer does; flow 21 fires them by
+the clock."""
 import json
 import tempfile
 import time
-import urllib.request
 from pathlib import Path
+import claude
 from driver import REPLIES, Reply, flow
 from server import post, send, start as start_server, stop, until, wait
-
-
-def at(seconds):
-    return time.strftime("%H:%M:%S", time.localtime(time.time() + seconds))
 
 
 def find(value, key):
@@ -28,31 +26,53 @@ def find(value, key):
             yield from find(item, key)
 
 
-names = (("done", "Start the server."), ("resident-note", "Brief me."),
-         ("done", "Brief me."), ("resident-ask", "Review."), ("done", "Review."), ("done", "Fresh run."))
+def answered(entry):
+    return isinstance(entry["from"], dict) and "answer" in entry["from"]
+
+
+def sse(name, match):
+    return Reply((REPLIES / f"{name}.sse").read_bytes(), match=match)
+
+
+question = {"type": "question", "to": "parent", "text": "May I ship the review?"}
+replies = [sse(name, marker) for name, marker in (
+    ("done", "Start the server."), ("resident-note", "Brief me."), ("done", "Brief me."),
+    ("resident-ask", "Review."), ("done", "Review."), ("done", "Fresh run."))]
+replies += [claude.reply((None, "mcp__razor__message", question), match="Ask me about the review."),
+            sse("done", "Ask me about the review."), sse("resident-ask-second", "Yes, ship it."),
+            sse("done", "Yes, ship it."), sse("done", "From the client.")]
 with tempfile.TemporaryDirectory() as scratch:
-    note = Path(scratch) / "note.txt"
+    note, gate, asked = (Path(scratch) / name for name in ("note.txt", "gate", "asked"))
     (Path(scratch) / "notify").write_text(f'#!/bin/sh\nprintf "%s" "$1" > "{note}"\n')
     (Path(scratch) / "notify").chmod(0o755)
+    # The ask command answers the review question after a second, and the second question once
+    # the flow lets it, marking that it did; the scheduled review's ask it leaves open.
+    command = Path(scratch) / "ask"
+    command.write_text(f'#!/bin/sh\ncase "$1" in\n*"May I ship"*) sleep 1;;\n*second*) until [ -e "{gate}" ]; '
+                       f'do sleep .05; done; echo "Yes, ship it."; exec touch "{asked}";;\n*) exit 1;;\nesac\n'
+                       'echo "Yes, ship it."\n')
+    command.chmod(0o755)
     failure = Reply(b'{"error":{"code":"invalid_request_error","message":"scheduled model failure"}}', status=400, match="Fail.")
-    with flow([Reply((REPLIES / f"{name}.sse").read_bytes(), match=marker)
-               for name, marker in names] + [failure],
+    with flow(replies + [failure],
               config=f"notify = [{json.dumps(str(Path(scratch) / 'notify'))}]\n"
-                     '[server]\naddress = "127.0.0.1:0"') as f:
+                     f"ask = [{json.dumps(str(command))}]\n") as f:
         (f.cwd / "persona.md").write_text("You are Ember.")
         with (f.home / ".razor/config.toml").open("a") as config:
             config.write(f"\n[residents.ember]\ncwd = {json.dumps(str(f.cwd))}\n"
                          f"startup = [{json.dumps(str(f.cwd / 'persona.md'))}, \"razor\"]\n"
                          'sky = "sky.json"\n'
-                         f'[residents.ember.schedules.brief]\nat = ["{at(5)}"]\ntext = "Brief me."\n'
+                         '[residents.ember.schedules.brief]\nat = []\ntext = "Brief me."\n'
                          'model = "sonnet"\neffort = "low"\ndeliver = "notify"\n'
-                         f'[residents.ember.schedules.review]\nat = ["{at(12)}"]\ntext = "Review."\n'
+                         '[residents.ember.schedules.review]\nat = []\ntext = "Review."\n'
                          'deliver = "ask"\n'
-                         f'[residents.ember.schedules.broken]\nat = ["{at(20)}"]\ntext = "Fail."\n'
+                         '[residents.ember.schedules.broken]\nat = []\ntext = "Fail."\n'
                          'model = "gpt-6.1-sol"\n'
                          '[residents.ember.schedules.fresh]\nat = []\ntext = "Fresh run."\nfresh = true\n')
         f.ask("Start the server.")
-        entries = until(f, "ember", lambda es: sum(e["kind"] == "turn_end" for e in es) >= 2, timeout=40)
+        until(f, "ember", lambda es: es and es[0]["kind"] == "start")
+        for n, schedule in enumerate(("brief", "review"), 1):
+            post(f, f"/residents/ember/run/{schedule}", {})
+            entries = until(f, "ember", lambda es: sum(e["kind"] == "turn_end" for e in es) >= n)
         requests = [json.loads(body) for body in f.sent()]
         brief = next(r for r in requests if "Brief me." in json.dumps(r) and "Review." not in json.dumps(r))
         review = next(r for r in requests if "Review." in json.dumps(r))
@@ -65,14 +85,11 @@ with tempfile.TemporaryDirectory() as scratch:
         assert "type `note`, `to` `parent`" in inputs[0]["text"], inputs[0]
         assert note.read_text() == "Brief: all quiet.", "the notify command did not get the note"
         ask = [e for e in entries if e["kind"] == "call"][-1]
-        server = json.loads((f.home / ".razor/server.json").read_text())
-        key = (f.home / ".razor/device.key").read_text().strip()
-        status = urllib.request.Request(f"http://{server['address']}/v1/status",
-                                        headers={"Authorization": f"Bearer {key}"})
-        with urllib.request.urlopen(status, timeout=10) as stream:
+        with send(f, "GET", "/status") as stream:
             agents = json.loads(stream.readline())
         assert any(question["id"] == ["ember", ask["id"]]
                    for asks in find(agents, "asks") for question in asks), agents
+        post(f, "/residents/ember/run/broken", {})
         entries = until(f, "ember", lambda es: any(e["kind"] == "turn_end" and
                         isinstance(e["end"], dict) and "error" in e["end"] for e in es))
         failed = [e for e in entries if e["kind"] == "turn_end"][-1]
@@ -96,14 +113,36 @@ with tempfile.TemporaryDirectory() as scratch:
         assert [(p["id"], p["name"]) for p in ask("GET", "/residents/ember/projects")[1]] == [("Alpha", "Beta")]
         # The sky file reaches the row as its days and counts alone; one malformed or over 64 KiB
         # leaves the field out and the row in.
-        listing = urllib.request.Request(f"http://{server['address']}/v1/residents", headers=status.headers)
         days = [{"day": "2026-08-27", "n": 2}, {"day": "2026-09-01", "n": 18}]
         for text, shown in [(json.dumps([{**day, "note": "private"} for day in days]), days),
                             ('[{"day": "2026-08-27"', None), (json.dumps(days * 2000), None)]:
             (f.cwd / "sky.json").write_text(text)
-            with urllib.request.urlopen(listing, timeout=10) as answer:
-                row = json.load(answer)[0]
+            row = json.load(send(f, "GET", "/residents"))[0]
             assert row["session"] == "ember" and row.get("sky") == shown, (text[:60], row.get("sky"))
+        # A resident's question to the person returns once recorded as an open ask; the ask
+        # command's answer reaches the resident's next request; an ask answered first through the
+        # API is not answered again by its command.
+        mark, base = len(list(f.record("ember"))), len(f.sent())
+        f.ask("--resume", "ember", "Ask me about the review.")
+        ends = lambda n: lambda es: sum(e["kind"] == "turn_end" for e in es[mark:]) >= n
+        entries = until(f, "ember", ends(2))[mark:]
+        first = [e for e in entries if e["kind"] == "call"][0]
+        answers = [e for e in entries if e["kind"] == "input" and answered(e)]
+        assert answers[0]["from"]["answer"]["ask"] == first["id"], answers
+        assert answers[0]["text"] == "Yes, ship it.", answers[0]
+        turn = [e for e in entries if e["kind"] == "turn_end"][0]
+        assert turn["id"] < answers[0]["id"], "the question waited for its answer"
+        assert "Yes, ship it." in f.sent()[base + 2]
+        second = [e for e in entries if e["kind"] == "call"][-1]
+        answer = lambda: send(f, "POST", f"/sessions/ember/asks/{second['id']}", {"text": "From the client."}).status
+        assert answer() == 200
+        assert answer() == 400, "a second answer to one ask was admitted"
+        gate.touch()  # The command's own answer to the second ask comes now, after the client's.
+        wait(asked.exists, 10, "the ask command never answered the second question")
+        time.sleep(1)
+        answers = [e for e in until(f, "ember", ends(3))[mark:] if e["kind"] == "input" and answered(e)]
+        late = [e for e in answers if e["from"]["answer"]["ask"] == second["id"]]
+        assert [e["text"] for e in late] == ["From the client."], late
         # Replay closed runs older than a day: a refreshed old name and a new weekly name
         # survive churn even when name order and first insertion disagree with run age.
         stop(f)

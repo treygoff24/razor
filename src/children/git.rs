@@ -132,6 +132,40 @@ pub(super) async fn merge(origin: &Path, branch: &str) -> Result<String, Error> 
     Ok(String::from_utf8_lossy(&merged.success()?).into_owned())
 }
 
+/// Preserves a Razor helper's working copy on its own branch, without completing a merge or
+/// bypassing commit hooks. A failed command leaves the worktree for the parent to recover.
+pub(super) async fn preserve(path: &Path, branch: &str) -> Result<(), Error> {
+    if timed(path, 10, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await? != branch {
+        return super::refuse(
+            "The helper's worktree changed branches; recover it before settling.",
+        );
+    }
+    let merging = timed(path, 10, &["rev-parse", "--git-path", "MERGE_HEAD"]).await?;
+    if fs::try_exists(path.join(merging))
+        .await
+        .map_err(other("checking the helper's merge"))?
+    {
+        return super::refuse("The helper has an unfinished merge; resolve it before settling.");
+    }
+    if !timed(path, 10, &["status", "--porcelain", "-unormal"])
+        .await?
+        .is_empty()
+    {
+        timed(path, 10, &["add", "--all"]).await?;
+        timed(
+            path,
+            60,
+            &[
+                "commit",
+                "-m",
+                "Preserve uncommitted helper work at settlement",
+            ],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Moves every path `git status` lists in the worktree at `path` (untracked and not ignored, a
 /// wholly untracked folder as one path, or changed since its last commit), except deletions, to
 /// the same path under `keep`, when the listing is whole. Once each has moved and none is
@@ -177,8 +211,8 @@ pub(super) async fn remove(
     let removed = run(git(origin).args(["worktree", "remove"]).arg(path)).await?;
     if removed.code != Some(0) {
         let path = path.display();
-        text += &format!("The decision is recorded; git would not remove the worktree at {path}: ");
-        return Ok(text + &removed.text);
+        text += &format!("Git would not remove the worktree at {path}: ");
+        return Err(Error::Refused(text + &removed.text));
     }
     text += &removed.text;
     if let Some(branch) = delete {

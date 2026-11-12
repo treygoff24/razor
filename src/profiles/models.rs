@@ -67,7 +67,9 @@ pub(crate) fn model(name: &str, config: &Config) -> Result<Model, Error> {
 
 /// `model` without the `provider_only` check: what the name stands for.
 fn route(name: &str, config: &Config) -> Result<Model, Error> {
-    let row = config.models.get(name);
+    let choice = id(name.into());
+    let row = settings(&choice, config);
+    let name = resolved(&choice);
     let chat = CHAT.iter().find(|(n, _)| *n == name).map(|(_, chat)| chat);
     let mut endpoint = Endpoint {
         transport: Transport::Claude,
@@ -82,17 +84,20 @@ fn route(name: &str, config: &Config) -> Result<Model, Error> {
     let (provider, id) = match (chat, name.split_once('/')) {
         (Some(chat), _) => (Some(chat.provider), chat.id),
         (None, Some((provider, id))) if !id.is_empty() => (Some(provider), id),
-        _ if CLAUDE.contains(&name) || name.starts_with("claude-") => (None, name),
+        _ if name.starts_with("claude-") => (None, name),
         _ if window(name).is_some() => {
             endpoint.transport = Transport::Responses;
             endpoint.url.clone_from(&config.responses.base_url);
             (None, name)
         }
         _ => {
-            let names = CLAUDE.iter().chain(SHORT.iter().map(|(name, _)| name));
-            let names = names.copied().collect::<Vec<_>>().join(", ");
+            let names = FAMILY
+                .iter()
+                .map(|(name, ..)| *name)
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(Error::Invalid(format!(
-                "{name} is neither a model Razor ships nor a provider's model; check the name ({names}, or a full id from the model list), or name it <provider>/<id> with the provider under [providers]"
+                "{name} is neither a model Razor ships nor a provider's model; check the name ({names}, or an exact model id), or name it <provider>/<id> with the provider under [providers]"
             )));
         }
     };
@@ -154,7 +159,7 @@ pub(crate) fn validate(
 /// `LARGE`'s, handed over at 0.8 or, at that size, `LARGE`'s share; a configured Claude window
 /// never changes what its SDK sends.
 pub(crate) fn limits(name: &str, config: &Config, reported: Option<u64>) -> (Option<u64>, f64) {
-    let row = config.models.get(name);
+    let row = settings(name, config);
     let window = row.and_then(|r| r.window).or_else(|| {
         let shipped = route(name, config).ok().and_then(|m| m.window);
         Some(shipped.or(reported.filter(|w| *w > 0))?.min(LARGE.0))
@@ -188,13 +193,19 @@ const MODELS: &[(&str, u64)] = &[
     ("gpt-6.1-terra", 500_000),
     ("gpt-daybreak-red-latest", 372_000),
 ];
-const CLAUDE: &[&str] = &["opus", "sonnet", "haiku", "fable"];
-/// The short GPT names, each for one id in `MODELS`.
-const SHORT: &[(&str, &str)] = &[
-    ("sol", "gpt-6.1-sol"),
-    ("terra", "gpt-6.1-terra"),
-    ("luna", "gpt-6-luna"),
-    ("astra", "gpt-6-astra"),
+/// Families: alias, display name and target, Claude's from the pinned SDK's catalog.
+const FAMILY: &[(&str, &str, &str)] = &[
+    ("fable", "Fable", "claude-fable-5-2"),
+    ("opus", "Opus", "claude-opus-5-5"),
+    ("sonnet", "Sonnet", "claude-sonnet-5-5"),
+    ("haiku", "Haiku", "claude-haiku-5-5"),
+    ("sol", "Sol", "gpt-6.1-sol"),
+    ("terra", "Terra", "gpt-6.1-terra"),
+    ("luna", "Luna", "gpt-6-luna"),
+    ("astra", "Astra", "gpt-6-astra"),
+    ("gemini", "Gemini", "gemini-3.8-flash"),
+    ("deepseek", "DeepSeek", "deepseek-v4.1-flash-1017"),
+    ("glm", "GLM", "glm-5.3-flash"),
 ];
 /// The shipped providers: name, format, address and key variable; `[providers.<name>]` replaces
 /// any of the last three.
@@ -260,13 +271,53 @@ const CHAT: &[(&str, Chat)] = &[
     ),
 ];
 
-/// The id a model name stands for: a short GPT name's full id, any other name unchanged. Each
-/// place a name enters Razor calls it once, so records, status and requests hold full ids.
+/// Natural family spellings become one stable alias; explicit wire IDs and unknown names
+/// pass through unchanged. Every place a model choice enters Razor uses this normalizer.
 pub(crate) fn id(name: String) -> String {
-    SHORT
+    if name.contains('/')
+        || ((name.starts_with("claude-") || name.starts_with("gpt-"))
+            && name.bytes().any(|b| b.is_ascii_digit())
+            && !name
+                .bytes()
+                .any(|b| b.is_ascii_uppercase() || b.is_ascii_whitespace()))
+    {
+        return name;
+    }
+    let lower = name.to_ascii_lowercase();
+    let words = || {
+        lower
+            .split(|c: char| c.is_whitespace() || c == '-')
+            .filter(|w| !w.is_empty())
+    };
+    FAMILY
         .iter()
-        .find(|(short, _)| *short == name)
-        .map_or(name, |(_, id)| (*id).to_owned())
+        .find(|(family, ..)| {
+            words().filter(|w| w == family).count() == 1
+                && words().all(|w| {
+                    w == *family
+                        || matches!(w, "claude" | "gpt")
+                        || w.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+                })
+        })
+        .map_or(name, |(family, ..)| (*family).into())
+}
+
+/// A family's display name, such as `DeepSeek` for `deepseek`; `None` for any other name.
+pub(crate) fn label(name: &str) -> Option<&'static str> {
+    FAMILY.iter().find(|f| f.0 == name).map(|f| f.1)
+}
+
+fn resolved(name: &str) -> &str {
+    FAMILY.iter().find(|f| f.0 == name).map_or(name, |f| f.2)
+}
+
+/// One authoritative model row: the normalized choice, else its resolved target.
+pub(crate) fn settings<'a>(name: &str, config: &'a Config) -> Option<&'a crate::config::Model> {
+    let name = id(name.into());
+    config
+        .models
+        .get(&name)
+        .or_else(|| config.models.get(resolved(&name)))
 }
 
 /// The chat endpoint `name` is reached at under `config`, when it takes video; `None` for
@@ -275,18 +326,18 @@ pub(crate) fn video(name: &str, config: &Config) -> Option<Endpoint> {
     Some(model(name, config).ok()?.endpoint).filter(Endpoint::video)
 }
 
-/// The model names Razor lists: the shipped ones, each `[models]` row's and each provider's
-/// listed models as `<provider>/<id>`, sorted and once each.
+/// Families first, then configured provider models, once each. Versioned shipped IDs stay
+/// usable when typed, without appearing in pickers.
 pub(crate) fn models(config: &Config) -> Vec<String> {
-    let shipped = MODELS.iter().map(|(name, _)| *name);
-    let shipped = shipped
-        .chain(CHAT.iter().map(|(name, _)| *name))
-        .chain(CLAUDE.iter().copied());
     let providers = config.providers.iter();
     let listed = providers.flat_map(|(p, t)| t.models.iter().map(move |id| format!("{p}/{id}")));
-    let mut models = std::collections::BTreeSet::from_iter(shipped.map(String::from).chain(listed));
-    models.extend(config.models.keys().cloned());
-    models.into_iter().collect()
+    let mut models = std::collections::BTreeSet::from_iter(listed);
+    models.extend(config.models.keys().filter(|n| n.contains('/')).cloned());
+    FAMILY
+        .iter()
+        .map(|(name, ..)| String::from(*name))
+        .chain(models)
+        .collect()
 }
 
 /// The route's choice, with known restrictions and descriptive costs; no account probe. A
@@ -297,10 +348,7 @@ pub(crate) fn speed_choice(name: &str, speed: Speed, config: &Config) -> SpeedCh
         // The shipped speed catalogue is valid TOML matching the pricing table.
         toml::from_str(include_str!("data/speeds.toml")).expect("shipped speed catalogue")
     });
-    let configured = config
-        .models
-        .get(name)
-        .is_some_and(|r| r.speed_ids.contains_key(&speed));
+    let configured = settings(name, config).is_some_and(|r| r.speed_ids.contains_key(&speed));
     let route = route(name, config).map(|m| m.endpoint);
     let (transport, id) = route.map_or((Transport::Chat, name.into()), |e| (e.transport, e.id));
     let accepts = |key: &str| TEXT[key].split(',').any(|m| m == id);
@@ -326,9 +374,7 @@ pub(crate) fn speed(name: &str, speed: Speed, config: &Config) -> Result<(), Err
     }
     if name.starts_with("gemini-")
         && speed != Speed::Standard
-        && config
-            .models
-            .get(name)
+        && settings(name, config)
             .and_then(|r| r.request.as_ref())
             .and_then(|r| r.get("service_tier"))
             .is_some_and(|v| v != "priority")

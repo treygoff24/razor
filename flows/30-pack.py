@@ -3,22 +3,23 @@ is laid over the pack's key by key, the pack's relative paths count from the pac
 conversation lists the pack's, the project's and then the home folder's skills with descriptions and
 the `skills` key's folders are omitted, `skill` reads from the last of them, and the status stream carries the brand and the settings,
 again when they change, and keeps the last good ones when the pack goes missing
-(docs/design/packs.md)."""
+(docs/design/packs.md). The starter's avatar script makes a sheet its own checker accepts."""
 import json
+import subprocess
 import sys
 import tempfile
 import time
 import tomllib
-import urllib.request
 from pathlib import Path
 from claude import reply
 from driver import REPLIES, Reply, flow
-from server import send, until, wait
+from png import png
+from server import post, send, start as start_server, stop, until, wait
 
 ask, body = "Read the lore skill.", "Tell the flow's old story."
 done = (REPLIES / "done.sse").read_bytes()
 replies = [reply(("toolu_pack_skill", "mcp__razor__skill", {"name": "lore"}), match=ask),
-           Reply(done), Reply(done, match="Scout heartbeat.")]
+           Reply(done), Reply(done, match="Scout, report.")]
 with tempfile.TemporaryDirectory() as scratch:
     pack = Path(scratch) / "pack"
     (pack / "work").mkdir(parents=True)
@@ -29,15 +30,12 @@ with tempfile.TemporaryDirectory() as scratch:
     (pack / "skills/plan").mkdir()  # no SKILL.md, so the project's `plan` is still listed
     skill(pack / "library/lore", "description: Tells old stories.", f"{body}\n")
     (pack / "scout.md").write_text("You are Scout, this pack's resident.")
-    due = time.strftime("%H:%M:%S", time.localtime(time.time() + 6))
     config = ('skills = ["library"]\n[brand]\nname = "Acme"\n[brand.colours]\nviolet = "#336699"\n'
               '[ui]\nmotion = false\n'
-              '[residents.scout]\ncwd = "work"\nstartup = ["scout.md", "razor"]\n'
-              f'[residents.scout.heartbeat]\nat = ["{due}"]\ntext = "Scout heartbeat."\n')
+              '[residents.scout]\ncwd = "work"\nstartup = ["scout.md", "razor"]\n')
     (pack / "config.toml").write_text(config)
     with flow(replies, config=f'pack = {json.dumps(str(pack))}\n[brand]\nname = "Mine"\n'
-                              '[ui]\nblocks = "half"\n'
-                              '[server]\naddress = "127.0.0.1:0"') as f:
+                              '[ui]\nblocks = "half"\n') as f:
         # 1. The pack's, the project's and the person's own skills are listed with their
         # descriptions, the project's over the person's of the same name, the `skills` folder's
         # are omitted from the first request; `skill` still reads the last.
@@ -55,20 +53,17 @@ with tempfile.TemporaryDirectory() as scratch:
         assert "\\n- lore" not in first and "Tells old stories" not in first, "the opening listed a library skill"
         assert "lore" in [s["name"] for s in json.loads(send(f, "GET", f"/sessions/{session}/skills").read())]
         # 2. The pack's resident starts on its own, in and with paths relative to the pack.
-        until(f, "scout", lambda es: any(e["kind"] == "turn_end" for e in es), timeout=40)
-        start = next(f.record("scout"))
-        assert start["cwd"] == str(pack / "work"), start
-        beat = next(body for body in f.sent() if "Scout heartbeat." in body)
+        start = until(f, "scout", lambda es: es)[0]
+        assert start["kind"] == "start" and start["cwd"] == str(pack / "work"), start
+        post(f, "/sessions/scout/input", {"text": "Scout, report."})
+        until(f, "scout", lambda es: any(e["kind"] == "turn_end" for e in es))
+        beat = next(body for body in f.sent() if "Scout, report." in body)
         assert "You are Scout" in beat, "the pack's persona missed the model"
         # 3. The status stream opens with the brand: the person's name over the pack's colours.
-        server = json.loads((f.home / ".razor/server.json").read_text())
-        key = (f.home / ".razor/device.key").read_text().strip()
-        status = urllib.request.Request(f"http://{server['address']}/v1/status",
-                                        headers={"Authorization": f"Bearer {key}"})
-        with urllib.request.urlopen(status, timeout=10) as stream:
+        with send(f, "GET", "/status") as stream:
             line = json.loads(stream.readline())
             assert line["kind"] == "agents", line
-            assert line["brand"] == {"name": "Mine", "colours": {"violet": "#336699"}}, line["brand"]
+            assert line["brand"] == {"name": "Mine", "colours": {"violet": "#336699"}, "avatars": {}, "resident_avatars": {}}, line["brand"]
 
             def snapshot(test, why):
                 """The next `agents` line passing `test`, within 3 s."""
@@ -92,7 +87,79 @@ with tempfile.TemporaryDirectory() as scratch:
             person.write_text(person.read_text().replace(str(pack), str(missing)))
             line = snapshot(lambda l: str(missing) in (l["config"] or ""),
                             "the missing pack was not named within 3 s")
-            assert line["brand"] == {"name": "Mine", "colours": {"violet": "#993366"}}, line["brand"]
+            assert line["brand"] == {"name": "Mine", "colours": {"violet": "#993366"}, "avatars": {}, "resident_avatars": {}}, line["brand"]
+
+# A missing picture cannot prevent startup; it is omitted and reported.
+with flow([]) as f:
+    person = f.home / ".razor/config.toml"
+    picture = person.with_name("missing.png")
+    picture.write_bytes(REPLIES.joinpath("avatar.png").read_bytes())
+    person.write_text(person.read_text() + '\n[brand.avatars]\nowl={file="missing.png"}\n')
+    start_server(f)
+    stop(f)
+    picture.unlink()
+    result = f.run("config", "get", "ui.blocks")
+    assert result.returncode == 0, result.stderr
+    start_server(f)
+    with send(f, "GET", "/status?avatars=true") as stream:
+        line = json.loads(stream.readline())
+        assert line["brand"]["avatars"] == {}, line
+        assert "brand.avatars.owl.file does not load" in line["config"] and "missing.png" not in line["config"], line
+
+# Avatar pictures are opt-in; reloads carry them only to clients that ask.
+with flow([]) as f:
+    import base64
+    sheet = png(132, 33, (b"\0" + bytes([180,40,40,255])*132)*33, colour=6)
+    person = f.home / ".razor/config.toml"
+    picture = person.with_name("owl.png")
+    picture.write_bytes(sheet)
+    broken = [png(33,33,(b"\0"+bytes(33*4))*33,colour=6),
+              png(132,33,(b"\0"+bytes(132*3))*33), sheet[:50], sheet+bytes(2049)]
+    for n, data in enumerate(broken):
+        person.with_name(f"bad{n}.png").write_bytes(data)
+    config = person.read_text() + '\n[brand.avatars]\nowl = {file="owl.png", pool=true}\n'
+    person.write_text(config)
+    start_server(f)
+    with send(f, "GET", "/status?avatars=true") as stream, send(f, "GET", "/status") as plain:
+        line = json.loads(stream.readline())
+        assert line["brand"]["avatars"] == {"owl": base64.b64encode(sheet).decode()}, line
+        assert json.loads(plain.readline())["brand"]["avatars"] == {}
+        def changed(test):
+            deadline = time.monotonic() + 5
+            while True:
+                line = json.loads(stream.readline())
+                assert time.monotonic() < deadline, line
+                if line["kind"] == "agents" and test(line):
+                    return line
+        person.write_text(config.replace("owl =", "bird ="))
+        changed(lambda l: "bird" in l["brand"]["avatars"])
+        while (line := json.loads(plain.readline()))["kind"] != "agents":
+            pass
+        assert line["brand"]["avatars"] == {}, line
+        for invalid, count, notice in (
+                (config.replace("owl.png", "missing.png"), 0, "No such file"),
+                (config + "".join(f'a{n} = {{file="owl.png"}}\n' for n in range(16)), 16, "at most 16"),
+                *((config.replace("owl.png", f"bad{n}.png"), 0, "2 KiB" if n == 3 else "brand.avatars.owl.file") for n in range(len(broken)))):
+            person.write_text(invalid)
+            bad = changed(lambda l: bool(l["config"]))
+            assert len(bad["brand"]["avatars"]) == count and notice in bad["config"], bad
+            person.write_text(config.replace("owl =", "bird ="))
+            changed(lambda l: l["config"] is None)
+    person.write_text(config)
+    for key, value in (("brand.avatars.owl.file", "owl.png"), ("brand.avatars.owl.pool", "false")):
+        result = f.run("config", "set", key, value)
+        assert result.returncode == 0, result.stderr
+    assert tomllib.loads(person.read_text())["brand"]["avatars"]["owl"] == {"file": "owl.png", "pool": False}
+    # Pack-relative paths are resolved from the pack.
+    pack = person.parent / "pack"
+    pack.mkdir()
+    pack.joinpath("face.png").write_bytes(sheet)
+    pack.joinpath("config.toml").write_text('[brand.avatars]\npack={file="face.png"}\n')
+    assert f.run("config", "unset", "brand.avatars").returncode == 0
+    result = f.run("config", "set", "pack", str(pack))
+    assert result.returncode == 0, result.stderr
+    value = f.run("config", "get", "brand.avatars.pack.file")
+    assert json.loads(value.stdout.splitlines()[0]) == str(pack / "face.png"), value.stderr
 
 # With no named pack a stranger gets the starter, including the about word, skills and actual
 # notification/speech programs. Both desktop commands record here, ahead of driver's no-ops.
@@ -149,9 +216,11 @@ with flow([], config='# keep this comment\n[ui]\nmotion = false # keep this too\
         refused = f.run("config", "set", key, value)
         assert refused.returncode != 0 and person.read_bytes() == before, (key, refused.stderr)
         assert str(person) in refused.stderr, refused.stderr
+    refused = f.run("config", "set", "brand.resident_avatars.scout", '"owl"')
+    assert refused.returncode != 0 and "residents.<name>.avatar" in refused.stderr and person.read_bytes() == before, refused
     config("set", "models.sol.window", "12345")
     assert config("get", "models.sol.window").splitlines()[0] == "12345"
-    assert str(person) in config("get", 'models."gpt-6.1-sol".window')
+    assert str(person) in config("get", 'models."GPT 6.1 Sol".window')
     config("unset", "ui.blocks")
     assert "blocks" not in tomllib.loads(person.read_text())["ui"]
     assert config("get", "ui.blocks").splitlines()[0] == '\"auto\"'
@@ -243,12 +312,36 @@ with flow([], config='[mcp.gh]\ncommand="echo"\n[mcp.gh.env]\nGITHUB_TOKEN="fixt
     if not person.is_symlink():
         person.unlink()
         person.symlink_to(target)
-    target.write_text('[models."gpt-6.1-sol"]\nwindow=12345\n')
-    result = f.run("config", "set", "models.sol.window", "12346")
+    target.write_text('[models.sol]\nwindow=12345\n')
+    result = f.run("config", "set", 'models."GPT Sol".window', "12346")
     check("model alias explains existing spelling", result.returncode != 0 and
-          "gpt-6.1-sol" in result.stderr)
+          "as sol;" in result.stderr)
     target.write_text('')
     result = f.run("config", "set", "mcp.other.enabled", "false")
     check("intermediate tables are implicit", result.returncode == 0 and
           "[mcp]\n" not in target.read_text())
     assert not failures, failures
+
+# The avatar skill's script turns a face on a plain ground into a sheet its own checker accepts and
+# refuses a picture of the wrong size and a face with no eyes, each with its reason.
+def face(eyes):
+    """A 64 × 64 RGBA PNG: a face, with two dark eyes when `eyes`, on a plain blue ground."""
+    def colour(x, y):
+        if eyes and 22 <= y < 30 and (18 <= x < 26 or 38 <= x < 46):
+            return (20, 20, 30, 255)
+        return (240, 200, 150, 255) if 8 <= x < 56 and 8 <= y < 56 else (40, 60, 200, 255)
+    return png(64, 64, b"".join(b"\0" + b"".join(bytes(colour(x, y)) for x in range(64)) for y in range(64)), colour=6)
+
+script = Path(__file__).resolve().parents[1] / "packs/starter/skills/agent-avatar/avatar.js"
+with tempfile.TemporaryDirectory() as scratch:
+    def avatar(*words):
+        return subprocess.run(["node", script, *words], capture_output=True, text=True, cwd=scratch)
+    for name, eyes in (("face", True), ("blank", False)):
+        (Path(scratch) / f"{name}.png").write_bytes(face(eyes))
+    made = avatar("make", "face.png", "character", "sheet.png")
+    assert made.returncode == 0 and (Path(scratch) / "sheet-preview.png").exists(), made.stderr
+    checked = avatar("check", "sheet.png")
+    assert checked.returncode == 0 and json.loads(checked.stdout)["bytes"] <= 2048, checked.stderr
+    for words, reason in ((("check", "face.png"), "132"), (("make", "blank.png", "character", "x.png"), "eyes")):
+        refused = avatar(*words)
+        assert refused.returncode == 1 and reason in refused.stderr, refused.stderr

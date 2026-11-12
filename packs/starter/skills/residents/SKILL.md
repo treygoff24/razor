@@ -23,7 +23,7 @@ Read back the job, authority, timing and contact policy. An existing clear instr
 
 ## 2. Build its working folder
 
-Give the resident a stable folder of its own unless sharing an existing project's memory is intentional. Outside git, memory belongs to the starting folder; inside git, it belongs to the main checkout. Putting several residents in one repository can make them share memory and tasks. The `cwd` is fixed when the home session is first made: choose it before enabling the resident.
+Give the resident a stable folder of its own unless sharing an existing project's memory is intentional. Outside git, memory belongs to the starting folder; inside git, it belongs to the main checkout. A configured resident's folder comes before the repository's root when Razor chooses the memory and task folder, so residents in one repository share memory and tasks only when their folders say so; check them before assuming. Each resident also keeps a layer of its own for how it does its job. The `cwd` is fixed when the home session is first made: choose it before enabling the resident.
 
 Start with this layout, keeping only the parts its job uses. These are files you design for the agent, not special filenames Razor discovers, apart from `AGENTS.md` and the resident's `projects/` convention:
 
@@ -73,7 +73,7 @@ Fill every bracket from the interview. For each routine, specify what counts as 
 
 ### State, memory and identity
 
-Use Razor's `memory` tool for the state note, rulings, facts and notes, and `task` for obligations with due dates. The state note is a short account of current work and the decisions behind it, at most 1,500 bytes; the home session alone writes it. Threads and fresh runs keep facts, rulings and notes and send the home session what it should retain. A ruling quotes the person's own recorded decision; an agent's interpretation remains a note. Search before adding a memory and replace a fact that changed. Read `memory.md` in the installed docs for the exact interfaces and storage.
+Use Razor's `memory` tool for the state note, rulings, facts and notes, and `task` for obligations with due dates. The resident also keeps a layer of memory of its own beside its project's, read and written with `resident: true`; file there only what helps it do its own job, and what any agent in the project would use in the project's memory. The state note is a short account of current work and the decisions behind it, at most 1,500 bytes; the home session alone writes it, to its own layer. Threads and fresh runs keep facts, rulings and notes and send the home session what it should retain. A ruling is a short standing rule citing the person's message, which keeps their exact words; an agent's interpretation remains a note. Search before adding a memory and replace a fact that changed. Read `memory.md` in the installed docs for the exact interfaces and storage.
 
 Keep the full brief or feed in `output/`, not in the state note. Keep narrative in a journal only if the role uses one; avoid a second manually maintained copy of tasks or memory. At the resident's night, the home session closes finished tasks, makes promises tasks with due dates, writes its state note, then rebuilds its context. A separate dreaming session reads recent session digests, checks memory against sources, files wiki pages and merges state notes. It runs on `[memory] night`, independently of the resident's night.
 

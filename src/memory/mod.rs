@@ -5,17 +5,18 @@
 mod citations;
 mod claims;
 mod dream;
-pub(crate) use dream::Dream;
+pub(crate) use dream::{Dream, Night};
 mod files;
 mod share;
 mod shared;
 mod tasks;
 mod write;
+use shared::{offered, owned};
 
 use crate::controller::Controller;
 use crate::profiles::machine;
 use crate::protocol::{Body, EntryId, Input, Origin, SessionId};
-use crate::record::{Record, closing_text};
+use crate::record::{Record, Summary};
 use serde::Deserialize;
 use serde_json::Value;
 use std::fmt;
@@ -34,31 +35,35 @@ pub(crate) struct TaskQuery {
     pub(crate) mine: bool,
 }
 
-/// The most of the question a ruling answers that its page line shows, in bytes.
-const ASKED: usize = 300;
 /// The most bytes of a state note, written or shown.
 const STATE: usize = 1500;
 
 #[derive(Deserialize)]
 struct Text {
+    heads: [String; 3],
+    own: [String; 3],
     cites: String,
     page_only: String,
     page_name: String,
     dream_ruling: String,
+    ruling_line: String,
+    ruling_expires: String,
+    ruling_sources: String,
+    replacements: String,
+    project_all: String,
+    project_path: String,
     file_long: String,
     scope: String,
     pages_full: String,
     instructions: String,
     dream_input: String,
+    dream_scope: String,
+    dream_scope_all: String,
     dream_sessions: String,
     dream_omitted: String,
-    state: String,
-    rulings: String,
-    known: String,
     no_state: String,
     none: String,
     more: String,
-    until: String,
     input: String,
     child: String,
     thread: String,
@@ -81,7 +86,6 @@ struct Text {
     due_on: String,
     task_input: String,
     task_child: String,
-    task_remote: String,
     filter: String,
     no_task: String,
     closed: String,
@@ -95,6 +99,25 @@ struct Text {
     conflict: String,
     changed: String,
     settings: String,
+    identity: String,
+    owner: String,
+    owned: [String; 2],
+    differ: String,
+    settles: String,
+    set_aside: String,
+    restore: String,
+    join: String,
+    asks: String,
+    asks_more: String,
+    asked: String,
+    asks_whom: String,
+    glossary: [String; 2],
+    dream_asks: String,
+    own_scope: String,
+    dream_own: String,
+    secret: String,
+    secret_keys: Vec<String>,
+    secret_block: String,
 }
 
 static TEXT: LazyLock<Text> = LazyLock::new(|| {
@@ -126,54 +149,22 @@ pub(crate) struct Caller<'a> {
     /// The owned entry at `ref`, or at the latest person input when `ref` is absent.
     /// The controller fetches it with [`cited`] before queueing; memory validates its origin.
     pub(crate) cited: Option<Cited>,
-    /// This turn opened with the person's answer to a question in this session.
-    pub(crate) answer: bool,
 }
 
 /// An entry a ruling may cite and, when it is the person's input or answer, their words.
 pub(crate) struct Cited {
     id: EntryId,
-    said: Option<Said>,
-}
-
-/// The person's words in an entry, and the question they answer: an ask's, or the text that
-/// closed the turn before; "" when none.
-struct Said {
-    words: String,
-    asked: String,
+    said: Option<String>,
 }
 
 /// The entry `id` of `record` as a ruling may cite it.
 pub(crate) async fn cited(record: &Record, id: EntryId) -> Option<Cited> {
-    let none = Some(Cited { id, said: None });
-    let Body::Input(input) = record.entry(id).await.ok()?.body else {
-        return none;
-    };
-    let mut asked = Vec::new();
-    match input.from {
-        Origin::Answer { ask } => match record.entry(ask).await.map(|e| e.body) {
-            Ok(Body::Call { input: i, .. }) => asked.extend(i["text"].as_str().map(Into::into)),
-            Ok(Body::Question { text, .. }) => asked.push(text),
-            _ => {}
-        },
-        // Back past entries outside any turn to the last turn's end, then its closing text.
-        Origin::Person => {
-            let mut ended = false;
-            for at in (1..id.0).rev() {
-                match (record.entry(EntryId(at)).await.map(|e| e.body), ended) {
-                    (Ok(Body::TurnEnd { .. }), false) => ended = true,
-                    (Ok(Body::Text { text }), true) => {
-                        asked.insert(0, crate::record::reply(&text).text.to_owned())
-                    }
-                    (Ok(Body::Thinking { .. }), true) | (Ok(Body::Job(_)), false) => {}
-                    _ => break,
-                }
-            }
+    let said = match record.entry(id).await.ok()?.body {
+        Body::Input(input) if matches!(input.from, Origin::Person | Origin::Answer { .. }) => {
+            Some(input.text)
         }
-        _ => return none,
-    }
-    let (words, asked) = (input.text, closing_text(&asked));
-    let said = Some(Said { words, asked });
+        _ => None,
+    };
     Some(Cited { id, said })
 }
 
@@ -183,7 +174,7 @@ pub(crate) async fn cited(record: &Record, id: EntryId) -> Option<Cited> {
 enum Call {
     Search { query: String, limit: Option<usize> },
     Get { id: String },
-    Write(Write),
+    Write(Box<Write>),
 }
 
 /// One `task` call's input.
@@ -207,9 +198,12 @@ struct Write {
     all: bool,
     /// A date, `2026-12-31`, through which it applies.
     expires: Option<String>,
-    replaces: Option<String>,
+    replaces: Option<Replaces>,
     #[serde(default)]
     cites: Vec<String>,
+    /// Other people's rulings a new ruling of the person's agreement sets aside.
+    #[serde(default)]
+    settles: Vec<String>,
     name: Option<String>,
     checked: Option<String>,
     #[serde(rename = "ref")]
@@ -221,6 +215,24 @@ struct Write {
     session: String,
     #[serde(skip)]
     dreaming: bool,
+    #[serde(skip)]
+    quotes: Vec<(String, String)>,
+}
+
+#[derive(Clone, Deserialize, serde::Serialize)]
+#[serde(untagged)]
+enum Replaces {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Replaces {
+    fn ids(&self) -> &[String] {
+        match self {
+            Self::One(id) => std::slice::from_ref(id),
+            Self::Many(ids) => ids,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Deserialize)]
@@ -241,12 +253,14 @@ struct Project {
     root: PathBuf,
     memory: files::Folders,
     tasks: PathBuf,
-    /// The resident whose folder it is: only its home session writes the state note.
+    /// The resident whose folder it is, whose own sessions keep a layer of their own.
     resident: Option<SessionId>,
     /// The remote the project's private settings name, which its tasks are shared through, or
     /// why those settings do not read.
     remote: Result<Option<String>, String>,
     memory_remote: Result<Option<String>, String>,
+    /// Whether to offer joining what its origin shares: it names no remote and was not declined.
+    join: bool,
     /// This server's id: a claim names it, and only this server releases the claim.
     server: String,
 }
@@ -263,44 +277,60 @@ impl Memory {
         Memory { home, lock, owed }
     }
 
-    /// Whether the folder's state note belongs to a different resident session.
+    /// The home session a resident's thread `s` sends its closing state to; none for any other
+    /// session, which writes its own state note.
     pub(crate) async fn state_owner(
         &self,
         c: &Controller,
-        cwd: &Path,
-        session: &SessionId,
-    ) -> Result<Option<SessionId>, Error> {
-        let session = session.clone();
-        self.files(c, cwd, move |p| Ok(p.resident.filter(|r| r != &session)))
-            .await
+        s: &Summary,
+    ) -> Result<Option<String>, Error> {
+        let p = self.files(c, &s.cwd, Ok).await?;
+        Ok(own(&p, s).filter(|_| s.thread.is_some()))
     }
 
-    /// The startup page for `session` in `cwd`: the project's state note (at most 1,500 bytes);
-    /// the rulings, standing ones first, newest first, at most 20 lines in 4,000 bytes, each the
-    /// person's words (of one in Loom's form, those it quotes, after any question they answer)
-    /// and its id; a line for each fact and note, newest first, at most 24 in 2,400 bytes; then
-    /// the tasks it holds and those due within a week, and how many are ready, or, for a shared
-    /// project with no open task here, that `task list` reads them. A line that does
-    /// not fit is passed over, not cut. It never fails: a page that cannot be read is one
-    /// sentence saying why. It never fetches.
-    pub(crate) async fn page(&self, c: &Controller, cwd: &Path, session: &SessionId) -> String {
-        let session = session.to_string();
-        let read = self.files(c, cwd, move |p| {
-            let shared = matches!(p.remote, Ok(Some(_)));
-            let tasks = tasks::page(&p.tasks, &session, &p.server, shared)?;
-            Ok((files::page(&p.memory)?, tasks))
+    /// The startup page for session `s`: the project's state note (at most 1,500 bytes);
+    /// the standing rulings, newest first, at most 20 lines in 4,000 bytes, each a rule, its owner
+    /// on a shared project, and its id; a line for each fact and note, newest first, at most 24 in
+    /// 2,400 bytes, the project's glossary taking its lines from them; for a resident's own
+    /// session, the same of its own layer; then the tasks it holds and those due within a week,
+    /// and how many are ready, or, for a shared project with no open task here, that `task list`
+    /// reads them; and at most five questions for the person, other people's among them. A
+    /// line that does not fit is passed over, not cut. It never fails: a page that cannot be read
+    /// is one sentence saying why. It never fetches.
+    pub(crate) async fn page(&self, c: &Controller, s: &Summary) -> String {
+        let p = match self.files(c, &s.cwd, Ok).await {
+            Ok(p) => owned(p).await,
+            Err(e) => return e.to_string(),
+        };
+        let offered = offered(&p).await.then(|| TEXT.join.clone());
+        let (own, session) = (own(&p, s), s.session.to_string());
+        let me = me(&p).await;
+        let read = blocking(move || {
+            let (t, shared) = (&*TEXT, (matches!(p.remote, Ok(Some(_))), me.as_ref()));
+            let (tasks, questions) =
+                tasks::page(&p.tasks, &session, &p.server, shared, own.as_deref())?;
+            let (mut page, mut asks) = files::page(&p.memory, &t.heads)?;
+            asks.extend(questions);
+            // No one else's agreement can name a layer's ruling, so it asks nothing.
+            if let Some(name) = own {
+                let heads = t.own.each_ref().map(|head| head.replace("{name}", &name));
+                let layer = files::page(&p.memory.layer(Some(&name)), &heads)?.0;
+                page += &format!("\n\n{layer}");
+            }
+            Ok((page, asks, tasks))
         });
-        let ((state, rulings, known), tasks) = match read.await {
+        let (page, asks, tasks) = match read.await {
             Ok(read) => read,
             Err(e) => return e.to_string(),
         };
-        let t = &*TEXT;
-        let none = |s: String| if s.is_empty() { t.none.clone() } else { s };
-        let state = state.as_deref().map(|s| &s[..s.floor_char_boundary(STATE)]);
-        let state = state.unwrap_or(&t.no_state);
-        let (rulings, known) = (none(rulings), none(known));
-        let memory = format!("{}\n\n{state}\n\n{}\n\n{rulings}", t.state, t.rulings);
-        let page = format!("{memory}\n\n{}\n\n{known}\n\n{tasks}", t.known);
+        // A helper does not talk with the person, so it is asked nothing.
+        let asks = offered.into_iter().chain(asks);
+        let (mut asks, more) = files::fit(asks.filter(|_| s.child.is_none()), (5, 2400));
+        if more > 0 {
+            asks += &format!("\n{}", TEXT.asks_more.replace("{n}", &more.to_string()));
+        }
+        let asks = (!asks.is_empty()).then(|| format!("{}\n{asks}", TEXT.asks));
+        let page = format!("{page}\n\n{tasks}\n\n{}", asks.unwrap_or_default());
         page.trim_end().into()
     }
 
@@ -313,24 +343,53 @@ impl Memory {
         at: Caller<'_>,
         input: Value,
     ) -> Answer {
+        #[derive(Deserialize)]
+        struct Target {
+            project: Option<PathBuf>,
+            #[serde(default)]
+            all: bool,
+        }
+        let target: Target = Target::deserialize(&input)
+            .map_err(|e| refuse(&TEXT.input.replace("{why}", &e.to_string())))?;
+        if target.project.is_some() && target.all {
+            return Err(refuse(&TEXT.project_all));
+        }
+        let cwd = target.project.map(|path| at.cwd.join(path));
+        if let Some(path) = &cwd
+            && !tokio::fs::metadata(path).await.is_ok_and(|m| m.is_dir())
+        {
+            return Err(refuse(&TEXT.project_path));
+        }
+        let at = Caller {
+            cwd: cwd.as_deref().unwrap_or(at.cwd),
+            ..at
+        };
         if tool == "task" {
             return self.task(c, &at, input).await;
         }
+        let resident = input.get("resident").map_or(Ok(false), bool::deserialize);
+        let resident =
+            resident.map_err(|e| refuse(&TEXT.input.replace("{why}", &e.to_string())))?;
+        let s = c.summary(at.session).await;
+        let s = s.map_err(other("reading the memory caller"))?;
+        let p = self.files(c, at.cwd, Ok).await?;
+        let layer = own(&p, &s).filter(|_| resident);
+        if resident && (target.all || layer.is_none()) {
+            return Err(refuse(&TEXT.own_scope));
+        }
         let call = serde_json::from_value(input)
             .map_err(|e| refuse(&TEXT.input.replace("{why}", &e.to_string())))?;
+        let memory = p.memory.layer(layer.as_deref());
         match call {
-            Call::Write(write) => self.write(c, &at, write).await,
+            Call::Write(write) => self.write(&at, p, &s, resident, *write).await,
             Call::Search { query, limit } => {
-                self.memory_fresh(c, at.cwd).await;
-                self.files(c, at.cwd, move |p| {
-                    files::search(&p.memory, &query, limit.unwrap_or(8).clamp(1, 20))
-                })
-                .await
+                self.memory_fresh(&p).await;
+                let limit = limit.unwrap_or(8).clamp(1, 20);
+                blocking(move || files::search(&memory, &query, limit)).await
             }
             Call::Get { id } => {
-                self.memory_fresh(c, at.cwd).await;
-                self.files(c, at.cwd, move |p| files::get(&p.memory, &id))
-                    .await
+                self.memory_fresh(&p).await;
+                blocking(move || files::get(&memory, &id)).await
             }
         }
     }
@@ -345,13 +404,11 @@ impl Memory {
     /// At the person's word, deletes memory `id` of `cwd`'s project or of every project, words
     /// and all, so a deleted memory is gone, not only hidden.
     pub(crate) async fn forget(&self, c: &Controller, cwd: &Path, id: &str) -> Answer {
-        let id = id.to_owned();
-        let lookup = id.clone();
-        let all = self
-            .files(c, cwd, move |p| files::global(&p.memory, &lookup))
-            .await?;
-        let forget = move |p: &Project| files::retire(&p.memory, &id, true);
-        self.memory_change(c, cwd, all, forget).await
+        let (id, p) = (id.to_owned(), self.files(c, cwd, Ok).await?);
+        let (memory, lookup) = (p.memory.clone(), id.clone());
+        let all = blocking(move || files::global(&memory, &lookup)).await?;
+        let forget = move |m: &files::Folders| files::retire(m, std::slice::from_ref(&id), true);
+        self.memory_change(&p, all, None, forget).await
     }
 
     /// The project's tasks as seen by `session`, or one structured task when `id` is given.
@@ -387,7 +444,12 @@ impl Memory {
     /// reads the project's tasks.
     async fn task(&self, c: &Controller, at: &Caller<'_>, input: Value) -> Answer {
         if at.child && input["action"] == "write" {
-            let allowed = |k: &String| matches!(k.as_str(), "action" | "id" | "claim" | "comment");
+            let allowed = |k: &String| {
+                matches!(
+                    k.as_str(),
+                    "action" | "id" | "claim" | "comment" | "project"
+                )
+            };
             if input["id"].as_u64().is_none()
                 || input.as_object().is_some_and(|o| !o.keys().all(allowed))
             {
@@ -401,10 +463,6 @@ impl Memory {
                 edit.own = at.child;
                 let writer = c.summary(at.session).await;
                 let writer = writer.map_err(other("reading the task writer"))?;
-                let parent = writer.child.as_ref().map(|child| &child.parent);
-                if edit.claim.is_some() && parent.is_some_and(|p| p.address().is_some()) {
-                    return Err(refuse(&TEXT.task_remote));
-                }
                 self.edit(c, at.cwd, (at.session, &writer.name), edit).await
             }
             TaskCall::List(mut l) => {
@@ -444,11 +502,30 @@ impl Memory {
     async fn edit(&self, c: &Controller, cwd: &Path, by: By<'_>, edit: Edit) -> Answer {
         let held = self.lock.lock().await;
         let p = self.files(c, cwd, Ok).await?;
+        // A question is for someone who has written to the shared list, as the remote now has
+        // it, so none waits on a name no startup page matches.
+        let mut owed = Vec::new();
+        if let Some(name) = edit.asks.as_deref().filter(|name| !name.is_empty()) {
+            let mut people = Vec::new();
+            if matches!(p.remote, Ok(Some(_))) {
+                owed = self.locked(c, &p, None).await.1;
+                people = share::people(&p.tasks).await;
+            }
+            if !people.iter().any(|(n, email)| name == n || name == email) {
+                drop(held);
+                send(c, owed).await;
+                let names: Vec<_> = people.iter().map(|(name, _)| name.as_str()).collect();
+                return Err(refuse(
+                    &TEXT.asks_whom.replace("{names}", &names.join(", ")),
+                ));
+            }
+        }
         let (session, name) = by;
         let who = who(session, &p.server, name);
         let (answer, notes) = self.locked(c, &p, Some((who, edit))).await;
         drop(held);
-        send(c, notes).await;
+        owed.extend(notes);
+        send(c, owed).await;
         let claimed = answer.as_ref().ok().filter(|a| a["claimed"] == true);
         if let Some(title) = claimed.and_then(|a| a["title"].as_str()) {
             let headline = Body::Headline { text: title.into() };
@@ -475,7 +552,7 @@ impl Memory {
         let project = p.clone();
         let op = change
             .clone()
-            .map(|(who, edit)| move || tasks::apply(&project.tasks, &project.server, &who, &edit));
+            .map(|(who, edit)| move || tasks::apply(&project.tasks, &who, &edit));
         let (answer, synced) =
             share::change(&p.root, &dir, &p.remote, "refs/razor/tasks", op, |done| {
                 format!(
@@ -519,6 +596,8 @@ fn project(home: &Path, settings: &crate::config::Settings, cwd: &Path) -> Resul
         .as_ref()
         .map(|c| c.tasks.remote.clone())
         .map_err(Clone::clone);
+    let alone = |c: &crate::config::Config| c.memory.remote.is_none() && c.tasks.remote.is_none();
+    let join = config.as_ref().is_ok_and(|c| c.memory.join && alone(c));
     let memory_remote = config.map(|c| c.memory.remote);
     let server = std::fs::read_to_string(home.join("server.id")).unwrap_or_default();
     Ok(Project {
@@ -529,18 +608,38 @@ fn project(home: &Path, settings: &crate::config::Settings, cwd: &Path) -> Resul
         resident,
         remote,
         memory_remote,
+        join,
     })
 }
 
+/// The person whose home this is, by name and email, where `p`'s tasks are shared: the one a
+/// question in the shared list may be for.
+async fn me(p: &Project) -> Option<tasks::Person> {
+    match p.remote {
+        Ok(Some(_)) => share::person(&p.root).await,
+        _ => None,
+    }
+}
+
+/// The resident whose own layer session `s` may use in project `p`: by its record, `s` is that
+/// resident's home session or one of its threads, and `p` is the resident's project.
+fn own(p: &Project, s: &Summary) -> Option<String> {
+    let me = s.thread.as_ref().map_or(&s.session, |t| &t.resident);
+    let own = p.resident.as_ref().filter(|r| *r == me);
+    own.map(|r| r.as_str().into())
+}
+
 /// The memory owner, without loading any project's settings.
-fn root(
+pub(crate) fn root(
     settings: &crate::config::Settings,
     cwd: &Path,
 ) -> Result<(PathBuf, Option<SessionId>), Error> {
     let (_, main) = crate::config::roots(cwd).map_err(|e| refuse(&e.to_string()))?;
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_owned());
     let residents = settings.config.residents.iter();
     let holds = |(_, r): &(&SessionId, &crate::config::Resident)| {
-        cwd.starts_with(&r.cwd) || main.starts_with(&r.cwd)
+        let folder = r.cwd.canonicalize().unwrap_or_else(|_| r.cwd.clone());
+        cwd.starts_with(&folder) || main.starts_with(&folder)
     };
     let found = residents
         .filter(holds)
@@ -557,7 +656,7 @@ pub(crate) fn dream_sessions_heading() -> &'static str {
 
 /// The server-created dreaming run, from its schedule input or resident fresh-run job.
 pub(crate) fn dreaming(summary: &crate::record::Summary) -> bool {
-    summary.scheduled.contains_key("dream")
+    summary.dream
         || summary
             .thread
             .as_ref()
@@ -610,9 +709,8 @@ fn fill(text: &str, with: &[(&str, &dyn fmt::Display)]) -> String {
     text
 }
 
-/// The entry a ruling cites (`ref`, or the person's latest input), with their words and the
-/// question they answer. Refused unless it is an input from the person or an answer to an ask.
-fn cite<'a>(c: &'a Caller, r: Option<EntryId>) -> Result<(EntryId, &'a Said), Error> {
+/// The entry a ruling cites (`ref`, or the person's latest input), with their original words. Refused unless it is an input from the person or an answer to an ask.
+fn cite<'a>(c: &'a Caller, r: Option<EntryId>) -> Result<(EntryId, &'a str), Error> {
     match (c.cited.as_ref(), r) {
         (Some(Cited { id, said: Some(w) }), _) => Ok((*id, w)),
         (Some(&Cited { id, .. }), _) | (None, Some(id)) => Err(refuse(
@@ -620,37 +718,6 @@ fn cite<'a>(c: &'a Caller, r: Option<EntryId>) -> Result<(EntryId, &'a Said), Er
         )),
         (None, None) => Err(refuse(&TEXT.no_person)),
     }
-}
-
-/// A ruling's words on one line: in a body in Loom's form, `the human said (<where>):
-/// "<words>"` and then the agent's reading, the quoted words, after the question they answer
-/// when `the agent asked: "<question>"` comes first; any other body, as written.
-fn words(body: &str) -> String {
-    let line = |words: &str| words.split_whitespace().collect::<Vec<_>>().join(" ");
-    let asked = body
-        .strip_prefix("the agent asked: \"")
-        .and_then(|r| r.split_once("\"\n\nthe human said ("));
-    let rest = asked.map_or(body.strip_prefix("the human said ("), |(_, r)| Some(r));
-    let rest = rest.and_then(|r| r.split_once("): \""));
-    let quoted = rest.and_then(|(_, r)| r.split_once("\"\n\nagent's reading:"));
-    let said = line(quoted.map_or(body, |(words, _)| words));
-    match asked {
-        Some((asked, _)) => format!("Asked \"{}\", answered \"{said}\"", end(&line(asked))),
-        None => said,
-    }
-}
-
-/// The question `q`, or past `ASKED` bytes "…" and its words from the first that starts in its
-/// last `ASKED` bytes: the page passes over a line that does not fit, and a question sits last.
-fn end(q: &str) -> String {
-    let Some(cut) = q.len().checked_sub(ASKED).filter(|&cut| cut > 0) else {
-        return q.to_string();
-    };
-    let from = match q.as_bytes()[cut - 1..].iter().position(|&b| b == b' ') {
-        Some(space) => cut + space,
-        None => q.ceil_char_boundary(cut),
-    };
-    format!("…{}", &q[from..])
 }
 
 /// Why a memory or task call failed.

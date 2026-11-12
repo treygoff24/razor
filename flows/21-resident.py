@@ -21,7 +21,7 @@ def at(seconds):
 done = Reply((REPLIES / "done.sse").read_bytes())
 held = claude.reply((None, "Bash", {"command": "until [ -e release21 ]; do sleep .05; done"}), match="Heartbeat.")
 with tempfile.TemporaryDirectory() as fake, flow(
-        [done, held, done, done, done],
+        [done, held, done, done, done, claude.reply((None, "Bash", {"command": "printf daylight > daylight21"})), done],
         env={"PATH": f"{fake}:{os.environ['PATH']}"},
         config='[server]\nwrapper = ["/usr/bin/env", \'FLOW=<a&b"c%d$e\\f>\', "/x/.razor", '
                '"RAZOR_HOME=/x/.razor", "L=1\\n2"]') as f:
@@ -87,11 +87,14 @@ with tempfile.TemporaryDirectory() as fake, flow(
     assert "(From your heartbeat, not from the person.)\\nHeartbeat." in (f.requests / "002.body").read_text()
     assert "(From your schedule mid, not from the person.)\\nMid-turn schedule." in (f.requests / "004.body").read_text()
     assert [i["text"] for i in inputs] == ["Heartbeat.", "Mid-turn schedule."], inputs
+    # A dream is a fresh thread; its home keeps its shell and stays open after the next turn.
+    until(f, f.run("dream", str(f.cwd)).stdout.strip(), lambda es: any(e.get("closed") for e in es))
     wake = post(f, "/sessions/ember/input", {"text": "Daylight wake.", "from": "daylight"})["entry"]
     entries = until(f, "ember", lambda es: any(e["kind"] == "turn_end" and wake in e["inputs"] for e in es))
-    assert next(e for e in entries if e["id"] == wake)["text"] == "Daylight wake.", entries
+    assert (f.cwd / "daylight21").read_text() == "daylight", "the home lost its shell after its dream"
+    assert not next(e for e in entries if e.get("inputs") == [wake]).get("closed"), "the home closed after its dream"
     label = "(From the program daylight, not from the person.)\\nDaylight wake."
-    assert label in (f.requests / "005.body").read_text(), "the program's input has no label"
+    assert label in (f.requests / "006.body").read_text(), "the program's input has no label"
     assert (f.home / ".razor/sessions/ember/identity.toml").is_file()
 
 # A busy night's rebuild waits for the complete current batch, then precedes the next call.

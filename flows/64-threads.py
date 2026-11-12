@@ -19,8 +19,7 @@ replies += [agent("Fresh run.", "start", name="fresh-child", brief="Wait for rel
             reply("You are fresh-child,", "Bash", {"command": "until [ -e release ]; do sleep .05; done"}),
             agent("You are fresh-child,", "finish", status="finished", report="FRESH_DONE"),
             reply("FRESH_DONE")]
-with flow(replies,
-          config='[server]\naddress = "127.0.0.1:0"') as f:
+with flow(replies) as f:
     (f.cwd / "persona.md").write_text("You are Ember.")
     with (f.home / ".razor/config.toml").open("a") as config:
         config.write(f"\n[residents.ember]\ncwd = {json.dumps(str(f.cwd))}\n"
@@ -137,7 +136,7 @@ closing = "The person asked for `/done`"
 rs = [f"r{n}" for n in range(1, 8)]
 replies = [reply("CLOSE_64_A"), reply("CLOSE_64_B"),
            reply(closing, "Bash", {"command": "until [ -e closed ]; do sleep .05; done"}), reply(closing)]
-with flow(replies, config='[server]\naddress = "127.0.0.1:0"') as f:
+with flow(replies) as f:
     with (f.home / ".razor/config.toml").open("a") as config:
         config.write("".join(f"\n[residents.{r}]\ncwd = {json.dumps(str(f.cwd))}\n" for r in ("ember", "fir", *rs)))
     server.start(f)

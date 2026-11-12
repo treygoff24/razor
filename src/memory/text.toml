@@ -1,15 +1,15 @@
 # The text of memory and tasks that the model reads (RULES.md 16). `{name}` is filled in.
 
-state = "## Memory: this project's state"
-rulings = "## Memory: the person's rulings; `memory get` with a line's id gives its context"
-known = "## Memory: what is known here; `memory get` reads one whole"
-no_state = "No state note has been written for this project yet."
+# The startup page's headings: the project's state, rulings and what is known, then a resident's
+# own layer's, for its own sessions.
+heads = ["## Memory: this project's state", "## Memory: standing rulings; `memory get` reads the person's original words", "## Memory: what is known here; `memory get` reads one whole"]
+own = ["## Memory: {name}'s own state; `memory` with resident: true reads and writes this layer", "## Memory: {name}'s own rulings", "## Memory: what {name} keeps for its own work"]
+no_state = "No state note has been written yet."
 none = "None yet."
 more = "- and {n} more; `memory search` finds them"
-until = "(until {date}) "
 input = "The `memory` call does not fit its input: {why}."
 child = "A child does not write memory; tell your parent what is worth keeping."
-thread = "Only a resident's home session writes the state note of its folder. Send a `message` note of what it should keep instead; rulings, facts and notes are yours to write. The home session is"
+thread = "Only a resident's home session writes its state note. Send a `message` note of what it should keep instead; rulings, facts and notes are yours to write. The home session is"
 too_long = "A memory's text is at most 16 KiB, with the person's words in a ruling; write the gist, and keep the rest in a file."
 state_long = "A state note is at most 1,500 bytes, so that it fits the startup page; write the current work and the decisions behind it, not their history."
 state_all = "A state note belongs to its project, so `all` cannot go with it."
@@ -29,7 +29,6 @@ owed = "- Task {id}{due}: {title}"
 due_on = ", due {date}"
 task_input = "The `task` call does not fit its input: {why}."
 task_child = "A child may write only claim and comment on an existing task, with its id."
-task_remote = "A child on another server may comment on tasks but cannot write a claim."
 filter = "A task list's `filter` is ready, open or closed."
 no_task = "There is no task {id} in this project; `task list` shows its tasks."
 closed = "Task {id} is closed; add a task for new work."
@@ -48,14 +47,47 @@ cites = "`cites` holds at most 32 citations: razor:<session>:l-<entry>, file:<pa
 
 page_only = "Only a dreaming session writes wiki pages."
 page_name = "A page needs name: a file stem of at most 100 letters, digits, underscores or hyphens, except _instructions."
-dream_ruling = "Dreaming may only retire a ruling, in a turn opened by the person's answer to its question; it never writes or replaces a ruling."
+dream_ruling = "Dreaming writes a ruling only by replacing existing rulings, using their original words; give replaces and omit ref."
+ruling_line = "A ruling is one short plain rule on one line, citing the person's message."
+ruling_expires = "A ruling is a standing decision; put a one-time approval in a task comment instead of giving it expires."
+ruling_sources = "A ruling needs its verified original words and citations; replace rulings that hold them or cite the person with ref."
+replacements = "Give one memory id or at most 32 distinct ruling ids; replace rulings only with a ruling in the same scope."
+project_all = "Use project for one project or all for every project, rather than both."
+project_path = "The project path must name an existing folder; choose its folder and try again."
 
 file_long = "A memory with its citations and header is at most 17 KiB; shorten it before replacing the old memory."
 scope = "A replacement stays in the original memory's scope; set all to match it."
 pages_full = "A wiki holds at most 200 pages; merge or retire a page first."
 instructions = "The person's wiki instructions cannot be changed through memory."
-dream_input = "{prompt}\n\nOptional wiki instructions:\n{instructions}\n\nChanged sources:\n{cites}\n\nMemory contents:\n{index}"
-dream_sessions = "Sessions since the last dream, newest first. Every id is listed first, then digest slices share the remaining input. Any session without a digest requires recall {session}:"
+dream_input = "{prompt}\n\n{scope}\n\nOptional wiki instructions:\n{instructions}\n\nChanged sources:\n{cites}\n\nMemory contents:\n{index}\n\nRulings, including expiring ones; memory get reads each original source:\n{rulings}{own}"
+dream_sessions = "Sessions since the last dream, newest first, your person's other servers' as <id>@<server>. Every id is listed first, then digest slices share the remaining input. Any session without a digest requires recall {session}:"
 dream_omitted = "({n} lines omitted; use memory search and recall for more.)"
 
 kind = "Writing memory needs kind; retiring with replaces and no text does not."
+
+dream_scope = "Tidy only this project's memory; leave every-project memory for its nightly pass."
+dream_scope_all = "Tidy this project's memory and every-project memory, which is assigned to this pass tonight."
+
+own_scope = "Only a resident's home session and threads, in its project, use its own layer: resident: true, without all."
+dream_own = "{name}'s own layer, which only its sessions see; tidy it in this pass with resident: true:"
+
+set_aside = "; set aside by the agreement {by}, so follow that"
+asks = "## Memory: ask the person in conversation, then act on the answer"
+asks_more = "- and {n} more, shown once these are answered"
+restore = "- The person's ruling {id} was set aside by another person's agreement {by}. If they agree, retire {id}; if not, replace it with a fresh copy of itself, which stands again."
+asked = "- {by} asks the person in task {id}: {title}. `task get` reads it and how they read the person's words; answer in a comment, then close it."
+asks_whom = "`for` names a person who shares this project's tasks, by the name or email of their commits to the list, so that their startup page asks them; here that is one of: {names}."
+glossary = ["Terms used here; coining one, use plain words or write a note `term: meaning`:", "Terms used here, {n} more in wiki/glossary; coining one, use plain words or write a note `term: meaning`:"]
+dream_asks = "Questions other people sharing this project have for your person, each with how they read your person's words:"
+join = "- This repository's origin offers shared memory and tasks. If the person joins, set `[memory] remote = \"origin\"` and `[tasks] remote = \"origin\"` in .razor/config.local.toml; if not, set `[memory] join = false` there."
+owned = [" [{name}]", " [{name}, your person]"]
+differ = "\n- Where two people's rulings differ, follow your person's.\n- What only another person here can answer is a task with `for` their name. Unsure what a term of theirs means, take the likeliest reading, write it as a comment on that task, and carry on."
+owner = "That ruling is {name}'s, and only they retire or replace it; record the person's own ruling instead, or an agreement that settles it."
+settles = "Only a new ruling citing the person settles other rulings: give kind ruling, its text and settles."
+identity = "This project shares its memory and tasks, and each change is committed as you, so nothing was written; set git's user.name and user.email in its checkout and try again."
+secret = "This memory looks like it holds a secret key, so nothing was written; keep only where the secret is stored."
+
+# Not text the model reads: a memory holding a word that starts with one of these key prefixes and
+# 16 more key characters, or this PEM private-key marker, is refused (the `secret` sentence).
+secret_keys = ["sk-", "sk_live_", "rk_live_", "ghp_", "gho_", "ghs_", "ghu_", "github_pat_", "glpat-", "xoxb-", "xoxp-", "AKIA", "AIza"]
+secret_block = "PRIVATE KEY-----"

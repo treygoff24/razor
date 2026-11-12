@@ -128,6 +128,18 @@ fn rest(scene: &mut Scene, app: &App, crew: &[SessionId], w: &mut Wake) {
 fn cast(app: &App, crew: &[SessionId], scene: &mut Scene) {
     let width = scene.w;
     let root = app.root.as_ref().or(app.focus.as_ref());
+    let avatar = root
+        .and_then(|id| app.agent_row(id))
+        .filter(|r| r.session.address().is_none())
+        .and_then(|r| {
+            r.avatar.as_ref().or_else(|| {
+                app.brand
+                    .resident_avatars
+                    .get(r.resident.as_ref().unwrap_or(&r.session))
+            })
+        })
+        .and_then(|name| app.stage.avatars.get(name))
+        .cloned();
     let root = root.map_or("self", |id| {
         app.agents
             .get(id)
@@ -156,6 +168,7 @@ fn cast(app: &App, crew: &[SessionId], scene: &mut Scene) {
         let accent = usize::from(i > 0) * (art::hash(id.as_str()) as usize % 11 + 1);
         scene.actors.push(Actor {
             who: art::member(root),
+            avatar: avatar.clone(),
             name: name(row, i == 0),
             state,
             x,

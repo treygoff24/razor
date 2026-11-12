@@ -270,7 +270,7 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
         t.send("\x1b[A\r")
         t.shown("1  keep the conversation", "2  start from a handover note")
         t.send("2")
-        t.shown("GPT-6-LUNA · HIGH · START FROM A HANDOVER NOTE, ABOUT")
+        t.shown("ASTRA · HIGH · START FROM A HANDOVER NOTE, ABOUT")
         t.send("AFTER_47\r")
         entries = server.until(f, session, lambda es: sum(e["kind"] == "turn_end" for e in es) == 4)
     # No Esc stopped a turn; the staged words joined the second and the handover rebuilt.

@@ -48,9 +48,11 @@ A helper working in its own worktree reads the project files of the main checkou
 3. An entry with a name of its own, such as `[mcp.files]` or `[residents.scout]`, comes whole from the last file that has it. So does any table two levels down, such as `[profiles.codex]`: yours replaces the pack's whole.
 4. A list replaces the list beneath it and is never joined to it.
 
+A person's `[brand.avatars]` replaces the pack's whole avatars map.
+
 ## Paths in settings
 
-A setting that names a file or folder (`pack`, `skills`, `startup` entries, a variant, key or secret file, a resident's `cwd`) counts a relative path from the folder of the file that names it, and `~/` from your home folder. So to change the starter pack's `startup` list, copy the whole list into your file and copy the files it names (`persona.md`, `rules.md`) beside your file. Two exceptions: a program in `ask`, `notify`, `speech`, `transcribe`, `capture` or `play` named without a `/` is looked up on `PATH`, and a plugin's relative `file` counts from Razor's home.
+A setting that names a file or folder (`pack`, `skills`, `startup` entries, a variant, key or secret file, a resident's `cwd`) counts a relative path from the folder of the file that names it, and `~/` from your home folder. So to change the starter pack's `startup` list, copy the whole list into your file and copy the files it names (`persona.md`, `rules.md`, `code-quality.md`) beside your file. Two exceptions: a program in `ask`, `notify`, `speech`, `transcribe`, `capture` or `play` named without a `/` is looked up on `PATH`, and a plugin's relative `file` counts from Razor's home.
 
 Commands are not rebased. An MCP server's `command` starts in the project's folder, so give it an absolute path or a program on `PATH`; a scripted tool's `command` is run by bash in the session's folder.
 
@@ -71,7 +73,6 @@ Settings about you or the machine may be set only in your own file, `~/.razor/co
 ## When a change applies
 
 - Most changes apply at the next turn.
-- `server.address` applies when the server restarts, and Razor says so when you change it ([Troubleshooting](troubleshooting.md#restarting-the-server) says how to restart).
 - `keys.toml` is read when the server starts, so run `razor restart` after `razor keys`.
 - A file that does not parse, names an unknown key, or holds a wrong value, is ignored, and Razor keeps that file's last good settings. For your file and the pack's, the terminal app's status pane and `server.log` name the file and the problem.
 - A server whose own file or pack is broken does not start, and `server.log` says why.
@@ -225,7 +226,7 @@ Durations are a number and a unit: `90s`, `3m`, `2h`, `1d`. Times of day are `HH
 | `call_model` | `"terra"` | The model a session started for a voice call runs on, such as the phone app's Talk; any model Razor can run. A call to a conversation already under way keeps that conversation's model. |
 | `call_effort` | `"low"` | The effort of a session started for a voice call. The phone app can choose its own model and effort for calls, which win over these two. |
 | `[rebuild] threshold` | `0.9` on a window of 500,000 tokens or more, else `0.8` | How full a context may get, as a fraction of its size, before Razor asks for a continuation note and starts a fresh one ([Concepts](concepts.md#when-the-context-fills)). Set, it applies to every model without its own threshold; `razor config get rebuild.threshold` reads `null` while it is unset. |
-| `[sessions] handover_minutes` | `50` | Idle minutes before requesting a continuation note on every model route, residents included. Running turns and jobs hold it off; working children do not. `0` disables it. |
+| `[sessions] handover_minutes` | `50` | Idle minutes before requesting a continuation note on every model route, residents included. Running turns and jobs hold it off; working children do not. `0` disables it. Minutes here and in `close_minutes` may be fractional: `0.1` is six seconds. |
 | `[sessions] handover_tokens` | `50000` | Minimum context size for an idle handover, for asking whether a model switch keeps the conversation, and for a switch's fresh note; `0` removes the floor. |
 | `[sessions] close_minutes` | `0` | Idle minutes before a top-level conversation closes without a model turn. Residents' home sessions, children and sessions with pending work stay open. The next person input resumes the same conversation. |
 | `[sessions] idle` | `4` | How many idle sessions keep their model conversation open. On Claude each one holds a Claude Code process; the longest idle closes first and reopens at its next input. |
@@ -259,7 +260,7 @@ These change how Razor reaches Claude and GPT; most people never set them. `[pro
 
 ### Models
 
-`[models."<name>"]` changes how Razor treats one model, a shipped one or a provider's. For Claude and GPT only `window` and `threshold` may be set; the rest are for chat models.
+`[models."<name>"]` changes how Razor treats one model, a shipped one or a provider's. For Claude and GPT only `window` and `threshold` may be set; the rest are for chat models. A family row such as `[models.fable]` applies to every natural spelling of that family and takes precedence over its current exact-ID row as a whole; without a family row, the exact-ID row applies. Two spellings of the same family row are refused.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -276,7 +277,7 @@ These decide what every conversation is told before your first message, and whic
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `startup` | `["razor", "project"]`; the starter pack's is `["persona.md", "razor", "about", "project", "rules.md"]` | The parts of a top-level conversation's system prompt, in order. Three words are not files: `razor` is Razor's own text about its tools, `project` is the `AGENTS.md` and `CLAUDE.md` files from the repository root down to the session's folder, and `about` is `~/.razor/about.md`. Anything else is a file, or a folder whose first 64 `.md` files are read. |
+| `startup` | `["razor", "project"]`; the starter pack's is `["persona.md", "razor", "about", "project", "rules.md", "code-quality.md"]` | The parts of a top-level conversation's system prompt, in order. Three words are not files: `razor` is Razor's own text about its tools, `project` is the `AGENTS.md` and `CLAUDE.md` files from the repository root down to the session's folder, and `about` is `~/.razor/about.md`. Anything else is a file, or a folder whose first 64 `.md` files are read. |
 | `skills` | `[]` | More folders of skills: written instructions an agent loads by name, one folder per skill with a `SKILL.md`. These are searched last, after the folders below. |
 | `skill_updates` | `true` | Update eligible machine skills on the first server wake and then daily. Set `false` to stop future runs and restore shipped pack skills in lookup; an update already running finishes. With `provider_only` on, none runs. |
 | `pack` | the starter pack | The pack folder. Naming one replaces the starter pack; removing the name brings it back. |
@@ -308,7 +309,7 @@ An agent can start a helper as a reviewer or a researcher, which gives it Razor'
 | `[children] grace` | `"3m"` | How long a helper that stopped without reporting is given before Razor asks it once to finish. |
 | `[children] reviewer` | none | A file whose text replaces Razor's instructions for a helper started as a reviewer. |
 | `[children] researcher` | none | The same for a helper started as a researcher. |
-| `[children] watcher` | `"gemini-3.8-flash"` | The model of the watcher: a helper Razor starts by itself when a client sends a video (the terminal app does not) to a session whose model cannot watch video, and which reports a description and a timeline of key moments. Its key goes in `keys.toml` or the server's environment like any other model's ([Keys](#keys)); for the default that is `GEMINI_API_KEY`. With `provider_only` on, no watcher starts. Without the key no watcher starts, and the session gets only the video's file path. |
+| `[children] watcher` | `"gemini"` | The model of the watcher: a helper Razor starts by itself when a client sends a video (the terminal app does not) to a session whose model cannot watch video, and which reports a description and a timeline of key moments. Its key goes in `keys.toml` or the server's environment like any other model's ([Keys](#keys)); for the default that is `GEMINI_API_KEY`. With `provider_only` on, no watcher starts. Without the key no watcher starts, and the session gets only the video's file path. |
 
 ### Guards
 
@@ -429,7 +430,9 @@ before = ["call"]
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `release_updates` | `true` | Download newer stable Razor releases at server startup and daily, ready for `razor restart`. Set `false` to stop future background checks; `razor update` still works. Source builds never update automatically, and with `provider_only` on none runs; `razor update`, typed by you, still does. |
-| `[server] address` | none: the local socket only | A `host:port` the server also listens on, for other devices and for paired servers, the Razor servers on your other machines that you connect to this one; plain HTTP, so use a private network ([More machines](machines.md)). Needs a restart. |
+| `[server] address` | none | No longer used: paired servers and the apps reach this one by key ([More machines](machines.md)). A config that still sets it loads, and `razor doctor` asks you to remove it. |
+| `[network] relays` | none: iroh's public relays | The only relays this server uses and accepts from a server it pairs with, as a list of addresses ([Running your own relay](relay.md)). |
+| `[remote] server` | none: this server | The enrollment name of the paired server for new sessions, `--continue`, unqualified `--resume` and `--print`; connections go through this machine's local server. |
 | `[server] https_url` | none | An HTTPS address that reaches this server, used to finish MCP sign-ins. Without it, you paste the address the browser landed on. |
 | `[server] name` | empty | This machine's short name: the first word of the name of each new session you start, and the machine name other servers show. Empty: sessions are named after their project. |
 | `[server] label` | `name`, else the machine's name | How clients label this home. |
@@ -448,6 +451,33 @@ before = ["call"]
 | `[ui] quit` | `"detach"` | What pressing Ctrl-C twice with an empty draft does: `"detach"` leaves the terminal and the session keeps running, as `/detach` does; `"end"` ends the session you are talking to at once, as `/end` does, then leaves. |
 | `[brand] name` | `"Razor"` | The product name clients show. |
 | `[brand] colours` | none | Replacements for the theme's colours, each name mapped to `"#rrggbb"`; the names are below. |
+| `[brand.avatars] <name>` | none | `{file = "avatars/owl.png", pool = false}`: a named PNG sheet, optionally included in new sessions' random selection. At most 16 sheets, each at most 2 KiB. |
+
+An avatar sheet is an 8-bit RGBA PNG, exactly 132 × 33 pixels: four
+33 pixel cells in order, idle, blink, talk, sleep. Paths count from the config
+file that names them, including a pack's file. Razor reads pictures when settings
+change; for a re-roll, use a new file name and set `file` to it, never overwrite
+the old file. A missing, invalid or oversized picture is omitted with a config
+notice, including at startup. Entries beyond sixteen valid sheets in name order
+are omitted with a notice too; the server keeps running.
+
+Set a resident's `avatar = "owl"` in its `[residents.<name>]` table. Its home and
+threads inherit that name immediately. `/avatar owl` selects it for the addressed
+session; `/avatar` clears the session's choice and restores its resident's, if any.
+The session's recorded choice survives rebuilds and restarts. Helpers wear their
+root's avatar. If the picture is unavailable, clients draw the usual creature;
+older clients always draw that creature. The terminal draws custom art on its
+stage; the short-pane strip keeps its usual art.
+
+With `pool = true`, the sheet joins the crew families in new top-level sessions'
+random selection. Each such session draws once and records a custom choice if it
+wins; changing the pool leaves existing faces alone. Residents, threads and
+helpers never draw from it. For example:
+
+```sh
+razor config set brand.avatars.owl '{file="avatars/owl.png", pool=false}'
+razor config set brand.avatars.owl.pool true
+```
 
 The theme's colour names:
 
@@ -465,3 +495,26 @@ violet = "#b48cff"
 ```
 
 Saved arrangements of the agents list are not settings: `/views` edits them.
+
+## Android push notifications
+
+In your own `~/.razor/config.toml`, point Razor to a Firebase service-account JSON:
+
+```toml
+[push]
+fcm_credentials = "~/.config/razor-android/keys/fcm-service-account.json"
+```
+
+Keep that JSON outside your project and readable only by you. Enable Firebase Cloud
+Messaging for its project and give the service account permission to send messages.
+Razor reads the Firebase project id from that JSON. The Android app registers its FCM device token with `service = "fcm"`; the same token
+can follow several sessions. Apple registrations continue to use their development
+or production environment and the existing `[push.development]` or
+`[push.production]` signing key. Both services may be configured together.
+
+Razor exchanges a signed service-account assertion for an access token and reuses
+it until shortly before expiration. Saving a different credential path applies on
+the next send; replacing the credential JSON takes effect at the next token mint. The
+whole `[push]` table is refused in project settings, including private project
+settings. `[push] endpoint` replaces both services' send hosts for a stand-in;
+leave it unset for delivery to Apple and Firebase.

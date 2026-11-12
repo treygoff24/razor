@@ -26,8 +26,8 @@ def texts(body):
     return [p["text"] for p in parts if "text" in p]
 
 
-for route, other, start, near, far in (("claude", "gpt", "sonnet", "opus", "gpt-6.1-sol"),
-                                       ("gpt", "claude", "gpt-6.1-terra", "gpt-6.1-sol", "opus")):
+for route, other, start, near, far in (("claude", "gpt", "sonnet", "opus", "sol"),
+                                       ("gpt", "claude", "terra", "sol", "opus")):
     replies = [said(route, "FIRST_DONE"), big(said(route, "GROWN")), big(said(route, "KEPT")), note(route, "NOTE_ONE"),
                big(said(route, "FRESH")), note(route, "NOTE_TWO"), said(other, "ACROSS")]
     with flow(replies, model=start, config=PLAIN) as f:
@@ -44,7 +44,7 @@ for route, other, start, near, far in (("claude", "gpt", "sonnet", "opus", "gpt-
         seen = switches()
         assert not (f.home / "status").exists(), "pricing a switch read the working tree"
         assert seen[near] == {"keep": 1 if route == "claude" else 100, "handover": None, "reason": None}, seen
-        assert seen[far]["keep"] is None and seen[far]["handover"] > 0 and far in seen[far]["reason"], seen
+        assert seen[far]["keep"] is None and seen[far]["handover"] > 0 and far.capitalize() in seen[far]["reason"], seen
         server.post(f, f"/sessions/{session}/input", {"text": "Grow."})
         server.until(f, session, ended(2))
         assert (seen := switches()[near])["keep"] == 60000 and seen["handover"] > 0 and not seen["reason"], seen
@@ -134,15 +134,14 @@ with flow([claude(text="FIRST"), claude((None, "Bash", {"command": "IFS= read -r
     assert len({e["native"]["claude"]["conversation"] for e in entries if "claude" in (e.get("native") or {})}) == 1, entries
 
 # A model choice joins the current turn, but its chosen handover waits for that model's
-# next turn, even across a restart and a heartbeat on the old model in between.
-import time
-for restart, heartbeat in ((False, True), (True, False), (True, True)):
-    at = time.strftime("%H:%M:%S", time.localtime(time.time() + 5))
+# next turn, even across a restart and a scheduled run on the old model in between (run now
+# through the API; flow 21 fires schedules by the clock).
+for restart, scheduled in ((False, True), (True, False), (True, True)):
     with flow([gpt(None, "agent", action="wait", timeout_ms=30000), said("gpt", "JOINED"),
-               *([said("gpt", "HEARTBEAT_DONE")] if heartbeat else []), said("gpt", "SWITCHED")], model="sol", config=PLAIN) as f:
+               *([said("gpt", "SCHEDULED_DONE")] if scheduled else []), said("gpt", "SWITCHED")], model="sol", config=PLAIN) as f:
         with (f.home / ".razor/config.toml").open("a") as config:
             config.write(f'\n[residents.ember]\ncwd={json.dumps(str(f.cwd))}\nnight="23:59:59"\n'
-                         f'[residents.ember.heartbeat]\nat={json.dumps([at] if heartbeat else [])}\ntext="HEARTBEAT_68"\nmodel="sol"\n')
+                         '[residents.ember.schedules.beat]\nat=[]\ntext="SCHEDULED_68"\nmodel="sol"\n')
         server.start(f)
         path = "/sessions/ember/input"
         first = server.post(f, path, {"text": "Wait."})["entry"]
@@ -154,12 +153,13 @@ for restart, heartbeat in ((False, True), (True, False), (True, True)):
         if restart:
             server.stop(f, signal.SIGKILL)
             server.start(f)
-        if heartbeat:
-            server.until(f, "ember", lambda es: any(e.get("text") == "HEARTBEAT_DONE" for e in es))
+        if scheduled:
+            server.post(f, "/residents/ember/run/beat", {})
+            server.until(f, "ember", lambda es: any(e.get("text") == "SCHEDULED_DONE" for e in es))
         later = server.post(f, path, {"text": "NEXT_68"})["entry"]
         entries = server.until(f, "ember", lambda es: any(e["kind"] == "turn_end" and later in e["inputs"] for e in es))
         rebuilds = [e for e in entries if e["kind"] == "rebuild"]
         assert [e["trigger"] for e in rebuilds] == ["change"] and rebuilds[0]["id"] > later, entries
         bodies = [json.loads(body) for body in f.sent()]
-        assert [b["model"] for b in bodies] == ["gpt-6.1-sol"] * (3 if heartbeat else 2) + ["gpt-6-sol"], bodies
+        assert [b["model"] for b in bodies] == ["gpt-6.1-sol"] * (3 if scheduled else 2) + ["gpt-6-sol"], bodies
         assert all(sum(e.get("inputs", []).count(i) for e in entries if e["kind"] == "turn_end") == 1 for i in (first, choice, later)), entries

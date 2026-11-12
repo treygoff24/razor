@@ -11,9 +11,19 @@ import sys
 import tempfile
 import uuid
 
+from claude import reply as claude_reply
 from driver import flow
-from responses import PLAIN, call, reply, response as model_response
+from responses import PLAIN, reply
 import server
+
+
+# Sends `method` `path` to `where` as server.send does; the answer's body, as JSON when it is.
+def request(where, method, path, body=None, status=200, headers=None):
+    response = server.send(where, method, path, body, headers)
+    data = response.read()
+    assert response.status == status, (method, path, response.status, data)
+    return json.loads(data) if data and response.getheader("Content-Type", "").startswith("application/json") else data
+
 
 standin = Path(__file__).with_name("meetrec.py").resolve()
 with tempfile.TemporaryDirectory(prefix="meetrec-bin-") as bin_dir:
@@ -89,20 +99,12 @@ with tempfile.TemporaryDirectory(prefix="meetrec-bin-") as bin_dir:
               env={"PATH": bin_dir + ":" + os.environ["PATH"], **({"LD_PRELOAD": str(shim),
                    "MEETING_SYNC_FAILURE": bin_dir} if linux else {})}) as f:
         server.start(f)
-        added = f.run("devices", "add", "phone")
-        assert added.returncode == 0, added.stderr
-        phone = added.stdout.splitlines()[1]
+        phone = server.phone(f, "phone")
         session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
         other = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
         meeting = str(uuid.uuid4())
         route = f"/sessions/{session}/meetings/{meeting}"
         start = {"started_at": "2026-11-04T20:00:00Z", "rate": 48000, "attendees": ["Alice"]}
-
-        def request(method, path, body=None, status=200, headers=None):
-            response = server.send(f, method, path, body, headers, key=phone)
-            data = response.read()
-            assert response.status == status, (method, path, response.status, data)
-            return json.loads(data) if data and response.getheader("Content-Type", "").startswith("application/json") else data
 
         def commands():
             path = f.home / "Recordings/meetings/commands.jsonl"
@@ -110,29 +112,29 @@ with tempfile.TemporaryDirectory(prefix="meetrec-bin-") as bin_dir:
 
         root = f.home / "Recordings/meetings"
         (root / "lose-start-reply").touch()
-        request("PUT", route, start, status=500)
-        request("PUT", route, start)
-        request("PUT", route, start)
+        request(phone, "PUT", route, start, status=500)
+        request(phone, "PUT", route, start)
+        request(phone, "PUT", route, start)
         assert sum(p.is_dir() for p in f.cwd.iterdir()) == 1, "start retry lost or duplicated its meeting folder"
         assert sum(c["args"][0] == "start" for c in commands()) == 2
-        request("PUT", f"/sessions/{session}/meetings/{uuid.uuid4()}", start, status=409)
-        request("GET", f"/sessions/{other}/meetings/{meeting}", status=404)
+        request(phone, "PUT", f"/sessions/{session}/meetings/{uuid.uuid4()}", start, status=409)
+        request(phone, "GET", f"/sessions/{other}/meetings/{meeting}", status=404)
         facts = server.until(f, session, lambda es: any(e.get("event") == "started" and e.get("source") == "meeting" for e in es))
         folder = Path(next(e["folder"] for e in facts if e.get("source") == "meeting"))
         assert folder.parent == f.cwd, "meeting was saved outside its session's folder"
         wav = folder / "room.live.wav"
 
         def live(offset, data, status=200):
-            return request("PUT", route + f"/live?offset={offset}", data, status)
+            return request(phone, "PUT", route + f"/live?offset={offset}", data, status)
 
         assert live(4, b"abcd")["live"] == 0 and wav.stat().st_size == 44
         if linux:
             fault = Path(bin_dir) / "room.live.wav"
             fault.touch()
             live(0, b"abcd", status=500)
-            request("GET", route, status=500)
+            request(phone, "GET", route, status=500)
             fault.unlink()
-            assert request("GET", route)["live"] == 4
+            assert request(phone, "GET", route)["live"] == 4
         assert live(0, b"abcd")["live"] == 4 and wav.read_bytes()[44:] == b"abcd"
         if linux:
             (Path(bin_dir) / "order").touch()
@@ -144,9 +146,9 @@ with tempfile.TemporaryDirectory(prefix="meetrec-bin-") as bin_dir:
             assert "fsync completed size=50" in events, events
         live(6, b"x", status=400)
         assert wav.read_bytes()[44:] == b"abcdef"
-        assert request("PUT", route + "/speakers/2", {"name": "Alice"})["speakers"]["names"]["2"] == "Alice"
-        assert request("PUT", route + "/pauses/0", {"at_s": 2.0, "missing_s": 5.0})["pauses"][0]["k"] == 0
-        request("PUT", route + "/pauses/0", {"at_s": 2.0, "missing_s": 5.0})
+        assert request(phone, "PUT", route + "/speakers/2", {"name": "Alice"})["speakers"]["names"]["2"] == "Alice"
+        assert request(phone, "PUT", route + "/pauses/0", {"at_s": 2.0, "missing_s": 5.0})["pauses"][0]["k"] == 0
+        request(phone, "PUT", route + "/pauses/0", {"at_s": 2.0, "missing_s": 5.0})
         assert len(json.loads((folder / "pauses.json").read_text())) == 1
 
         def add_lines(first, last, size=0):
@@ -182,8 +184,7 @@ with tempfile.TemporaryDirectory(prefix="meetrec-bin-") as bin_dir:
         assert not any(e["kind"] == "turn_end" for e in entries)
         server.post(f, f"/sessions/{session}/input", {"text": "What happened?"})
         server.until(f, session, lambda es: any(e["kind"] == "turn_end" for e in es))
-        body = f.request(1)
-        view = json.dumps(body)
+        view = json.dumps(f.request(1))
         assert re.findall(r"line(\d{3})\.", view) == [f"{n:03d}" for n in range(44, 300)]
         assert "44 earlier" in view and "(+0:44), Alice said: line044." in view
         add_lines(300, 302, size=40000)
@@ -197,21 +198,21 @@ with tempfile.TemporaryDirectory(prefix="meetrec-bin-") as bin_dir:
         digest = hashlib.sha256(piece).digest()
         headers = {"Content-Digest": "sha-256=:" + base64.b64encode(digest).decode() + ":"}
         manifest = {"live_bytes": 8, "pieces": [{"bytes": len(piece), "sha256": digest.hex()}]}
-        status = request("PUT", route + "/end", manifest)
+        status = request(phone, "PUT", route + "/end", manifest)
         assert status["missing"] == [0] and not (folder / "pieces/complete.json").exists()
         assert (folder / "pieces/expected.json").exists()
         server.stop(f)
         server.start(f)
-        assert request("GET", route)["missing"] == [0]
-        request("PUT", route + "/pieces/0", b"wrong", status=400, headers=headers)
+        assert request(phone, "GET", route)["missing"] == [0]
+        request(phone, "PUT", route + "/pieces/0", b"wrong", status=400, headers=headers)
         if linux:
             fault = Path(bin_dir) / "pieces"
             fault.touch()
-            request("PUT", route + "/pieces/0", piece, status=500, headers=headers)
-            request("GET", route, status=500)
+            request(phone, "PUT", route + "/pieces/0", piece, status=500, headers=headers)
+            request(phone, "GET", route, status=500)
             fault.unlink()
-            assert request("GET", route)["pieces"] == [0]
-        request("PUT", route + "/pieces/0", piece, headers=headers)
+            assert request(phone, "GET", route)["pieces"] == [0]
+        request(phone, "PUT", route + "/pieces/0", piece, headers=headers)
         assert not (folder / "pieces/complete.json").exists()
         with wav.open("ab") as file:
             file.write(b"x")  # Simulate a crash after half a PCM frame reached the file.
@@ -219,7 +220,7 @@ with tempfile.TemporaryDirectory(prefix="meetrec-bin-") as bin_dir:
         assert wav.read_bytes()[44:] == b"abcdefgh"
         complete = server.wait(lambda: (folder / "pieces/complete.json").exists())
         assert complete and (folder / "pieces/room.0000.wav").read_bytes() == piece
-        request("PUT", route + "/pieces/0", b"different", status=409,
+        request(phone, "PUT", route + "/pieces/0", b"different", status=409,
                 headers={"Content-Digest": "sha-256=:" + base64.b64encode(hashlib.sha256(b"different").digest()).decode() + ":"})
         (folder / "room.wav").write_bytes(b"0123456789")
         (folder / "transcript.md").write_text("Alice: Hello.\n")
@@ -228,79 +229,86 @@ with tempfile.TemporaryDirectory(prefix="meetrec-bin-") as bin_dir:
         entries = server.until(f, session, lambda es: any(e.get("meeting") == meeting for e in es), timeout=20)
         notes = [e for e in entries if e.get("meeting") == meeting]
         assert len(notes) == 1 and notes[0].get("from") == "razor" and notes[0].get("device") == "phone" and notes[0].get("request") == meeting, notes
-        assert request("GET", route + "/transcript")
-        response = server.send(f, "GET", route + "/audio", headers={"Range": "bytes=2-4"}, key=phone)
+        assert request(phone, "GET", route + "/transcript")
+        response = server.send(phone, "GET", route + "/audio", headers={"Range": "bytes=2-4"})
         assert response.status == 206 and response.read() == b"234" and response.getheader("Accept-Ranges") == "bytes"
-        response = server.send(f, "GET", route + "/audio", headers={"Range": "bytes=99-"}, key=phone)
+        response = server.send(phone, "GET", route + "/audio", headers={"Range": "bytes=99-"})
         assert response.status == 416
         server.until(f, session, lambda es: sum(e["kind"] == "turn_end" for e in es) == 3)
         server.stop(f)
         server.start(f)
-        request("GET", route)
+        request(phone, "GET", route)
         assert len([e for e in f.record(session) if e.get("meeting") == meeting]) == 1
-        request("DELETE", route)
+        request(phone, "DELETE", route)
         assert not any(e.get("call") == meeting and e.get("reason") == "canceled" for e in f.record(session)), "finished meeting was canceled"
-        assert request("GET", route)["phase"] == "ready"
+        assert request(phone, "GET", route)["phase"] == "ready"
         retry = str(uuid.uuid4())
         retry_route = f"/sessions/{session}/meetings/{retry}"
-        request("PUT", retry_route, start)
+        request(phone, "PUT", retry_route, start)
         entries = server.until(f, session, lambda es: any(e.get("call") == retry and e.get("event") == "started" for e in es))
         retry_folder = Path(next(e["folder"] for e in entries if e.get("call") == retry and e.get("event") == "started"))
-        request("PUT", retry_route + "/end", {"live_bytes": 0, "pieces": []})
+        request(phone, "PUT", retry_route + "/end", {"live_bytes": 0, "pieces": []})
         (retry_folder / "final.json").write_text(json.dumps({"v": 1, "ok": False, "step": "words", "error": "unavailable"}))
         server.until(f, session, lambda es: any(e.get("meeting") == retry for e in es), timeout=20)
         server.until(f, session, lambda es: sum(e["kind"] == "turn_end" for e in es) == 4)
-        assert request("POST", retry_route + "/retry")["phase"] == "transcribing"
+        assert request(phone, "POST", retry_route + "/retry")["phase"] == "transcribing"
         assert any(c["args"][0] == "ingest" and "--retry" in c["args"] for c in commands())
         cancel_route = f"/sessions/{session}/meetings/{uuid.uuid4()}"
-        request("PUT", cancel_route, start)
-        request("DELETE", cancel_route)
-        request("PUT", cancel_route + "/end", {"live_bytes": 0, "pieces": []})
+        request(phone, "PUT", cancel_route, start)
+        request(phone, "DELETE", cancel_route)
+        request(phone, "PUT", cancel_route + "/end", {"live_bytes": 0, "pieces": []})
         canceled_id = cancel_route.rsplit("/", 1)[1]
         assert [e["reason"] for e in f.record(session) if e.get("call") == canceled_id and e.get("event") == "ended"] == ["canceled"]
         assert any(c["args"][0] == "cancel" for c in commands())
         bad_id = str(uuid.uuid4())
         bad_route = f"/sessions/{session}/meetings/{bad_id}"
-        request("PUT", bad_route, start)
+        request(phone, "PUT", bad_route, start)
         entries = server.until(f, session, lambda es: any(e.get("call") == bad_id and e.get("event") == "started" for e in es))
         bad_folder = Path(next(e["folder"] for e in entries if e.get("call") == bad_id and e.get("event") == "started"))
-        request("PUT", bad_route + "/pieces/0", piece, headers=headers)
-        request("PUT", bad_route + "/end", {"live_bytes": 0, "pieces": [{"bytes": len(piece), "sha256": "0" * 64}]}, status=400)
+        request(phone, "PUT", bad_route + "/pieces/0", piece, headers=headers)
+        request(phone, "PUT", bad_route + "/end", {"live_bytes": 0, "pieces": [{"bytes": len(piece), "sha256": "0" * 64}]}, status=400)
         assert not (bad_folder / "pieces/complete.json").exists()
         assert not (bad_folder / "pieces/expected.json").exists(), "rejected end persisted a manifest"
         assert not any(e.get("call") == bad_id and e.get("event") == "ended" for e in f.record(session))
-        assert request("GET", bad_route)["phase"] == "recording"
-        request("PUT", bad_route + "/end", {"live_bytes": 0, "pieces": [{"bytes": len(piece), "sha256": digest.hex()}]})
+        assert request(phone, "GET", bad_route)["phase"] == "recording"
+        request(phone, "PUT", bad_route + "/end", {"live_bytes": 0, "pieces": [{"bytes": len(piece), "sha256": digest.hex()}]})
         assert (bad_folder / "pieces/complete.json").exists()
-        request("DELETE", bad_route)
+        request(phone, "DELETE", bad_route)
 
-    # An answered start stays available when the model's context is rebuilt.
-    notes = [model_response([call("handover", json.dumps({"note": "Continue following the meeting."}), f"note{n}")]) for n in range(2)]
-    with flow([reply(None, "Ready."), notes[0], reply(None, "Rebuilt."), notes[1], reply(None, "Rebuilt again.")],
-              model="sol", config=PLAIN, env={"PATH": bin_dir + ":" + os.environ["PATH"]}) as f:
-        server.start(f)
-        session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
-        route = f"/sessions/{session}/meetings/{uuid.uuid4()}"
-        response_ = server.send(f, "PUT", route, {"started_at": "2026-11-04T20:00:00Z", "rate": 48000})
-        assert response_.status == 200, response_.read()
-        response_.read()
-        entries = server.until(f, session, lambda es: any(e.get("event") == "started" for e in es))
-        folder = Path(next(e["folder"] for e in entries if e.get("event") == "started"))
-        server.post(f, f"/sessions/{session}/input", {"text": "Follow the meeting."})
-        server.until(f, session, lambda es: any(e["kind"] == "turn_end" for e in es))
-        for n in range(2):
-            if n:
-                response_ = server.send(f, "PUT", route + "/end", {"live_bytes": 2, "pieces": []})
-                assert response_.status == 200, response_.read()
-                response_.read()
-            server.post(f, f"/sessions/{session}/handover", {})
-            entries = server.until(f, session, lambda es: len([e for e in es if e["kind"] == "rebuild"]) == n + 1)
-            rebuilt = [e for e in entries if e["kind"] == "rebuild"][-1]
-            assert str(folder) in rebuilt["context"], "rebuild lost the open meeting's folder path"
-            server.until(f, session, lambda es: any(e["kind"] == "turn_end" and e["id"] > rebuilt["id"] for e in es))
-        response_ = server.send(f, "DELETE", route)
-        assert response_.status == 200, response_.read()
-        response_.read()
+    # An answered start stays available when the model's context is rebuilt. The rebuild's message
+    # carries the meeting's unread facts after its context, a line while it records and its end
+    # after: on either model path the rebuilt turn's end leaves the session waiting on the person,
+    # and its conversation answers the next input.
+    notes = [f"Continue following the meeting {n}." for n in range(2)]
+    for model, say, hand in (("opus", lambda t: claude_reply(text=t), lambda note: claude_reply((None, "mcp__razor__handover", {"note": note}))),
+                             ("sol", lambda t: reply(None, t), lambda note: reply(None, "handover", note=note))):
+        with flow([say("Ready."), hand(notes[0]), say("Rebuilt."), say("Here."), hand(notes[1]), say("Rebuilt again."), say("Here again.")],
+                  model=model, config="" if model == "opus" else PLAIN, env={"PATH": bin_dir + ":" + os.environ["PATH"]}) as f:
+            server.start(f)
+            session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+            route = f"/sessions/{session}/meetings/{uuid.uuid4()}"
+            request(f, "PUT", route, {"started_at": "2026-11-04T20:00:00Z", "rate": 48000})
+            entries = server.until(f, session, lambda es: any(e.get("event") == "started" for e in es))
+            folder = Path(next(e["folder"] for e in entries if e.get("event") == "started"))
+            server.post(f, f"/sessions/{session}/input", {"text": "Follow the meeting."})
+            server.until(f, session, lambda es: any(e["kind"] == "turn_end" for e in es))
+            add_lines(0, 1)
+            server.until(f, session, lambda es: len(lines(es)) == 1)
+            for n in range(2):
+                if n:
+                    request(f, "PUT", route + "/end", {"live_bytes": 2, "pieces": []})
+                server.post(f, f"/sessions/{session}/handover", {})
+                entries = server.until(f, session, lambda es: len([e for e in es if e["kind"] == "rebuild"]) == n + 1)
+                rebuilt = [e for e in entries if e["kind"] == "rebuild"][-1]
+                assert str(folder) in rebuilt["context"], "rebuild lost the open meeting's folder path"
+                entries = server.until(f, session, lambda es: any(e["kind"] == "turn_end" and e["id"] > rebuilt["id"] for e in es))
+                answered = next(e for e in entries if e["kind"] == "turn_end" and e["id"] > rebuilt["id"])["inputs"]
+                assert max(e["id"] for e in entries if e["kind"] == "voice_call" and e["id"] < rebuilt["id"]) in answered, "the rebuilt turn left the unread meeting fact"
+                server.wait(lambda: json.load(server.send(f, "GET", f"/sessions/{session}/agent"))["state"] == "needs_you", 5, "the rebuilt session stayed working")
+                asked = server.post(f, f"/sessions/{session}/input", {"text": f"Still there {n}?"})["entry"]
+                entries = server.until(f, session, lambda es: any(e["kind"] == "turn_end" and asked in e["inputs"] for e in es))
+                assert len([e for e in entries if e["kind"] == "rebuild"]) == n + 1, "the next input rebuilt again"
+            request(f, "DELETE", route)
 
     # A helper's meeting outlives its disposable worktree.
     with flow([reply("Make a helper.", "agent", action="start", name="meeting-helper", brief="Wait.", placement="worktree"),
@@ -314,13 +322,9 @@ with tempfile.TemporaryDirectory(prefix="meetrec-bin-") as bin_dir:
         child = next(e["session"] for e in entries if e["kind"] == "child")
         server.until(f, child, lambda es: any(e["kind"] == "call" for e in es))
         route = f"/sessions/{child}/meetings/{uuid.uuid4()}"
-        response_ = server.send(f, "PUT", route, {"started_at": "2026-11-04T20:00:00Z", "rate": 48000})
-        assert response_.status == 200, response_.read()
-        response_.read()
+        request(f, "PUT", route, {"started_at": "2026-11-04T20:00:00Z", "rate": 48000})
         entries = server.until(f, child, lambda es: any(e.get("event") == "started" for e in es))
         folder = Path(next(e["folder"] for e in entries if e.get("event") == "started"))
         assert folder.parent == f.cwd, "meeting was saved inside the helper's worktree"
         server.until(f, parent, lambda es: any(e["kind"] == "turn_end" for e in es))
-        response_ = server.send(f, "DELETE", route)
-        assert response_.status == 200, response_.read()
-        response_.read()
+        request(f, "DELETE", route)

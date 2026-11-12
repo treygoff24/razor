@@ -26,7 +26,7 @@ Two places hold more detail. The server writes its errors to `~/.razor/server.lo
 
 ## Restarting the server
 
-Some changes apply only when the server starts: new keys in `keys.toml`, and `server.address`. Restart this home's server with:
+Some changes apply only when the server starts, such as new keys in `keys.toml`. Restart this home's server with:
 
 ```sh
 razor restart
@@ -72,7 +72,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 **`The Claude bridge needs Node 22.18 or later on PATH (…); this install has no private Node; install Node, then run razor doctor.`** Claude sessions run through a small Node program. The installer downloads a private copy of Node only when it finds no Node 22.18 or later on your `PATH`; when it found yours, Razor keeps using the `node` on the `PATH` of whatever starts the server, and the line shows that `PATH`. Put Node 22.18 or later on it, run `razor install` again if the background service needs the new `PATH`, then `razor restart`.
 
-**`… is not set; save it with razor setup or in keys.toml, then run razor restart.`** or **`The model host refused … or never got it; …`** A provider's model needs a key variable the server does not have, or the host refused the key it got. The first sentence is the model picker's reason for not offering the model; the second ends a turn on it, such as one from `razor --print --model gemini-3.8-flash`. Save the key in `~/.razor/keys.toml` ([Keys](models.md#keys)), or export it where the server starts, then run `razor restart`.
+**`… is not set; save it with razor setup or in keys.toml, then run razor restart.`** or **`The model host refused … or never got it; …`** A provider's model needs a key variable the server does not have, or the host refused the key it got. The first sentence is the model picker's reason for not offering the model; the second ends a turn on it, such as one from `razor --print --model gemini`. Save the key in `~/.razor/keys.toml` ([Keys](models.md#keys)), or export it where the server starts, then run `razor restart`.
 
 **`provider_only is on, so Razor …`** The setting that keeps Razor to your model providers refused something; the sentence says what. Use a model on a provider under `[providers]`, or turn the setting off with `razor config set provider_only false` ([Security](security.md#contacting-only-your-model-provider)).
 
@@ -98,9 +98,13 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ## More machines
 
-**`server.address changed; restart Razor to apply it.`** Run `razor restart`. If the server then fails with `Razor cannot listen on server.address`, the address is not one of this machine's; use its Tailscale address.
+**`Settings: server.address is no longer used`** (from `razor doctor`). Servers and apps no longer reach each other at an address. Delete `address` under `[server]` in the file doctor names; nothing else changes.
 
-**`This server has no server.address, so the other could not answer it`.** Pairing, connecting the Razor servers on two machines, needs both servers to listen on an address. Set `[server] address` on this machine, run `razor restart`, and pair again.
+**`[remote] names a paired server, as server = "<its name in razor devices>", and holds no address or key`.** Your `[remote]` was written for an earlier version, which reached the other server at an address with a key. Pair the two servers by code ([More machines](machines.md#1-pair-two-servers)), then replace `address` and `key` under `[remote]` with `server = "<the name razor devices lists for it>"`.
+
+**`Pair <name>: unreachable; check that server and its relay.`** (from `razor doctor`). This server could not reach the paired one. Check that its server is running and that `razor doctor` there shows its home relay connected. A server or app paired by an earlier version reaches nothing until it is paired again by code ([More machines](machines.md#servers-and-apps-paired-by-an-earlier-version)). A pair that answers shows `direct` or `relayed through` a relay, with the round trip.
+
+**`Home relay: … (refused this server; …)`** (from `razor doctor`). The relay turned this server away, usually because the password in its address under `[network] relays` is wrong or missing ([Running your own relay](relay.md)). `disconnected` or `not reached` instead means the relay did not answer: check its address and that this machine can open a WebSocket to it.
 
 ## Voice, notifications and the browser
 
@@ -116,7 +120,7 @@ For an installed copy, the script is `~/.local/share/razor/current/scripts/speec
 
 **`speech: The API key you used is missing the permission … The key needs Text to Speech and Voices (read).`** Your ElevenLabs key is restricted and lacks a permission speech uses. In ElevenLabs' API key settings, give it Text to Speech and Voices (read), or make it unrestricted; no restart is needed.
 
-**`Over SSH, audio would play on <machine>, not your machine; pair Razor on yours.`** The terminal app plays audio on its own machine, which over SSH is the remote one, so nothing plays; recording over SSH is refused for the same reason. Install Razor on the machine you sit at and [connect its terminal to the other server](machines.md#use-a-terminal-without-a-local-server); audio then uses your own speakers and microphone ([Replies read aloud](browser-voice-search.md#replies-read-aloud)).
+**`Over SSH, audio would play on <machine>, not your machine; pair Razor on yours.`** The terminal app plays audio on its own machine, which over SSH is the remote one, so nothing plays; recording over SSH is refused for the same reason. Install Razor on the machine you sit at and [connect its terminal to the other server](machines.md#start-sessions-on-a-paired-server); audio then uses your own speakers and microphone ([Replies read aloud](browser-voice-search.md#replies-read-aloud)).
 
 **No desktop notifications.** On macOS, allow notifications for Script Editor in System Settings, under Notifications. On Linux, the starter pack (the default settings Razor ships) uses `notify-send`; on a machine with no desktop there is nowhere to show them, so send them to your phone with ntfy ([Configuration](configuration.md#notifications)).
 

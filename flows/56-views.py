@@ -13,7 +13,8 @@ from dataclasses import replace
 import time
 from driver import Reply, flow
 from model import agent, message, reply, tool
-from server import Local, published, send, until, wait
+import server
+from server import Local, send, until, wait
 from terminal import Terminal
 
 replies = [agent("RESIDENT_56", "start", name="resident-kid56", brief="Deliver and wait.", placement="in_place"),
@@ -36,10 +37,12 @@ replies = [agent("RESIDENT_56", "start", name="resident-kid56", brief="Deliver a
            agent("LEAD_56", "start", name="helper56", brief="Work.", placement="in_place"),
            message("LEAD_56", "question", text="Lead asks 56", options=["yes", "no"]),
            reply("LEAD_56", text="asked56"), reply("LEAD_56", text="led56"),
+           *(reply(k, "Bash", {"command": f"while [ ! -e {w}56 ]; do sleep 0.05; done"}) if w else reply(k, text=k) for k, w in
+             [("HELD_56", "held"), ("HELD_56", None), ("HELD_56", "closing"), ("HELD_56", None), ("IDLE_56", None), ("IDLE_56", "idle"), ("IDLE_56", None)]),
            Reply(b'{"type": "error", "error": {"type": "permission_error", "message": "Failed56."}}', status=403, match="FAIL_56")]
 # The recorder and the transcriber are stand-ins for devices: a steady tone, and one phrase.
 voice = 'capture = ["/usr/bin/python3", "-c", "import os,struct,time\\nwhile 1: os.write(1,struct.pack(\'<h\',5000)*1600); time.sleep(.1)"]\ntranscribe = ["/bin/sh", "-c", "cat >/dev/null; echo voice-words56"]\n'
-with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress = "127.0.0.1:0"\n[mcp.ask56]\nurl = "{external.url}/mcp"\ntools = ["form"]') as f:
+with mcp.serve() as external, flow(replies, config=voice + f'[mcp.ask56]\nurl = "{external.url}/mcp"\ntools = ["form"]') as f:
     a, b = f.home / ".razor", f.home / ".razor-b"
     b.mkdir()
     shutil.copy(a / "auth.json", b / "auth.json")
@@ -50,12 +53,8 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
         where.cwd.mkdir()
     assert alpha.run("devices").returncode == 0
     owner = (a / "server.id").read_text().strip()
-    (b / "config.toml").write_text((a / "config.toml").read_text().replace(
-        'address = "127.0.0.1:0"', f'address = "127.0.0.1:0"\nshared = "{owner}"\nlabel = "box · personal"'))
-    assert beta.run("devices").returncode == 0
-    address = {home: published(home) for home in (a, b)}
-    printed = alpha.run("devices", "add", "b", "--address", address[b]).stdout
-    assert beta.run("devices", "add", "a", *printed.splitlines()[-1].split()[4:]).returncode == 0
+    (b / "config.toml").write_text((a / "config.toml").read_text() + f'[server]\nshared = "{owner}"\nlabel = "box · personal"\n')
+    server.pair(alpha, beta, "b", "a")
 
     def status(home, query="", path="/v1/status"):
         connection = Local(home / "server.sock")
@@ -172,16 +171,16 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
     assert third["depth"] == 2 and len(third["sessions"]) == 2, third
     assert saved["views"][0]["groups"][0]["groups"][0]["groups"][0]["id"]
 
-    # Two paired idle homes update their gauges without resending every agent.
+    # Two paired idle homes update their gauges without resending every agent: a resend would
+    # follow B's heartbeat, so the read ends at the line after it.
     time.sleep(1)
-    stream, heartbeats = status(a, "?heartbeat=true"), []
+    stream, heartbeats, deadline = status(a, "?heartbeat=true"), [], time.monotonic() + 35
     assert json.loads(stream.readline())["kind"] == "agents"
-    deadline = time.monotonic() + 35
-    while time.monotonic() < deadline:
+    while not any(l["kind"] == "server" and l.get("name") == "b" for l in heartbeats[:-1]):
+        assert time.monotonic() < deadline and not any(l["kind"] == "agents" for l in heartbeats), heartbeats
         heartbeats.append(json.loads(stream.readline()))
     stream.close()
     assert not any(l["kind"] == "agents" for l in heartbeats), heartbeats
-    assert any(l["kind"] == "server" and l.get("name") == "b" for l in heartbeats), heartbeats
 
     # 4. A root started over 12 hours ago with no open terminal belongs to Earlier; opening it
     # brings it live. Its record is a real root's first line, moved to B, renamed and backdated.
@@ -271,8 +270,10 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
         records = list(beta.record(here))
         assert all(e.get("end") != "stopped" for e in records), records[-3:]
         request(b, "POST", f"/sessions/{here}/stop", {})  # stopped before its call ends and asks the model again
+        # The list Enter acts on shows the saved view; Enter closes it as it opens the agent.
+        assert "AGENTS · WORK" in t.text(), t.text()
         t.send("\r\x19")
-        t.shown("── USAGE", "AGENTS · WORK", "beta-visible")
+        t.shown("── USAGE", "beta-visible")
         t.send("/view Other\r")
         t.send("/resume\r")
         t.shown("AGENTS · OTHER")
@@ -304,7 +305,8 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
     with Terminal(beta, "--resume", old, columns=160, rows=50) as t:
         t.shown("Message the agent")
         t.send("/resume\r")
-        t.shown("AGENTS ·")
+        # The composer says attaching until the stream syncs, after the server counts the terminal.
+        t.shown("AGENTS ·", "◦ agent idle")
         assert not in_earlier(b, old)
     assert wait(lambda: in_earlier(b, old))
     # Two changed publications on one connection stay at least one second apart.
@@ -384,3 +386,31 @@ with mcp.serve() as external, flow(replies, config=voice + f'[server]\naddress =
     home = "ember56@a" in status(b).readline().decode()
     sections = layout(b, saved["version"])["layouts"][0]["sections"]
     assert home and all("ember56" not in json.dumps(s) for s in sections if s["kind"] != "residents"), "a resident's home is in the groups"
+    # A close keeps the place the session had when it was asked: one views stream, through the held and
+    # closing turns, sees a working one only under WORKING, an idle one only under IDLE, then neither again.
+    saved["views"][0]["everything_else"]["by"] = "state"
+    saved = request(a, "PUT", "/views", saved)
+    working, idle = (request(a, "POST", "/sessions", {"cwd": str(loose.cwd)})["session"] for _ in range(2))
+    for who, text in ((working, "HELD_56"), (idle, "IDLE_56")):
+        request(a, "POST", f"/sessions/{who}/input", {"text": text})
+    wait(lambda: next(r for r in json.loads(status(a).readline())["agents"] if r["session"] == idle)["state"] == "needs_you")
+    trail, layouts = [], {}
+    with status(a, "?views=true") as stream:
+        def watch(stop):  # Notes, in each views line, the section holding each of the two sessions.
+            for l in filter(lambda l: l["kind"] == "views", map(json.loads, iter(stream.readline, b""))):
+                layouts.update((v["name"], v) for v in l["layouts"])
+                trail.append([next((s["name"] for s in layouts[l["names"][0]]["sections"] if any(r["session"] == who for r in s["sessions"])), None) for who in (working, idle)])
+                if stop(l["version"]): return
+        watch(lambda _: None not in trail[-1])
+        for who in (working, idle):
+            request(a, "POST", f"/sessions/{who}/done", {})
+        (loose.cwd / "held56").touch()
+        until(f, working, lambda es: sum(e["kind"] == "call" for e in es) == 2)  # The closing turn's own call.
+        time.sleep(1.1)  # Allow the coalesced layout publication.
+        for name, who in (("closing56", working), ("idle56", idle)):
+            (loose.cwd / name).touch()
+            until(f, who, lambda es: es[-1].get("closed"))
+        saved = request(a, "PUT", "/views", saved)
+        watch(lambda version: version == saved["version"])
+    squash = lambda seen: [x for i, x in enumerate(seen) if (x or any(seen[:i])) and (not i or x != seen[i - 1])]
+    assert [squash(seen) for seen in zip(*trail)] == [["WORKING", None], ["IDLE", None]], trail

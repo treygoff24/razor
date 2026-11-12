@@ -173,6 +173,10 @@ impl Status<'_> {
         let choice = Span::styled(choice, bold(CYAN, GLASS));
         self.push(Vec::new());
         self.push(vec![span("model   ", GRAY), choice]);
+        if let Some(served) = row.and_then(|r| r.served_model.as_deref()) {
+            let served = served.to_owned();
+            self.text(&format!("served  {served}"), GRAY);
+        }
     }
 
     // A configuration error, the context past its rebuild line, reached limits, then each child

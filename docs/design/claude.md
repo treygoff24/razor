@@ -90,7 +90,7 @@ query({ prompt: inbox, options: {
 }});
 ```
 
-- **`run`** reads the call's id from `_meta['claudecode/toolUseId']`, sends `Run { call, tool, input }`, and returns the `Result`'s text. A `Result` with `settle` marks the conversation, and from then on `run` marks each result `_meta['claude/endTurn']` (the SDK's end-turn tool convention, `sdk.d.ts` on `resumeDropsTurn`), which ends the CLI's turn on that result with no further request. `PostToolBatch` still answers `continue: false` for a marked conversation's batch, for a settling result the CLI does not end on (an error); on a result that ended the turn the CLI discards that stop. The hook's stop alone writes a note after the result, `PostToolBatch hook stopped continuation: Razor settled the batch.`, which the resume just after cuts (it resumes at the result) and every later resume puts back mid-history, so a twice-continued child wrote its whole cache again from its first finish (flow 16).
+- **`run`** reads the call's id from `_meta['claudecode/toolUseId']`, sends `Run { call, tool, input }`, and returns the `Result`'s text. A `Result` with `settle` marks the conversation, and from then on `run` marks each result `_meta['claude/endTurn']` (the SDK's end-turn tool convention, `sdk.d.ts` on `resumeDropsTurn`), which ends the CLI's turn on that result with no further request. `PostToolBatch` still answers `continue: false` for a marked conversation's batch, for a settling result the CLI does not end on (an error); on a result that ended the turn the CLI discards that stop. The hook's stop alone writes a note after the result, `PostToolBatch hook stopped continuation: Razor settled the batch.`, which the resume just after cuts (it resumes at the result) and every later resume puts back mid-history, so a twice-continued child wrote its whole cache again from its first finish (flow 11).
 - **Razor's tools are served raw**, so each declaration reaches the request byte for byte (run raw-meta), with no zod. A scripted tool receives the model's arguments as JSON and checks them itself, as an MCP server does; Razor's own actions are checked by their input types in `Tools::run`. The CLI declares only a schema whose root is `{"type": "object"}` (a probe; MCP SDK `ToolSchema`), so `Tools::configure` leaves out a scripted tool with any other root, with a message.
 - **Names.** The registry leaves out any scripted or MCP tool whose name is over 52 characters, so `mcp__razor__<name>` always fits the API's 64.
 - **`Add`** puts each tool into `served`, replacing one of the same name, and calls `sendToolListChanged()`. The notice reaches the CLI ahead of any later user message: in run order1 the addition was in the next request 5 times out of 5.
@@ -192,7 +192,7 @@ It runs a program under a real terminal, 40 rows by 120 columns. `command` start
 
 ## Flows and the proof
 
-Flows on this route: 6 (exit 7 and the 40 KB spill, in Claude Code's shapes), 7 (`Bash` with `run_in_background`; `terminal` with `job` and `pattern`; `terminal` with `job` alone; `TaskStop`; a second job's notice), 8 (`terminal` with `text`, `key` and `secret_file`), 9 (three `Read`s together, two `Edit`s in order), 3 (the image block before the text), 27's tool half (an added scripted tool offered inline and run), 29's second half (`WebSearch` and `WebFetch` in the tools with no provider). Flows 6 and 7 are rewritten for these names and the revised messages here.
+Flows on this route: 6 (exit 7 and the 40 KB spill, in Claude Code's shapes; `terminal` with `text`, `key` and `secret_file`; three `Read`s together, two `Edit`s in order), 7 (`Bash` with `run_in_background`; `terminal` with `job` and `pattern`; `terminal` with `job` alone; `TaskStop`; a second job's notice), 2 (the image block before the text), 27's tool half (an added scripted tool offered inline and run), 29's second half (`WebSearch` and `WebFetch` in the tools with no provider). Flows 6 and 7 are rewritten for these names and the revised messages here.
 
 The Claude proof, against a real sign-in, has the runs that need no controller: the cache reads around a live addition (and the control with tool search off), an image reaching the model, the rate-limit line, and the claude.ai connectors finding. Still owed there: a background job waited on and killed, a notice waking an idle session, and an installer driven by `terminal` with a secret typed from a file.
 
@@ -226,3 +226,25 @@ The choice, by what each costs:
 - *Match the CLI's sentence* (`No conversation found`). A vendor's wording as a contract.
 
 Flow 41 deletes `.razor/claude/projects` and resumes once more: the `--print` answers, exit 0, and the record holds a `Restart` rebuild. Then, with the session's folder moved away so no CLI can start, the resume rebuilds once and the fresh conversation's failure ends the turn: no second rebuild.
+
+## Agent SDK 0.3.321 and Claude Fable 5.2 (9 November)
+
+The bridge pins SDK 0.3.321 (no 0.3.320 was published), which bundles Claude Code 2.1.321. That CLI makes Fable 5.2 (`claude-fable-5-2`) the model `fable` stands for, and Razor's family table resolves `fable` to that ID. An SDK bump updates the Claude targets in `src/profiles/models.rs` from the bundled CLI's catalog; that table owns the release each family requests. The full id routes like any `claude-…` name. Both names get the window the SDK reports (1M), of which Razor fills 500,000 and hands over at 0.9. All five efforts go through. Live, on a scratch home with Trey's sign-in, a `--print` turn with a tool call on `fable`, one on `claude-fable-5-2` and one on an Opus session switched to `fable` (the conversation was kept, not rebuilt) were all served by `claude-fable-5-2`, according to the CLI's transcript and the bridge's init line.
+
+What the changes between 0.3.317 and 0.3.321 (CLI 2.1.318–2.1.321) mean for Razor:
+
+| Change | Effect on Razor | Done |
+| --- | --- | --- |
+| Fable 5.2 refuses forced `tool_choice`, `temperature`/`top_p`/`top_k`, disabled thinking and prefill | The Claude route sends none of them: thinking is adaptive and summarized, and the CLI writes the tools | Nothing |
+| Fast mode on Fable 5.2 ($16/$80 per million tokens); the CLI now tries standard speed on the same model when fast serving fails | `claude-fable-5-2` joins `fable` in the Fast list, and the hint shows its price. A fallback reaches the person as the bridge's "Fast unavailable" notice | speeds.toml. Live, both of Trey's accounts answer "preference" for Opus and Fable alike, so Fast serving itself is unproven |
+| Fable 5.2 checks the history before each thinking block on every account; an edited prefix is a 400, not a cache rewrite | The CLI builds requests. Razor keeps history append-only: tools are added inline, and a settling result ends the turn instead of leaving a hook note that later resumes would move | Nothing; a CLI-side edit would now fail the turn |
+| Fable 5.2's thinking is bound to its account, and only Fable or Mythos 5.2 read it | A resume more than an hour after close, signed in to another account, or a switch away from Fable, drops the earlier reasoning; the request still succeeds | Accepted |
+| Results carry `credential_expires_at` (0.3.318) | Razor's setup tokens give no date | Not used |
+| MCP tasks (0.3.319; needs `CLAUDE_AUTO_BACKGROUND_TASKS=1`) | Razor's served tools never run as tasks | Off |
+| `permissions.denyInsteadOfPrompting`; fixes to PreToolUse `ask` and `defer` | Razor bypasses permissions and admits every call with `deny` or `updatedInput` | Nothing |
+| Stop cancels a message sent just after a model change; the interrupt answer lists it (2.1.318) | A switch followed by Escape stops cleanly | Nothing |
+| Informational lines no longer lose text (2.1.319) | The bridge's warning notices arrive whole | Nothing |
+| PostToolUse runs on calls finishing after an interrupt; `session_writes_lost` only on exit 0; idle compaction fix | Razor registers no PostToolUse, ignores `session_writes_lost` and keeps idle compaction off | Nothing |
+| Unattended runs stop rewriting `~/.claude.json` | Less churn in `<home>/claude` | Nothing |
+
+The pinned SDK still leaves `command_lifecycle` frames and `unifiedWindows` untyped, so the bridge's two casts for them stay.

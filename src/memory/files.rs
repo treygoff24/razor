@@ -2,11 +2,13 @@
 //! home, in `memory/all/` for every project and in `memory/projects/<the project's path>/` for
 //! one, and a retired memory at the same place under `memory/retired/`. A file's name says its
 //! kind, state notes are `state/<session>.md` with their merged note at `state.md`, and a header between `---` lines holds its
-//! source, any expiry and a fact's or note's description. Nothing is held between calls, and
+//! source, any expiry and a fact's or note's description. A resident's own layer is the same
+//! layout in `residents/<name>/` inside its project's folder. Nothing is held between calls, and
 //! everything here runs on a blocking thread. Task files share the reader, header and writer.
 
-use super::{Answer, Error, Kind, TEXT, Write, other, refuse, words};
+use super::{Answer, Error, Kind, TEXT, Write, citations, fill, other, refuse};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
 use std::fs::{self, File};
 use std::hash::{BuildHasher, Hasher};
@@ -23,15 +25,35 @@ pub(super) const KEEP: usize = 64;
 /// many bytes (about 1,000 and 600 tokens).
 const RULINGS: (usize, usize) = (20, 4000);
 const KNOWN: (usize, usize) = (24, 2400);
+/// The glossary's lines on the page, taken out of the list of what is known.
+const GLOSSARY: (usize, usize) = (12, 1200);
 
-/// The folders of one project's memories and of every project's, each pair in that order.
+/// The folders of one project's memories and of every project's, each pair in that order, and who
+/// added the project's rulings when it is shared.
 #[derive(Clone)]
 pub(super) struct Folders {
-    pub(super) current: [PathBuf; 2],
+    pub(super) current: Vec<PathBuf>,
     retired: [PathBuf; 2],
+    pub(super) owners: Owners,
 }
 
-/// One memory or task file as a read found it: at most `FILE` bytes, and when it last changed.
+/// Who added each ruling of a shared project, by its id: their name, and whether they are this
+/// home's person. Empty for a project that is not shared.
+pub(super) type Owners = HashMap<String, (String, bool)>;
+
+impl Folders {
+    /// These folders with `resident`'s own layer, inside the project's, in place of the project's.
+    pub(super) fn layer(&self, resident: Option<&str>) -> Folders {
+        let mut layer = self.clone();
+        for folder in [&mut layer.current[0], &mut layer.retired[0]] {
+            folder.extend(resident.iter().flat_map(|&name| ["residents", name]));
+        }
+        layer
+    }
+}
+
+/// One memory or task file as a read found it: at most `FILE` bytes, and when it was written, by
+/// its id's stamp, else when the file last changed.
 pub(super) struct Found {
     pub(super) id: String,
     pub(super) at: SystemTime,
@@ -44,43 +66,96 @@ pub(super) fn folders(dir: &Path, root: &Path) -> Folders {
     let normal = |c: &Component| matches!(c, Component::Normal(_));
     let project = root.components().filter(normal).collect::<PathBuf>();
     let both = |base: PathBuf| [base.join("projects").join(&project), base.join("all")];
-    let (current, retired) = (both(dir.into()), both(dir.join("retired")));
-    Folders { current, retired }
+    let (current, retired) = (Vec::from(both(dir.into())), both(dir.join("retired")));
+    Folders {
+        current,
+        retired,
+        owners: Owners::new(),
+    }
 }
 
-/// The page's memory part: the state note, the rulings (standing ones first, then those with an
-/// expiry, each newest first) and the descriptions of facts and notes, newest first, then how
-/// many more there are.
-pub(super) fn page(folders: &Folders) -> Result<(Option<String>, String, String), Error> {
-    let state = state(folders);
-    let standing = |f: &Found| Some(usize::from(header(&f.file, "expires").is_none()));
+/// The page's memory part under `heads`: the state note; the standing rulings, newest first, each
+/// marked as set aside when a standing ruling settles it; and the descriptions of facts and notes,
+/// newest first, then how many more there are. With it, a question for the person for each of
+/// their rulings that another person's agreement set aside.
+pub(super) fn page(folders: &Folders, heads: &[String; 3]) -> Result<(String, Vec<String>), Error> {
+    let standing = |f: &Found| header(&f.file, "expires").is_none().then_some(0);
     let rulings = best(folders, KEEP, |id| kind(id) == "ruling", standing)?.0;
-    let line = |f: &Found| {
-        let until = header(&f.file, "expires").map(|d| TEXT.until.replace("{date}", d));
-        let said = words(split(&f.file).1);
-        format!("- {}{said} ({})", until.unwrap_or_default(), f.id)
-    };
-    let rulings = fit(rulings.iter().map(line), RULINGS).0;
-    Ok((state, rulings, known(folders, KNOWN)?))
+    let mut asks = Vec::new();
+    let lines = rulings.iter().map(|f| {
+        let settles = |by: &&Found| head(&by.file).any(|(k, v)| k == "settles" && v == f.id);
+        let by = rulings.iter().find(settles).map(|by| &by.id);
+        if let Some(by) = by
+            && matches!(folders.owners.get(&f.id), Some((_, true)))
+        {
+            asks.push(fill(&TEXT.restore, &[("id", &f.id), ("by", by)]));
+        }
+        let aside = by.map(|by| TEXT.set_aside.replace("{by}", by));
+        ruling_line(folders, f) + &aside.unwrap_or_default()
+    });
+    let differ = (!folders.owners.is_empty()).then_some(TEXT.differ.as_str());
+    let rulings = fit(lines, RULINGS).0 + differ.unwrap_or_default();
+    let terms = glossary(folders);
+    let room = (KNOWN.0 - terms.lines().count(), KNOWN.1 - terms.len());
+    let parts = [state(folders), rulings, terms + &known(folders, room)?];
+    let empty = [&TEXT.no_state, &TEXT.none, &TEXT.none];
+    let page = (heads.iter().zip(parts).zip(empty)).map(|((head, part), empty)| {
+        format!("{head}\n\n{}", if part.is_empty() { empty } else { &part })
+    });
+    Ok((page.collect::<Vec<_>>().join("\n\n"), asks))
 }
 
-/// The current state note, if present and unexpired.
-pub(super) fn state(folders: &Folders) -> Option<String> {
+/// The night's index includes every current ruling, including old and expiring ones.
+pub(super) fn rulings(folders: &Folders) -> Result<String, Error> {
+    let most = (200, 16 << 10);
+    let (found, more) = best(folders, most.0, |id| kind(id) == "ruling", |_| Some(0))?;
+    let (mut lines, left) = fit(found.iter().map(|f| ruling_line(folders, f)), most);
+    if more + left > 0 {
+        lines += &format!("\n{}", TEXT.more.replace("{n}", &(more + left).to_string()));
+    }
+    Ok(lines)
+}
+
+/// A ruling's line: its rule, the name of whoever added it to a shared project, and its id.
+fn ruling_line(folders: &Folders, f: &Found) -> String {
+    let (said, owner) = (rule(split(&f.file).1), folders.owners.get(&f.id));
+    let owner = owner.map(|(name, mine)| TEXT.owned[usize::from(*mine)].replace("{name}", name));
+    let owner = owner.unwrap_or_default();
+    format!("- {said}{owner} ({})", f.id)
+}
+
+/// The current state note, if present and unexpired, else nothing.
+fn state(folders: &Folders) -> String {
     let merged = read(&folders.current[0].join("state.md"), "state").ok();
     let since = merged
         .as_ref()
         .map(|f| f.at)
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let pick = |id: &str| id.starts_with("state/");
-    let notes = best(folders, KEEP, pick, |f| (f.at > since).then_some(0))
-        .ok()?
-        .0;
+    let notes = best(folders, KEEP, pick, |f| (f.at > since).then_some(0));
+    let notes = notes.map(|(notes, _)| notes).unwrap_or_default();
     let today = jiff::Zoned::now().date().to_string();
     let merged = merged.filter(|f| !expired(&f.file, &today));
     let bodies = merged.iter().chain(&notes).map(|f| split(&f.file).1);
     let lines = bodies.flat_map(str::lines).map(str::to_owned);
-    let text = fit(lines, (usize::MAX, super::STATE + 1)).0;
-    (!text.is_empty()).then_some(text)
+    fit(lines, (usize::MAX, super::STATE + 1)).0
+}
+
+/// The terms every session starts with: the lines of the wiki page `glossary` that fit, under a
+/// lead line that says how many more `memory get` reads; nothing for no page or an empty one.
+fn glossary(folders: &Folders) -> String {
+    let page = read(
+        &folders.current[0].join("wiki/glossary.md"),
+        "wiki/glossary",
+    );
+    let page = page.map(|f| f.file).unwrap_or_default();
+    let lines = split(&page).1.lines().filter(|l| !l.trim().is_empty());
+    let (lines, more) = fit(lines.map(str::to_owned), GLOSSARY);
+    if lines.is_empty() {
+        return lines;
+    }
+    let lead = TEXT.glossary[usize::from(more > 0)].replace("{n}", &more.to_string());
+    format!("{lead}\n{lines}\n")
 }
 
 /// The descriptions of facts and notes, newest first, in at most `most` lines and bytes, then a
@@ -91,8 +166,12 @@ pub(super) fn known(folders: &Folders, most: (usize, usize)) -> Result<String, E
         .and_then(|s| s.lines().next().and_then(|s| s.parse::<u64>().ok()))
         .map(|ms| SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(ms))
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    let pick =
-        |id: &str| id != "wiki/_instructions" && matches!(kind(id), "fact" | "note" | "page");
+    // The page shows the glossary's own lines, so it lists that page only for the night.
+    let pick = |id: &str| {
+        id != "wiki/_instructions"
+            && (id != "wiki/glossary" || most.0 > KNOWN.0)
+            && matches!(kind(id), "fact" | "note" | "page")
+    };
     let rank = |f: &Found| {
         let page = kind(&f.id) == "page";
         (page || f.at > since || most.0 > KNOWN.0).then_some(usize::from(page))
@@ -139,13 +218,24 @@ pub(super) fn get(folders: &Folders, id: &str) -> Answer {
 /// Writes `w` as a new file, a session or merged state note, or a wiki page. The complete file is
 /// staged and synced before its predecessor retires; of competing replacements, only the one
 /// that retires the old file publishes.
-pub(super) fn write(folders: &Folders, kind: Kind, w: Write) -> Answer {
-    if let Some(old) = &w.replaces {
-        let (path, _, _) = find(folders, old)?;
+pub(super) fn write(folders: &Folders, kind: Kind, mut w: Write) -> Answer {
+    let mut previous = Vec::new();
+    for old in w.replaces.as_ref().map_or(&[][..], |r| r.ids()) {
+        let (path, _, found) = find(folders, old)?;
+        if kind == Kind::Ruling && fs::metadata(&path).is_ok_and(|m| m.len() > FILE) {
+            return Err(refuse(&TEXT.file_long));
+        }
         let expected = &folders.current[usize::from(w.all)];
         if !path.starts_with(expected) {
             return Err(refuse(&TEXT.scope));
         }
+        previous.push(found);
+    }
+    for id in &w.settles {
+        find(folders, id)?;
+    }
+    if kind == Kind::Ruling {
+        ruling(&mut w, &previous)?;
     }
     let tail = stamp();
     let id = match kind {
@@ -156,7 +246,6 @@ pub(super) fn write(folders: &Folders, kind: Kind, w: Write) -> Answer {
         Kind::State => format!("state/{}", w.session),
         Kind::Page => format!("wiki/{}", w.name.as_deref().unwrap_or_default()),
     };
-    let line = |key, value: Option<String>| value.map(|v| format!("{key}: {v}\n"));
     let folder = &folders.current[usize::from(w.all)];
     if kind == Kind::Page && !folder.join(format!("{id}.md")).exists() {
         let count = fs::read_dir(folder.join("wiki"))
@@ -170,29 +259,32 @@ pub(super) fn write(folders: &Folders, kind: Kind, w: Write) -> Answer {
             .count();
         let replacing_page = w
             .replaces
-            .as_deref()
-            .is_some_and(|id| id.starts_with("wiki/"));
+            .as_ref()
+            .is_some_and(|r| r.ids().iter().any(|id| id.starts_with("wiki/")));
         if count >= 200 + usize::from(replacing_page) {
             return Err(refuse(&TEXT.pages_full));
         }
     }
-    let tail = line("expires", w.expires).unwrap_or_default();
-    let tail = tail + &line("name", w.name).unwrap_or_default();
-    let tail = tail + &line("checked", w.checked).unwrap_or_default();
-    let tail = tail + &line("description", w.description).unwrap_or_default();
-    let tail = tail
-        + &w.cites
-            .iter()
-            .map(|c| format!("cites: {c}\n"))
-            .collect::<String>();
-    let head = format!("---\nsource: {}\n{tail}---\n", w.source);
-    let file = head + &w.text;
+    let line =
+        |key, values: &[String]| String::from_iter(values.iter().map(|v| format!("{key}: {v}\n")));
+    let tail = line("expires", w.expires.as_slice()) + &line("name", w.name.as_slice());
+    let tail = tail + &line("checked", w.checked.as_slice());
+    let tail = tail + &line("description", w.description.as_slice()) + &line("cites", &w.cites);
+    let tail = tail + &line("settles", &w.settles);
+    let file = format!("---\nsource: {}\n{tail}---\n{}", w.source, w.text);
     if file.len() as u64 > FILE {
         return Err(refuse(&TEXT.file_long));
     }
+    if secret(&file) {
+        return Err(refuse(&TEXT.secret));
+    }
     let path = folder.join(format!("{id}.md"));
     let temp = stage(path.parent().unwrap_or(folder), &file)?;
-    if let Some(Err(e)) = w.replaces.as_ref().map(|old| retire(folders, old, false)) {
+    if let Some(Err(e)) = w
+        .replaces
+        .as_ref()
+        .map(|old| retire(folders, old.ids(), false))
+    {
         let _ = fs::remove_file(&temp);
         return Err(e);
     }
@@ -200,25 +292,103 @@ pub(super) fn write(folders: &Folders, kind: Kind, w: Write) -> Answer {
     Ok(json!({"id": id, "replaced": w.replaces}))
 }
 
-/// Moves memory `id` into the retired tree, where search, get and the page no longer see it;
-/// with `forget`, the person's word, deletes it instead, words and all. It is one rename or
-/// removal, so of calls that retire one memory at once, one succeeds and the others are refused.
-pub(super) fn retire(folders: &Folders, id: &str, forget: bool) -> Answer {
-    if id == "wiki/_instructions" {
-        return Err(refuse(&TEXT.instructions));
-    }
-    let (path, to, _) = find(folders, id)?;
-    let done = match forget {
-        true => fs::remove_file(&path),
-        false => {
-            fs::create_dir_all(to.parent().unwrap_or(&to)).and_then(|_| fs::rename(&path, &to))
+/// Keeps every original citation and exact quotation when a rule replaces other rules.
+fn ruling(w: &mut Write, previous: &[Found]) -> Result<(), Error> {
+    let mut cites = Vec::new();
+    for found in previous {
+        let body = split(&found.file).1;
+        // Older files embedded the verified words before the agent's reading; this reader and
+        // `rule`'s fallback go once the one-time migration has retired every old-form ruling.
+        let old = body.rsplit_once("\"\n\nagent's reading:");
+        let legacy = old.and_then(|(said, _)| {
+            said.strip_prefix("the human said (")
+                .or_else(|| said.split_once("\"\n\nthe human said (").map(|(_, s)| s))
+                .and_then(|s| s.split_once("): \""))
+                .map(|(source, words)| (source, words.to_owned()))
+        });
+        let blocks = body.split("\n\n").skip(1).take_while(|_| old.is_none());
+        let current = blocks.filter_map(|block| {
+            let (source, words) = block.split_once('\n')?;
+            let lines = words.split('\n').map(|line| line.strip_prefix("> "));
+            Some((source, lines.collect::<Option<Vec<_>>>()?.join("\n")))
+        });
+        // A carried quotation keeps the source it was recorded under, a pre-Razor one included;
+        // only a new one must be the person's entry, which `cite` has checked.
+        let before = w.quotes.len();
+        let carried = legacy.into_iter().chain(current);
+        w.quotes
+            .extend(carried.map(|(source, words)| (source.to_owned(), words)));
+        if before == w.quotes.len() {
+            return Err(refuse(&TEXT.ruling_sources));
         }
-    };
-    done.map_err(|e| match e.kind() {
-        ErrorKind::NotFound => refuse(&TEXT.gone),
-        _ => other("retiring a memory file")(e),
-    })?;
-    Ok(json!({ "retired": id }))
+        let carried = |key| head(&found.file).filter(move |(k, _)| *k == key);
+        cites.extend(carried("cites").map(|(_, v)| v.to_owned()));
+        w.settles
+            .extend(carried("settles").map(|(_, v)| v.to_owned()));
+    }
+    w.quotes.sort();
+    w.quotes.dedup();
+    let sources = w.quotes.iter().map(|(source, _)| source.clone());
+    cites.extend(sources.filter(|source| citations::valid(source)));
+    if w.cites.iter().any(|c| !cites.contains(c)) {
+        return Err(refuse(&TEXT.ruling_sources));
+    }
+    cites.sort();
+    cites.dedup();
+    if cites.len() > 32 {
+        return Err(refuse(&TEXT.cites));
+    }
+    w.cites = cites;
+    for (source, words) in &w.quotes {
+        let quote = words
+            .split('\n')
+            .map(|line| format!("> {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        w.text += &format!("\n\n{source}\n{quote}");
+    }
+    if w.text.len() > 16 * 1024 {
+        return Err(refuse(&TEXT.too_long));
+    }
+    Ok(())
+}
+
+/// Moves memories `ids`, all in one scope, into the retired tree, where search, get and the page
+/// no longer see them; with `forget`, the person's word, deletes them instead, words and all.
+/// Every id is found, and its scope and a shared ruling's owner checked, before any file moves.
+/// Each move is one rename or removal, so of calls that retire one memory at once, one succeeds
+/// and the others are refused.
+pub(super) fn retire(folders: &Folders, ids: &[String], forget: bool) -> Answer {
+    let mut found = Vec::new();
+    for id in ids {
+        if id == "wiki/_instructions" {
+            return Err(refuse(&TEXT.instructions));
+        }
+        if let Some((name, false)) = folders.owners.get(id) {
+            return Err(refuse(&TEXT.owner.replace("{name}", name)));
+        }
+        let (path, to, _) = find(folders, id)?;
+        let first = found
+            .first()
+            .map(|(p, _): &(PathBuf, PathBuf)| p.starts_with(&folders.current[1]));
+        if first.is_some_and(|all| all != path.starts_with(&folders.current[1])) {
+            return Err(refuse(&TEXT.scope));
+        }
+        found.push((path, to));
+    }
+    for (path, to) in found {
+        let done = match forget {
+            true => fs::remove_file(&path),
+            false => {
+                fs::create_dir_all(to.parent().unwrap_or(&to)).and_then(|_| fs::rename(&path, &to))
+            }
+        };
+        done.map_err(|e| match e.kind() {
+            ErrorKind::NotFound => refuse(&TEXT.gone),
+            _ => other("retiring a memory file")(e),
+        })?;
+    }
+    Ok(json!({ "retired": ids }))
 }
 
 /// Writes `text` as `name` in `folder`, making it: a temporary dotfile, `sync_all`, then one
@@ -350,11 +520,20 @@ pub(super) fn read(path: &Path, id: &str) -> std::io::Result<Found> {
     if !meta.is_file() {
         return Err(ErrorKind::InvalidInput.into());
     }
-    let at = meta.modified()?;
+    let at = written(id).map_or_else(|| meta.modified(), Ok)?;
     let mut bytes = Vec::new();
     file.take(FILE).read_to_end(&mut bytes)?;
     let (id, file) = (id.into(), String::from_utf8_lossy(&bytes).into_owned());
     Ok(Found { id, at, file })
+}
+
+/// When a ruling, fact or note was written, from the stamp in its id; a file a fetch checks out
+/// is new on this disk, so its own time would make another home's old memory the newest.
+fn written(id: &str) -> Option<SystemTime> {
+    let (_, stamp) = id.split_once('-').filter(|_| !id.contains('/'))?;
+    let at = jiff::civil::DateTime::strptime("%Y%m%d-%H%M%S", stamp.get(..15)?).ok()?;
+    let at = at.to_zoned(jiff::tz::TimeZone::UTC).ok()?;
+    Some(at.timestamp().into())
 }
 
 /// A file's header and its text, lines ending in LF or CRLF; a file without a header is all
@@ -404,7 +583,14 @@ pub(super) fn kind(id: &str) -> &str {
 /// page line and any other by its text on one line, each at most 400 bytes.
 fn hits(found: &[Found], omitted: usize) -> Value {
     let hit = |f: &Found| {
-        let text = || words(split(&f.file).1);
+        let text = || match kind(&f.id) {
+            "ruling" => rule(split(&f.file).1).to_owned(),
+            _ => split(&f.file)
+                .1
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        };
         let summary = header(&f.file, "description").map_or_else(text, str::to_owned);
         let at = jiff::Timestamp::try_from(f.at).map(|t| t.strftime("%Y-%m-%dT%H:%M:%SZ"));
         let at = at.map(|at| at.to_string()).unwrap_or_default();
@@ -412,6 +598,33 @@ fn hits(found: &[Found], omitted: usize) -> Value {
         json!({"id": f.id, "kind": kind(&f.id), "summary": summary, "updated_at": at})
     };
     json!({"hits": found.iter().map(hit).collect::<Vec<_>>(), "omitted_count": omitted})
+}
+
+/// The rule line, or the agent's reading in a file written before rule lines.
+fn rule(body: &str) -> &str {
+    let text = body
+        .rsplit_once("\"\n\nagent's reading:")
+        .map_or(body, |(_, r)| r.trim_start());
+    text.lines().next().unwrap_or_default()
+}
+
+/// Whether `text` holds what looks like a secret: a word starting with a known key's prefix and at
+/// least 16 more of a key's characters, a key with no prefix in fal's shape (a UUID, a colon and
+/// at least 32 hex digits, the key found in memory on 9 November), or a PEM private-key block.
+fn secret(text: &str) -> bool {
+    let key = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    let long = |w: &str, k: &String| w.starts_with(k.as_str()) && w.len() >= k.len() + 16;
+    let found = |w: &str| TEXT.secret_keys.iter().any(|k| long(w, k));
+    let hex = |s: &str| s.bytes().all(|b| b.is_ascii_hexdigit());
+    let uuid = |s: &str| s.len() == 36 && [8, 13, 18, 23].iter().all(|&i| s.as_bytes()[i] == b'-');
+    let pair = |w: &str| {
+        w.split_once(':').is_some_and(|(id, secret)| {
+            uuid(id) && hex(&id.replace('-', "")) && secret.len() >= 32 && hex(secret)
+        })
+    };
+    text.contains(TEXT.secret_block.as_str())
+        || text.split(|c| !key(c)).any(found)
+        || text.split(|c| !key(c) && c != ':').any(pair)
 }
 
 /// Whether `c` separates words: anything but a letter or a digit.

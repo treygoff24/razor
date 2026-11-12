@@ -13,9 +13,8 @@ import time
 import uuid
 
 from websockets.asyncio.server import serve as listen
-from websockets.asyncio.client import connect
+from websockets.asyncio.client import unix_connect
 from websockets.exceptions import ConnectionClosed
-from server import published
 
 # With no script: words once the phone's audio comes, a hand-off, the voice saying the agent's
 # reply once it is given, and two seconds of use.
@@ -54,12 +53,13 @@ def serve(script=None, capture=None, *, port=0, refuse=None):
     """Yields the stand-in's URL. `session.start` must come first, and a command GPT-Live refuses
     (`invalid`) gets its error and ends the call, so that a flow sending one fails; then each event
     of `script` is sent in order. An event with `after` first waits for a command of that type it
-    has not yet waited for, `delay` waits that many seconds, `audio` names raw 24 kHz PCM sent in
-    20 ms frames `pace` seconds apart (0.02, real time, unless given; 0 sends them at once, as a
-    stalled network would), `drop` cuts the connection with no close, and anything else goes as
-    written. Appends, mute and unmute are acknowledged; `session.close` gets `session.closed` with
-    the latest usage. `capture` names a folder collecting the commands in commands.jsonl, each audio
-    as its byte count; `refuse` answers the handshake with that HTTP status instead."""
+    has not yet waited for, `delay` waits that many seconds, `run` names a function called then,
+    `audio` names raw 24 kHz PCM sent in 20 ms frames `pace` seconds apart (0.02, real time, unless
+    given; 0 sends them at once, as a stalled network would), `drop` cuts the connection with no
+    close, and anything else goes as written. Appends, mute and unmute are acknowledged;
+    `session.close` gets `session.closed` with the latest usage. `capture` names a folder collecting
+    the commands in commands.jsonl, each audio as its byte count; `refuse` answers the handshake
+    with that HTTP status instead."""
     capture = Path(capture) if capture else None
     if capture:
         capture.mkdir(parents=True, exist_ok=True)
@@ -75,6 +75,7 @@ def serve(script=None, capture=None, *, port=0, refuse=None):
                         await arrived.wait_for(lambda: seen.get(after, 0) > waited.get(after, 0))
                         waited[after] = waited.get(after, 0) + 1
                 await asyncio.sleep(event.pop("delay", 0))
+                event.pop("run", lambda: None)()
                 if event.pop("drop", False):
                     return ws.transport.abort()
                 pcm = Path(event.pop("audio")).read_bytes() if "audio" in event else b""
@@ -85,9 +86,6 @@ def serve(script=None, capture=None, *, port=0, refuse=None):
                     await asyncio.sleep(pace)
                 usage[0] = event.get("usage", usage[0])
                 if event:
-                    if capture:
-                        with (capture / "events.jsonl").open("a") as events:
-                            events.write(json.dumps({**event, "_at": time.monotonic()}) + "\n")
                     await ws.send(json.dumps(event))
 
         player = None
@@ -142,14 +140,14 @@ def serve(script=None, capture=None, *, port=0, refuse=None):
 
 
 async def phone(f, session, act=None, *, streaming=False, timeout=60):
-    """The phone's half of a call, through the real API; retain frames through socket close.
-    `act` can react to each frame; `streaming` sends PCM until Razor closes the socket."""
+    """The phone's half of a call, through the real API on the server's socket; retain frames
+    through socket close. `act` can react to each frame; `streaming` sends PCM until Razor closes
+    the socket."""
     home = f.home / ".razor"
-    address = published(home)
     key = (home / "device.key").read_text().strip()
     seen = []
-    async with connect(f"ws://{address}/v1/sessions/{session}/call", proxy=None,
-                       additional_headers={"Authorization": "Bearer " + key}) as ws:
+    async with unix_connect(str(home / "server.sock"), f"ws://localhost/v1/sessions/{session}/call",
+                            additional_headers={"Authorization": "Bearer " + key}) as ws:
         async def stream():
             while True:
                 await ws.send(bytes(960))

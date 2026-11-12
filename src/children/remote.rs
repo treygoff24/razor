@@ -48,6 +48,7 @@ impl Children {
                 effort,
                 speed,
                 in_place,
+                task,
                 input,
             } => {
                 native(&child.parent)?;
@@ -58,7 +59,7 @@ impl Children {
                     speed: Some(speed),
                     ..input
                 };
-                self.start_peer(controller, session, child, cwd, in_place, input)
+                self.start_peer(controller, session, child, cwd, in_place, (input, task))
                     .await
             }
             ChildRequest::Continue { session, mut input } => {
@@ -76,10 +77,20 @@ impl Children {
                 }
                 Ok(json!({}))
             }
-            ChildRequest::Settle { session, decision } => {
+            ChildRequest::Settle {
+                session,
+                decision,
+                report,
+            } => {
+                if report
+                    .as_ref()
+                    .is_some_and(|(_, _, closer)| closer.contains(['\n', '\r']))
+                {
+                    return refuse("A task's closer must be one line.");
+                }
                 let (_, child) = owned(controller, &session, server).await?;
                 let text = self
-                    .settle_git(controller, &session, &child, decision)
+                    .settle_git(controller, &session, &child, decision, report.as_ref())
                     .await?;
                 Ok(json!({"text":text}))
             }
@@ -124,7 +135,7 @@ impl Children {
         mut child: Child,
         cwd: PathBuf,
         in_place: bool,
-        mut input: Input,
+        (mut input, task): (Input, Option<u32>),
     ) -> Result<Value, Error> {
         native(&session)?;
         if child.worktree.is_some() {
@@ -139,30 +150,35 @@ impl Children {
                 input.model.clone(),
                 (input.effort, input.speed),
                 Some(session.clone()),
-                Some(child),
+                Some(child.clone()),
                 None,
             )
             .await?;
         if let Some(worktree) = &worktree {
             self.checkout(&session, worktree).await?;
         }
+        let task = controller
+            .memory()
+            .start(controller, &cwd, &session, &child, task)
+            .await;
         controller.admit(&session, input).await?;
-        Ok(json!({"session":session,"cwd":cwd,"branch":worktree.map(|_|branch(&session))}))
+        let mut answer =
+            json!({"session":session,"cwd":cwd,"branch":worktree.map(|_|branch(&session))});
+        if let Some(task) = task {
+            answer["task"] = task;
+        }
+        Ok(answer)
     }
 
-    /// Retires every descendant using the same owner-limited walk as close and tree.
+    /// Stops the tree, retires this session, then settles descendants before its checkout goes.
     pub(super) async fn retire(
         &self,
         controller: &Controller,
         session: &SessionId,
     ) -> Result<(), Error> {
-        let (local, mut failure) = descendants(controller, session, true).await;
-        for id in local {
-            if let Err(e) = controller.retire(&id).await {
-                failure = Some(e.into());
-            }
-        }
-        failure.map_or(Ok(()), Err)
+        controller.close(session).await?;
+        controller.retire(session).await?;
+        Box::pin(self.close_children(controller, &controller.summary(session).await?)).await
     }
 
     pub(super) async fn settle_git(
@@ -171,24 +187,48 @@ impl Children {
         session: &SessionId,
         child: &Child,
         decision: Decision,
+        report: Option<&(String, Option<u32>, String)>,
     ) -> Result<String, Error> {
         self.retire(controller, session).await?;
+        let dir = self.dir(session);
+        let path = dir.join("worktree");
+        let exists = child.worktree.is_some()
+            && fs::try_exists(&path)
+                .await
+                .map_err(other("finding the helper's worktree"))?;
+        let merge = decision == Decision::Merge;
         let mut text = String::new();
-        if let Some(worktree) = &child.worktree {
+        if let Some(worktree) = &child.worktree
+            && merge
+            && exists
+        {
+            text = git::merge(&worktree.origin, &branch(session)).await?;
+        }
+        if child.parent.address().is_some() {
+            let summary = controller.summary(session).await?;
+            let cwd = child.worktree.as_ref().map_or(&summary.cwd, |w| &w.origin);
+            let closer = report.map(|(_, _, closer)| closer.as_str());
+            let report = report.map(|(text, close, _)| (text.as_str(), *close));
+            let done = if merge { "Merged" } else { "Retired" };
+            controller
+                .memory()
+                .release(controller, cwd, (session, &child.name), report, closer)
+                .await
+                .map_err(|e| {
+                    Error::Refused(format!("{done}; the task step failed: {e}; settle again."))
+                })?;
+        }
+        if let Some(worktree) = &child.worktree
+            && exists
+        {
             let branch = branch(session);
-            if decision == Decision::Merge {
-                text = git::merge(&worktree.origin, &branch).await?;
+            if decision == Decision::Discard {
+                git::preserve(&path, &branch).await?;
             }
-            let dir = self.dir(session);
             let delete = (decision != Decision::Discard).then_some(branch.as_str());
-            let removed = git::remove(
-                &worktree.origin,
-                &dir.join("worktree"),
-                &dir.join("uncommitted"),
-                delete,
-            )
-            .await;
-            text += &removed.unwrap_or_else(|e| e.to_string());
+            let removed =
+                git::remove(&worktree.origin, &path, &dir.join("uncommitted"), delete).await;
+            text += &removed?;
         }
         Ok(text)
     }
@@ -572,15 +612,18 @@ pub(crate) async fn descendants(
 /// A child row from its parent's recorded facts, with no invented live fields.
 pub(crate) fn child(parent: &SessionId, fact: &ChildSummary) -> AgentView {
     let mut row = AgentView {
+        served_model: None,
         session: fact.session.clone(),
         parent: None,
         launched: None,
         name: String::new(),
+        avatar: None,
         model: String::new(),
         effort: Effort::Medium,
         speed: Speed::Standard,
         state: State::NeedsYou,
         closing: false,
+        closing_working: false,
         close_reason: None,
         headline: String::new(),
         last_reply: String::new(),

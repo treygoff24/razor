@@ -1,10 +1,12 @@
 //! Shared tasks and memory: each folder is a git checkout whose commits travel only on its
-//! own reference on the remote the person names.
+//! own reference on the remote the person names, each authored as the person who made it.
 //! A write runs against the remote's tasks as last fetched, and its push is the compare-and-swap:
 //! when another machine pushed first, the write's commit is dropped and the write runs again.
 
+use super::files::Owners;
 use super::{Answer, Error, TEXT, blocking, fill, other, refuse};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +19,7 @@ const NET: u64 = 60;
 
 /// Fetch, apply and push under the caller's lock. A raced push or a refusal on an older view
 /// retries against a new fetch, at most twice more. Without an operation this only refreshes.
+/// A shared change with no person to commit as is refused before anything changes.
 /// The bool reports remote changes even when the operation is refused.
 pub(super) async fn change<F>(
     root: &Path,
@@ -32,12 +35,18 @@ where
     let op = op.map(Arc::new);
     let mut synced = false;
     let answer = async {
+        let shared = matches!(remote, Ok(Some(_)));
+        let who = if shared { person(root).await } else { None };
+        if shared && who.is_none() && op.is_some() {
+            return Err(refuse(&TEXT.identity));
+        }
         let mut last = Ok(Value::Null);
         for round in 0..3 {
-            let fetch = round > 0 || stale(dir).await;
+            let fetch = round > 0 || op.is_none() || stale(dir).await;
             let url = match remote {
                 Ok(Some(name)) => {
-                    let (url, changed) = fresh(root, dir, name, fetch, reference).await?;
+                    let who = who.as_ref();
+                    let (url, changed) = fresh(root, dir, name, fetch, reference, who).await?;
                     synced |= changed;
                     Some(url)
                 }
@@ -48,7 +57,7 @@ where
             match (url, blocking(move || op()).await) {
                 (Some(_), Err(_)) if !fetch => {}
                 (Some(url), Ok(done)) => {
-                    last = push(dir, &url, &subject(&done), reference)
+                    last = push(dir, &url, &subject(&done), reference, who.as_ref())
                         .await?
                         .map(|()| done);
                     if last.is_ok() {
@@ -64,14 +73,77 @@ where
     (answer, synced)
 }
 
-/// Git in the task folder `dir` for at most `secs` seconds, with no hooks, no signing, Razor as
-/// the author, and credentials sent with the first request instead of after its refusal.
+/// Git in the task folder `dir` for at most `secs` seconds, with no hooks and no signing, and
+/// credentials sent with the first request instead of after its refusal.
 async fn git(dir: &Path, secs: u64, args: &[&str]) -> Result<String, Error> {
-    let fixed = "-c core.hooksPath=/dev/null -c commit.gpgSign=false -c http.proactiveAuth=basic \
-                 -c user.name=Razor -c user.email=razor@localhost";
+    let fixed = "-c core.hooksPath=/dev/null -c commit.gpgSign=false -c http.proactiveAuth=basic";
     let args: Vec<&str> = fixed.split(' ').chain(args.iter().copied()).collect();
     let ran = crate::children::git::timed(dir, secs, &args).await;
     ran.map_err(|e| refuse(&e.to_string()))
+}
+
+/// Git in `dir` running a command that commits, as `who`, the person, when known.
+async fn authored(dir: &Path, who: Who<'_>, args: &[&str]) -> Result<String, Error> {
+    let set = who.map(|(name, email)| [format!("user.name={name}"), format!("user.email={email}")]);
+    let flags = set.iter().flatten().flat_map(|s| ["-c", s.as_str()]);
+    let args: Vec<&str> = flags.chain(args.iter().copied()).collect();
+    git(dir, 10, &args).await
+}
+
+/// The person a shared change is committed as, their name and email.
+type Who<'a> = Option<&'a (String, String)>;
+
+/// Git's `user.name` and `user.email` in the project's checkout at `root`, included files and
+/// all; none when either is unset.
+pub(super) async fn person(root: &Path) -> Option<(String, String)> {
+    let get = async |key| git(root, 10, &["config", key]).await.ok();
+    let (name, email) = (get("user.name").await?, get("user.email").await?);
+    (!name.is_empty() && !email.is_empty()).then_some((name, email))
+}
+
+/// Who added each ruling to the memory checkout `dir`, by its id, in one history query: their
+/// name, and whether they are the person in `root`'s checkout. Renames are not followed, since a
+/// replacement holding its predecessor's words is a ruling of its own; of two additions of one
+/// file, the latest counts.
+pub(super) async fn owners(root: &Path, dir: &Path) -> Owners {
+    let me = person(root).await.map(|(_, email)| email);
+    let log =
+        "log --no-renames --diff-filter=A --name-only --format=%x00%an%x00%ae -- *ruling-*.md";
+    let log = git(dir, 10, &log.split(' ').collect::<Vec<_>>()).await;
+    let (mut owners, mut author) = (Owners::new(), None);
+    for line in log.unwrap_or_default().lines() {
+        if let Some((name, email)) = line.strip_prefix('\0').and_then(|l| l.split_once('\0')) {
+            author = Some((name.to_owned(), me.as_deref() == Some(email)));
+        } else if let (Some(author), Some(id)) = (&author, Path::new(line).file_stem()) {
+            let id = id.to_string_lossy().into_owned();
+            owners.entry(id).or_insert_with(|| author.clone());
+        }
+    }
+    owners
+}
+
+/// Everyone who has committed to the shared folder `dir`, each by name and email.
+pub(super) async fn people(dir: &Path) -> Vec<(String, String)> {
+    let log = git(dir, 10, &["log", "--format=%an%x00%ae"]).await;
+    let log = log.unwrap_or_default();
+    let people: BTreeSet<_> = log.lines().filter_map(|l| l.split_once('\0')).collect();
+    let owned = |(name, email): (&str, &str)| (name.to_owned(), email.to_owned());
+    people.into_iter().map(owned).collect()
+}
+
+/// The first commit of the shared folder `dir`, which every folder joined to its remote holds.
+pub(super) async fn first(dir: &Path) -> Option<String> {
+    let roots = git(dir, 10, &["rev-list", "--max-parents=0", "HEAD"])
+        .await
+        .ok()?;
+    roots.lines().last().map(str::to_owned)
+}
+
+/// Whether the origin of the checkout at `root` holds shared memory or tasks.
+pub(super) async fn offered(root: &Path) -> bool {
+    let refs = "ls-remote origin refs/razor/memory refs/razor/tasks".split(' ');
+    let found = git(root, NET, &refs.collect::<Vec<_>>()).await;
+    found.is_ok_and(|refs| !refs.is_empty())
 }
 
 /// `dir` brought up to the remote's tasks, fetched anew when `get`, else as last fetched, and
@@ -87,6 +159,7 @@ pub(super) async fn fresh(
     name: &str,
     get: bool,
     reference: &str,
+    who: Who<'_>,
 ) -> Result<(String, bool), Error> {
     let url = git(root, 10, &["remote", "get-url", "--", name]).await;
     let url = url.unwrap_or_else(|_| name.to_owned());
@@ -115,7 +188,7 @@ pub(super) async fn fresh(
     }
     if !git(dir, 10, &["status", "--porcelain"]).await?.is_empty() {
         git(dir, 10, &["add", "-A"]).await?;
-        git(dir, 10, &["commit", "-q", "-m", "edited by hand"]).await?;
+        authored(dir, who, &["commit", "-q", "-m", "edited by hand"]).await?;
     }
     match (rev(SEEN).await.is_some(), rev("HEAD").await.is_some()) {
         (false, _) => Ok(()),
@@ -123,7 +196,7 @@ pub(super) async fn fresh(
         (true, false) => git(dir, 10, &["reset", "-q", "--hard", SEEN])
             .await
             .map(|_| ()),
-        (true, true) if git(dir, 10, &["rebase", "-q", SEEN]).await.is_ok() => Ok(()),
+        (true, true) if authored(dir, who, &["rebase", "-q", SEEN]).await.is_ok() => Ok(()),
         (true, true) => {
             let _ = git(dir, 10, &["rebase", "--abort"]).await;
             Err(refuse(&fill(&TEXT.conflict, &[("dir", &dir.display())])))
@@ -144,15 +217,18 @@ pub(super) async fn push(
     url: &str,
     subject: &str,
     reference: &str,
+    who: Who<'_>,
 ) -> Result<Result<(), Error>, Error> {
     git(dir, 10, &["add", "-A"]).await?;
-    git(dir, 10, &["commit", "-q", "--allow-empty", "-m", subject]).await?;
+    authored(dir, who, &["commit", "-q", "--allow-empty", "-m", subject]).await?;
     let pushed = git(dir, NET, &["push", "-q", url, &format!("HEAD:{reference}")]).await;
     let Err(e) = pushed else { return Ok(Ok(())) };
     let kept = git(dir, 10, &["reset", "-q", "--keep", "HEAD~1"]).await;
     kept.map_err(|_| refuse(&fill(&TEXT.conflict, &[("dir", &dir.display())])))?;
-    // Git's mark for a push refused because the remote holds commits this folder lacks.
-    match e.to_string().contains("[rejected]") {
+    // Git's marks for a push that lost to another: the remote holds commits this folder lacks,
+    // or took them while this push was arriving.
+    let lost = e.to_string();
+    match lost.contains("[rejected]") || lost.contains("cannot lock ref") {
         true => Ok(Err(e)),
         false => Err(refuse(&fill(&TEXT.offline, &[("why", &e)]))),
     }

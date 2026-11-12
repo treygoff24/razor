@@ -70,12 +70,8 @@ fn edit(
 ) -> Result<String, Error> {
     let (path, project) = settings.destination(scope)?;
     let before = pack::text(&path, true)?;
-    let mut document: DocumentMut = before.parse().map_err(|e| {
-        Error::Invalid(format!(
-            "{} does not parse: {e}; repair it first.",
-            path.display()
-        ))
-    })?;
+    let mut document: DocumentMut = (before.parse())
+        .map_err(|e: toml_edit::TomlError| pack::unparsed(&path, &before, e.span(), e.message()))?;
     if args[0] == "set" {
         if keys.len() > 1
             && keys[0] == "models"

@@ -27,9 +27,17 @@ pub(super) fn valid(cite: &str) -> bool {
 
 impl Memory {
     /// The memories whose code is no longer simply on main, and references missing on disk.
-    pub(crate) async fn citations(&self, c: &Controller, cwd: &Path) -> String {
-        let scan = |p: Project| {
-            let found = files::best(&p.memory, 200, |_| true, |_| Some(0))?.0;
+    pub(crate) async fn citations(&self, c: &Controller, cwd: &Path, all: bool) -> String {
+        let scan = move |mut p: Project| {
+            if !all {
+                p.memory.current.truncate(1);
+            }
+            // The resident runs this pass, so its own layer's citations are checked too.
+            let own = p.resident.map(|r| p.memory.layer(Some(r.as_str())));
+            let mut found = Vec::new();
+            for memory in std::iter::once(&p.memory).chain(&own) {
+                found.extend(files::best(memory, 200, |_| true, |_| Some(0))?.0);
+            }
             let cites = found
                 .into_iter()
                 .flat_map(|f| {

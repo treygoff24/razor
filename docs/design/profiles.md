@@ -219,16 +219,72 @@ A corner both shapes share: on chat a web verb shows its `generic` text where it
 
 `bash-coord.json` loses `agent` and `message`, which now equal `tools.json`'s, and keeps its route and its three omits; `gemini-lean.json` holds only a route and does not change. Two evaluation variants carried the same kind of copy and are cut the same way: `coord.json`'s two copies equal the shared ones and go, and `gemini-window.json` keeps only what it changes (two descriptions, two property descriptions and `read`'s `required`). The maker aliases do not change. Every model's opening request, and every evaluation variant's, must render the same bytes before and after, so no profile version changes: a version names what a model sees, and a native conversation recorded before the change resumes after it.
 
-## Fable and the short GPT names (2026-10-30)
+## Model family names
 
-Trey, 2026-10-30: "astra and fable need to be supported as Razor native subagent model choices." `fable` joins opus, sonnet and haiku as a Claude name the bundled SDK resolves; it is listed by `models()` and recorded as written, as those three are. The short GPT names (sol for gpt-6.1-sol, terra for gpt-6.1-terra, luna for gpt-6-luna, astra for gpt-6-astra) are one table beside `MODELS`. Terra joined the same night (Trey: "dont forget abt our other GPT friend terra!!"), and a ChatGPT sign-in served gpt-6.1-terra a short turn before it was listed. One function reads the table:
+The family table in `models.rs` owns the current exact target of Fable, Opus,
+Sonnet, Haiku, Sol, Terra, Luna, Astra, Gemini, DeepSeek and GLM. [Models and sign-in](../models.md#family-names)
+says what people type; the routing and the alternatives follow.
 
 ```rust
-/// The id a model name stands for: a short GPT name's full id, any other name unchanged.
+/// Natural family spellings become a stable alias; wire IDs and unknown names pass through.
 pub fn id(name: String) -> String;
+/// The choice's route, resolving its family to the current exact endpoint ID.
+pub fn model(name: &str, config: &Config) -> Result<Model, Error>;
+/// The normalized choice's configured row, else its exact target's row; never a field merge.
+pub fn settings<'a>(name: &str, config: &'a Config) -> Option<&'a config::Model>;
 ```
 
-Each place a name enters Razor calls it once: the API's session create and input (the terminal's `--model`, `/model` and picker reach Razor only through these two), the `agent` tool's start and continue, the config's `model`, in `Config::parse`, which every machine and project file passes through, and a resident's heartbeat or schedule `model`, as its input is made (src/residents). The controller, the record, status and requests therefore only ever see full ids. `model` still refuses a short name, so a new entry that forgot `id` is refused at once instead of recording a name nothing else knows; its refusal names the Claude and short GPT names. `models()` keeps listing full ids, so the picker shows each GPT model once. The `agent` tool's `model` description, in `tools.json` and `claude.json`, gains one sentence naming the choices. That changes the declaration GPT code mode carries inside exec's description, so flow 28's pinned prefix digest moves and needs the real token measurement again; no profile version changes, as with an earlier revision's change to the same declaration.
+Every model entry uses `id`: session creation and input, agent start and continue,
+config defaults and model-row keys, and residents' schedules and heartbeats.
+Settings, records and status retain the alias; rendering a request profile resolves
+it. Exact native IDs remain pins. The picker lists families first, followed by
+chat and provider models, with no native versioned IDs. Its metadata also describes
+explicitly pinned defaults. The provider's actual model is the turn end's optional
+`served_model`, exposed in status separately from the choice; continuation still
+uses `model`. Flow 28 checks the distinction through real SDK calls and restarts.
+
+### Routing
+
+`profiles::id(String) -> String` normalizes names wherever they enter Razor: config's `model`, `call_model` and `[models]` keys at load; a session's creation, input and model switch; a helper's start; a resident's model and its schedules; `[memory] model` for dreaming; and the terminal's picker. Any other configured name, such as `[children] watcher`, is normalized when it is resolved.
+`profiles::model(&str, &Config) -> Result<Model, Error>` resolves that choice to
+the endpoint ID when a request profile is rendered. One family table in
+`profiles/models.rs` owns the targets. Updating a target moves existing family
+sessions on their next turn. Settings and Start, Input and turn-end `model` fields
+keep the chosen family. Exact IDs remain explicit pins; existing records are not
+rewritten.
+
+The same profile and context-fit checks apply to a family moving to a newer
+release as to a typed model switch. Native history is retained when it fits;
+the provider may refill its cache after the model changes. No cache namespace or
+second session setting is introduced. A turn-end's optional `served_model` records
+the actual ID reported by the provider, separately from the chosen name. Status
+shows the latest served ID beside the choice, including after restart. An absent
+provider ID stays absent rather than being inferred from the request.
+
+Every model-row lookup uses the normalized choice first, then its resolved ID.
+The first existing row wins as a whole; fields are not merged across both rows.
+An alias row overrides a versioned row without a duplicate-row error;
+two natural spellings of the same family remain a configuration error.
+
+The wire model list remains a list of strings, with lowercase aliases as its keys.
+The family table also holds each family's display name (`DeepSeek`, `GLM`), and
+`GET /v1/models` carries it as a `labels` map beside `windows`, `efforts` and
+`speeds`. Clients show `labels[key]` while sending the key; the terminal's model
+formatter reads the same table. Phone and Mac clients use the server's order, keep
+typed IDs, show `served_model` in model details, and capitalize the key only for an
+older Razor that sends no labels; they need no model catalog of their own.
+
+### Alternatives
+
+- Keeping full IDs in settings would pin old sessions when an alias moves.
+- Offering full IDs beside each family would keep the version clutter in pickers.
+- Separate normalizers in each client would disagree on natural spellings.
+- Merging alias and exact-ID rows field by field would make a setting's source
+  depend on two rows; whole-row precedence gives one source.
+- Replacing turn-end `model` with the served ID would change continuity's meaning
+  and silently pin sessions after resume. A separate optional fact preserves it.
+- Clients capitalizing the key themselves gives `Deepseek` and `Glm`; a label table
+  in each client would be a second home for the names.
 
 ## What agents are told, corrected (2026-11-02)
 

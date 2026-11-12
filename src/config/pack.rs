@@ -7,6 +7,7 @@ use serde::{Serialize, ser::SerializeStruct};
 use std::{
     collections::BTreeMap,
     io::{ErrorKind, Read, Write},
+    ops::Range,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
@@ -17,7 +18,7 @@ use toml::{Table, Value};
 const STARTER: &str = "packs/starter/config.toml";
 
 /// Keys only the person's file and the pack may set.
-const MACHINE: [&str; 27] = [
+const MACHINE: [&str; 28] = [
     "models",
     "providers",
     "provider_only",
@@ -25,6 +26,7 @@ const MACHINE: [&str; 27] = [
     "call_model",
     "call_effort",
     "server",
+    "network",
     "claude",
     "skills",
     "skill_updates",
@@ -62,6 +64,7 @@ pub(crate) struct Settings {
     pub(super) values: Table,
     /// Why the merged values do not make a Config, when each file alone does.
     invalid: Option<String>,
+    pub(crate) notices: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -153,10 +156,17 @@ impl Settings {
     /// The machine files; an invalid one refuses startup, and a missing person's file is empty.
     pub(crate) fn open(home: PathBuf) -> Result<Self, Error> {
         let settings = Self::for_edit(home)?;
-        match settings.errors.first() {
-            Some(error) => Err(Error::Invalid(error.clone())),
-            None => Ok(settings),
+        if let Some(error) = settings
+            .pack
+            .iter()
+            .chain([&settings.person])
+            .filter_map(|f| f.error.as_ref())
+            .chain(&settings.invalid)
+            .next()
+        {
+            return Err(Error::Invalid(error.clone()));
         }
+        Ok(settings)
     }
 
     pub(super) fn for_edit(home: PathBuf) -> Result<Self, Error> {
@@ -171,6 +181,7 @@ impl Settings {
             local: Vec::new(),
             values: Table::new(),
             invalid: None,
+            notices: Vec::new(),
         };
         settings.read();
         Ok(settings)
@@ -195,9 +206,10 @@ impl Settings {
         };
         for source in sources {
             let text = text(&source.path, source.kind != Kind::Pack)?;
-            let document: toml_edit::DocumentMut = text.parse().map_err(|e| {
-                Error::Invalid(format!("{} does not parse: {e}.", source.path.display()))
-            })?;
+            let document: toml_edit::DocumentMut =
+                text.parse().map_err(|e: toml_edit::TomlError| {
+                    unparsed(&source.path, &text, e.span(), e.message())
+                })?;
             if let Some(item) = document.get(keys[0]).and_then(|v| v.get(keys[1])) {
                 return Ok(Some(item.clone()));
             }
@@ -297,6 +309,7 @@ impl Settings {
         }
         self.invalid = match Config::parse(values.clone()).and_then(Config::check) {
             Ok(mut config) => {
+                self.notices = config.brand.load();
                 config.pack = self
                     .pack
                     .as_ref()
@@ -355,7 +368,13 @@ impl Settings {
 impl Serialize for Settings {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut state = serializer.serialize_struct("Settings", 4)?;
-        state.serialize_field("config", &self.values)?;
+        // Without `[network]`, whose relay addresses can hold a password and which no reader needs.
+        let config: BTreeMap<_, _> = self
+            .values
+            .iter()
+            .filter(|(k, _)| *k != "network")
+            .collect();
+        state.serialize_field("config", &config)?;
         state.serialize_field("project", &self.project)?;
         state.serialize_field("sources", &self.sources)?;
         state.serialize_field("errors", &self.errors)?;
@@ -468,22 +487,43 @@ pub(super) fn parse(
     project: bool,
 ) -> Result<(Table, Vec<PathBuf>), Error> {
     let shown = path.display();
-    let mut table: Table = text.parse().map_err(|e: toml::de::Error| {
-        Error::Invalid(format!("{shown} does not parse: {}.", e.message()))
-    })?;
+    let mut table: Table =
+        (text.parse()).map_err(|e: toml::de::Error| unparsed(path, text, e.span(), e.message()))?;
     allowed(&table, path, project)?;
     let variants = paths(&mut table, path.parent().unwrap_or(Path::new("/")))?;
     Config::parse(table.clone()).map_err(|e| Error::Invalid(format!("{shown}: {e}")))?;
     Ok((table, variants))
 }
 
+/// A file that does not parse: its path, where the mistake is and the parser's message, never the
+/// file's text, which can hold a relay's password.
+pub(super) fn unparsed(path: &Path, text: &str, span: Option<Range<usize>>, why: &str) -> Error {
+    let at = span
+        .and_then(|span| text.get(..span.start))
+        .map_or(String::new(), |before| {
+            let line = before.matches('\n').count() + 1;
+            let column = before
+                .rsplit('\n')
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .count()
+                + 1;
+            format!(" at line {line}, column {column}")
+        });
+    Error::Invalid(format!("{} does not parse{at}: {why}.", path.display()))
+}
+
 /// Refuses a key the file at `path` may not set: an unknown display field, `tasks` outside a
 /// project's private file, and in a project's file the person's and the machine's keys.
 fn allowed(table: &Table, path: &Path, project: bool) -> Result<(), Error> {
-    use crate::protocol::{Brand, Phone, Ui};
+    use crate::protocol::{Phone, Ui};
     let shown = path.display();
     for (name, default) in [
-        ("brand", serde_json::to_value(Brand::default())),
+        (
+            "brand",
+            serde_json::to_value(super::brand::Brand::default()),
+        ),
         ("ui", serde_json::to_value(Ui::default())),
         ("phone", serde_json::to_value(Phone::default())),
     ] {
@@ -500,13 +540,12 @@ fn allowed(table: &Table, path: &Path, project: bool) -> Result<(), Error> {
         let only = "only a project's .razor/config.local.toml names where its tasks go";
         return Err(Error::Invalid(format!("{shown} cannot set tasks; {only}.")));
     }
-    let memory_remote = table
-        .get("memory")
-        .and_then(Value::as_table)
-        .is_some_and(|t| t.contains_key("remote"));
+    // Nor whether it joins: one person's committed "no" must not decline for everyone who clones.
+    let memory = table.get("memory").and_then(Value::as_table);
+    let memory_remote = memory.is_some_and(|t| t.contains_key("remote") || t.contains_key("join"));
     if memory_remote && !(project && path.ends_with("config.local.toml")) {
         return Err(Error::Invalid(format!(
-            "{shown} cannot set memory.remote; only a project's .razor/config.local.toml names where its memory goes."
+            "{shown} cannot set memory.remote or memory.join; only a project's .razor/config.local.toml names where its memory goes."
         )));
     }
     if !project {
@@ -545,6 +584,10 @@ fn paths(table: &mut Table, dir: &Path) -> Result<Vec<PathBuf>, Error> {
         }
     };
     absolute(table.get_mut("pack"));
+    let brand = table.get_mut("brand").and_then(Value::as_table_mut);
+    for avatar in tables(brand.and_then(|b| b.get_mut("avatars"))) {
+        absolute(avatar.get_mut("file"));
+    }
     // A program named by a path, not by a bare name found on PATH, counts from its file too.
     for key in ["ask", "notify", "speech", "transcribe", "capture", "play"] {
         let program = list(table.get_mut(key)).next();
@@ -565,10 +608,12 @@ fn paths(table: &mut Table, dir: &Path) -> Result<Vec<PathBuf>, Error> {
     if let Some(claude) = table.get_mut("claude").and_then(Value::as_table_mut) {
         absolute(claude.get_mut("usage_file"));
     }
-    // The key file is this machine's; the folder is the other's, so it is taken as written.
-    if let Some(remote) = table.get_mut("remote").and_then(Value::as_table_mut) {
-        absolute(remote.get_mut("key"));
-    }
+    absolute(
+        table
+            .get_mut("push")
+            .and_then(Value::as_table_mut)
+            .and_then(|p| p.get_mut("fcm_credentials")),
+    );
     for key in ["development", "production"] {
         let push = table.get_mut("push").and_then(Value::as_table_mut);
         let key = push

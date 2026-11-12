@@ -102,10 +102,9 @@ impl Session {
                 || input.video.is_some());
         let entry = self.append(Body::Input(input.clone()), None).await?;
         // A fresh run's thread closes with the turn that answers its schedule.
-        self.done = self.done.or(self.record.summary().job());
-        if matches!(&input.from, Origin::Schedule { name, .. } if name == "dream") {
-            self.done = Some(entry);
-        }
+        self.done = self
+            .done
+            .or(self.record.summary().job().map(|j| (j, false)));
         if !self.wake(entry, &input) {
             self.pending.push_back((entry, input));
             // A closed session that is no child reopens on its next input.
@@ -166,24 +165,25 @@ impl Session {
     /// there, an idle session ends one that answers nothing, and 0 is returned.
     pub(in crate::controller) async fn done(&mut self, closeout: bool) -> Result<EntryId, Error> {
         if !closeout {
-            (self.done, self.conversation) = (Some(EntryId(0)), None);
+            (self.done, self.conversation) = (Some((EntryId(0), false)), None);
             return self.stop().await.map(|()| EntryId(0));
         }
         let owner = self
             .c
             .memory()
-            .state_owner(&self.c, &self.record.summary().cwd, &self.id)
+            .state_owner(&self.c, self.record.summary())
             .await
             .map_err(|e| Error::Invalid(e.to_string()))?;
         let state = match owner {
             Some(owner) => DONE_HOME.replace("{owner}", owner.as_str()),
             None => DONE_STATE.into(),
         };
+        let working = self.state == State::Working;
         let entry = self
             .admit(Command::Done.input(DONE.replace("{state}", &state)))
             .await?;
         self.c.write_draft(&self.id, String::new()).await?;
-        self.done = Some(entry);
+        self.done = Some((entry, working));
         self.publish_row();
         Ok(entry)
     }
@@ -215,7 +215,7 @@ impl Session {
             let owner = self
                 .c
                 .memory()
-                .state_owner(&self.c, &self.record.summary().cwd, &self.id)
+                .state_owner(&self.c, self.record.summary())
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("razor: session {} state owner: {e}", self.id);
@@ -292,7 +292,7 @@ impl Session {
             return invalid("This input was already taken, answered or withdrawn.");
         };
         self.pending.remove(at);
-        self.done.take_if(|done| *done == entry);
+        self.done.take_if(|(done, _)| *done == entry);
         let inputs = vec![entry];
         self.append(Body::Withdrawn { inputs }, None).await?;
         self.c.inner.space.notify_waiters();

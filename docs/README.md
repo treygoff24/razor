@@ -15,6 +15,7 @@ These pages describe the Razor they ship with. In a standard install this index 
 - [Memory](memory.md): what each project keeps across sessions, how your decisions become rulings, tasks, and where the files are.
 - [Always-on agents and schedules](always-on-agents.md): an agent that runs as part of the server and wakes at set times, and the API calls that control it.
 - [More machines](machines.md): pairing the Razor servers on several machines, so each shows and reaches the other's agents.
+- [Your own relay](relay.md): running the server that carries traffic between your devices when they cannot connect directly.
 - [Browser, voice and search](browser-voice-search.md): the browser and desktop apps agents drive, replies read aloud, voice notes, and the web search providers.
 - [Using Razor from scripts](scripting.md): `razor --print` and its JSON and streamed output, keeping a conversation across calls, the local API with its routes, and keys for other programs.
 

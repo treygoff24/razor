@@ -39,14 +39,14 @@ Each flow prints `PASS 02-session` or its failure, then a `FLOW` line with its t
 
 ## The gate
 
-One script runs everything a change must pass: the line budgets, `cargo fmt`, `cargo clippy` with warnings denied, debug and release builds, the bridge's type check, `shellcheck`, every flow, and the performance limits on the release build.
+One script runs everything a change must pass: the line budgets, DESIGN.md's colours against the terminal's theme, `cargo fmt`, `cargo clippy` with warnings denied, debug and release builds, the bridge's type check, `shellcheck`, every flow, and the performance limits on the release build.
 
 ```sh
 scripts/gate.sh
 scripts/gate.sh --static    # everything but the flows
 ```
 
-The flows need the tools they start: Rust with a C compiler, Git, Node 22.18 or later, Python 3 with `venv`, the `openssl` command, and, for flow 45 only, [Post](https://github.com/treygoff24/post) (`post` on your `PATH`); `ffmpeg` is used if present. The gate adds `shellcheck`. It runs on Linux.
+The flows need the tools they start: Rust with a C compiler, Git, Node 22.18 or later, Python 3 with `venv`, the `openssl` command, and, for flow 45 only, [Post](https://github.com/treygoff24/post) (`post` on your `PATH`); `ffmpeg` is used if present; the first run installs the iroh relay (`iroh-relay`, at the version in `Cargo.lock`) beside the build, which the network flows start for the run. The gate adds `shellcheck`. It runs on Linux.
 
 ## Sending a change
 
@@ -63,6 +63,8 @@ Reviews here subtract. A review comment asks for something to be deleted, merged
 These are the words the code and its reviews use beyond [the glossary in Concepts](concepts.md#glossary); together the two lists are the whole vocabulary.
 
 ### Models and the API
+
+- **network**: the crate that connects Razor's machines over iroh: the endpoint, admission, pairing and the HTTP client that the server and the apps share.
 
 - **request**: what is sent to a model for one step, rendered from the record. A **response** is one model reply on Razor's own loop: the output items of one request, recorded whole once complete, or not at all.
 - **native conversation**: a model path's own conversation inside a session (on the Claude path, the SDK's). A rebuild starts a new one.

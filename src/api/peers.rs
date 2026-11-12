@@ -201,32 +201,42 @@ impl Peers {
     }
 }
 
-/// Runs beside serving; dropping the server drops the JoinSet and all peer readers.
+/// Runs beside serving; dropping the server drops the JoinSet and all peer readers. The paired
+/// set changes only by a pairing, `provider_only` turning off, or a reader ending at revocation.
 pub(super) async fn run(app: App) {
     let mut tasks = JoinSet::new();
-    let mut refresh = tokio::time::interval(Duration::from_secs(5));
     loop {
-        tokio::select! {
-            _ = refresh.tick() => {
-                for (device,mut gone) in app.devices.paired().await {
-                    let name = device.name.clone();
-                    if app.peers.rows.read().await.contains_key(&name) { continue; }
-                    let host = device.address.as_deref().unwrap_or_default().rsplit_once(':').map_or("",|a| a.0).to_owned();
-                    let mut peer = Peer {
-                        server: Server { name:name.clone(), machine:host, silent:Some(now()), ..Default::default() },
-                        agents:BTreeMap::new(), deliveries:Vec::new(), seen:now(), bytes:0,
-                    };
-                    peer.recount();
-                    app.peers.rows.write().await.insert(name.clone(), peer);
-                    let running = app.clone();
-                    tasks.spawn(async move {
-                        tokio::select! { () = read(running.clone(),device) => {}, _ = gone.changed() => {} }
-                        running.peers.rows.write().await.remove(&name);
-                        let _ = running.peers.changed.send(Live::Server(Box::default()));
-                    });
-                    let _ = app.peers.changed.send(Live::Server(Box::default()));
-                }
+        for (device, mut gone) in app.devices.paired().await {
+            let name = device.name.clone();
+            if app.peers.rows.read().await.contains_key(&name) {
+                continue;
             }
+            let server = Server {
+                name: name.clone(),
+                silent: Some(now()),
+                ..Default::default()
+            };
+            let (agents, deliveries) = (BTreeMap::new(), Vec::new());
+            let (seen, bytes) = (now(), 0);
+            let mut peer = Peer {
+                server,
+                agents,
+                deliveries,
+                seen,
+                bytes,
+            };
+            peer.recount();
+            app.peers.rows.write().await.insert(name.clone(), peer);
+            let running = app.clone();
+            tasks.spawn(async move {
+                tokio::select! { () = read(running.clone(),device) => {}, _ = gone.changed() => {} }
+                running.peers.rows.write().await.remove(&name);
+                let _ = running.peers.changed.send(Live::Server(Box::default()));
+            });
+            let _ = app.peers.changed.send(Live::Server(Box::default()));
+        }
+        tokio::select! {
+            () = app.devices.grown.notified() => {}
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
         }
     }
@@ -235,19 +245,24 @@ pub(super) async fn run(app: App) {
 async fn read(app: App, device: Device) {
     loop {
         let _: Option<()> = async {
-            let request =
-                app.devices
-                    .request(&device, Method::GET, "/v1/status?local=true&heartbeat=true");
-            let response = tokio::time::timeout(Duration::from_secs(2), request.send())
-                .await
-                .ok()?
-                .ok()?
-                .error_for_status()
+            let request = axum::http::Request::get("/v1/status?local=true&heartbeat=true")
+                .body(axum::body::Bytes::new())
                 .ok()?;
+            let response = tokio::time::timeout(
+                Duration::from_secs(2),
+                app.devices
+                    .request(&device, request, razor_network::Connect::Cached),
+            )
+            .await
+            .ok()?
+            .ok()?;
+            if !response.status().is_success() {
+                return None;
+            }
             // Subscribe before loading the page, closing the delivery race.
             deliveries(&app, &device).await;
-            let bytes = response
-                .bytes_stream()
+            let bytes = Body::new(response.into_body())
+                .into_data_stream()
                 .map(|b| b.map_err(std::io::Error::other));
             let mut reader = BufReader::new(StreamReader::new(bytes));
             let mut line = Vec::new();
@@ -399,9 +414,9 @@ pub(super) async fn relay(
     request: Request,
     path: &str,
 ) -> Result<Response, Refusal> {
-    let mut outgoing = app
-        .devices
-        .request(device, request.method().clone(), path)
+    let mut outgoing = axum::http::Request::builder()
+        .method(request.method().clone())
+        .uri(path)
         .header(HOP, "1");
     for h in [header::CONTENT_TYPE, header::RANGE, header::IF_RANGE] {
         if let Some(value) = request.headers().get(&h) {
@@ -411,17 +426,33 @@ pub(super) async fn relay(
     let body = axum::body::to_bytes(request.into_body(), BODY_BYTES)
         .await
         .map_err(|_| bad("The forwarded input exceeds 32 MiB; shorten it."))?;
-    send(outgoing.body(body)).await
+    let outgoing = outgoing
+        .body(body)
+        .map_err(other("Making paired request"))?;
+    send(app, device, outgoing).await
 }
 
-async fn send(outgoing: reqwest::RequestBuilder) -> Result<Response, Refusal> {
-    let Ok(Ok(response)) = tokio::time::timeout(Duration::from_secs(30), outgoing.send()).await
-    else {
-        return Err(Refusal(
-            StatusCode::BAD_GATEWAY,
-            "The paired request did not finish; check its transcript before sending again.".into(),
-        ));
-    };
+async fn send(
+    app: &App,
+    device: &Device,
+    outgoing: axum::http::Request<axum::body::Bytes>,
+) -> Result<Response, Refusal> {
+    let answer = tokio::time::timeout(
+        Duration::from_secs(30),
+        app.devices
+            .request(device, outgoing, razor_network::Connect::Cached),
+    )
+    .await;
+    let unavailable =
+        || "The paired request did not finish; check its transcript before sending again.".into();
+    let response = answer
+        .map_err(|_| Refusal(StatusCode::BAD_GATEWAY, unavailable()))?
+        .map_err(|error| {
+            Refusal(
+                StatusCode::BAD_GATEWAY,
+                Devices::refusal(&device.name, &error).unwrap_or_else(unavailable),
+            )
+        })?;
     let mut output = Response::new(Body::empty());
     *output.status_mut() = response.status();
     for h in [
@@ -434,7 +465,7 @@ async fn send(outgoing: reqwest::RequestBuilder) -> Result<Response, Refusal> {
             output.headers_mut().insert(h, value.clone());
         }
     }
-    *output.body_mut() = Body::from_stream(response.bytes_stream());
+    *output.body_mut() = Body::new(response.into_body());
     Ok(output)
 }
 
@@ -485,19 +516,26 @@ pub(super) async fn voice(
     let Some((device, _)) = app.peers.owner(app, owner).await else {
         return Err(bad("The voice settings owner is unknown; write instead."));
     };
-    let request = app
-        .devices
-        .request(&device, method, &format!("/v1/voice/{action}"))
+    let request = axum::http::Request::builder()
+        .method(method)
+        .uri(format!("/v1/voice/{action}"))
         .header(HOP, "1")
-        .timeout(Duration::from_secs(30))
-        .json(&body);
-    let response = send(request)
-        .await
-        .map_err(|_| bad("The voice settings owner is unavailable; write instead."))?;
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), 64 << 10)
-        .await
-        .map_err(other("Reading voice owner answer"))?;
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Bytes::from(
+            serde_json::to_vec(&body).map_err(other("Encoding voice request"))?,
+        ))
+        .map_err(other("Making voice request"))?;
+    let (status, bytes) = tokio::time::timeout(Duration::from_secs(30), async {
+        let response = send(app, &device, request).await?;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 << 10)
+            .await
+            .map_err(other("Reading voice owner answer"))?;
+        Ok::<_, Refusal>((status, bytes))
+    })
+    .await
+    .map_err(|_| bad("The voice settings owner is unavailable; write instead."))?
+    .map_err(|_| bad("The voice settings owner is unavailable; write instead."))?;
     let answer: Value =
         serde_json::from_slice(&bytes).map_err(other("Reading voice owner answer"))?;
     if !status.is_success() {

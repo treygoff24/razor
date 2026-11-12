@@ -85,8 +85,6 @@ for marker,text,requested in (("VOICE51",spoken,False),("OFF51","off",True),("DE
 with apple(scratch) as apple_server:
     config = PLAIN + f'''speech = {json.dumps([sys.executable,str(program)])}
 play = {json.dumps([sys.executable,str(player),str(played),"{rate}"])}
-[server]
-address = "127.0.0.1:0"
 [push]
 team = "FLOWTEAM48"
 bundle = "com.example.razor"
@@ -107,12 +105,10 @@ clear = []
         settings = api(home,"GET","/voice")
         assert api(home,"POST","/voice/reserve")["settings"] == settings
         assert "HH:MM" in api(home,"PUT","/voice",{**settings,"quiet":{"from":"25:00","to":"08:00"}},expected=400)["error"]
-        enrolled = f.run("devices","add","phone")
-        assert enrolled.returncode == 0, enrolled.stderr
-        phone_key = enrolled.stdout.splitlines()[1]
-        assert server.send(f,"PUT","/devices/self/push",{"token":"aa51","environment":"development"},key=phone_key).status == 200
+        phone = server.phone(f,"phone")
+        assert server.send(phone,"PUT","/devices/self/push",{"token":"aa51","environment":"development"}).status == 200
         # At `all`, every finish is sent, so the check below sees the note take its turn's place.
-        assert server.send(f,"PUT","/devices/self/notifications",{"level":"all"},key=phone_key).status == 200
+        assert server.send(phone,"PUT","/devices/self/notifications",{"level":"all"}).status == 200
         made = server.post(f,"/sessions",{"cwd":str(f.cwd)})["session"]
 
         def turn(marker):
@@ -318,14 +314,10 @@ clear = []
         for name in ("auth.json","config.toml"):
             (other/name).write_bytes((home/name).read_bytes())
         beta = replace(f,env={**f.env,"RAZOR_HOME":str(other)})
-        assert beta.run("devices").returncode == 0
-        address = wait(lambda: json.loads((other/"server.json").read_text())["address"])
-        paired = f.run("devices","add","b","--address",address)
-        counterpart = paired.stdout.splitlines()[-1].split()
-        assert beta.run("devices","add","a",*counterpart[4:]).returncode == 0
+        server.pair(f,beta,"b","a")
         owner_id = (home/"server.id").read_text().strip()
         config_path = other/"config.toml"
-        config_path.write_text(config_path.read_text().replace('[server]\n',f'[server]\nshared = "{owner_id}"\n'))
+        config_path.write_text(config_path.read_text()+f'[server]\nshared = "{owner_id}"\n')
         try:
             settings.update(daily_characters=used+7+20)
             api(home,"PUT","/voice",settings)

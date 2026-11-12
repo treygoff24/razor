@@ -6,11 +6,91 @@ import json
 import os
 import signal
 import server
+import re
+from dataclasses import replace
+from pathlib import Path
 
+from claude import reply as claude
 from driver import Reply, flow
 from mcp import PNG
 from responses import done, response
 from terminal import Terminal
+
+# Families are stable choices; requests resolve them, while provider-reported IDs stay facts.
+families = ["fable", "opus", "sonnet", "haiku", "sol", "terra", "luna", "astra", "gemini", "deepseek", "glm"]
+source_models = Path(__file__).parents[1] / "src/profiles/models.rs"
+targets = dict(re.findall(r'\("(' + "|".join(families) + r')", "[^"]+", "([^"]+)"\)', source_models.read_text()))
+sdk = Path(__file__).parents[1] / "bridge/node_modules/@anthropic-ai"
+catalog = next(sdk.glob("claude-agent-sdk-*/claude")).read_bytes()
+for family in families[:4]:
+    assert f'{family.upper()}_ID:"{targets[family]}"'.encode() in catalog, (family, targets[family])
+del catalog
+served = "claude-fable-5-2-served"
+reply = claude(text="FAMILY_28")
+reply = replace(reply, body=reply.body.replace(b'claude-opus-4-8', served.encode()))
+with flow([reply] * 4 + [done()], model="Claude Fable", config='[models.fable]\nwindow = 123456\n[models.claude-fable-5-2]\nwindow = 234567\n') as f:
+    for index, spelling in enumerate(("Claude Fable", "fable", "Fable"), 1):
+        session = f.ask(*(["--model", spelling] if index > 1 else []), "Use the family.")["session"]
+        entries = list(f.record(session))
+        assert entries[0]["model"] == entries[-1]["model"] == "fable", entries
+        assert f.request(index)["model"] == "claude-fable-5-2", f.request(index)
+        assert entries[-1]["served_model"] == served and entries[-1]["window"] == 123456, entries[-1]
+    offered = json.loads(server.send(f, "GET", "/models").read())
+    assert offered["models"][:11] == families and not any(n.startswith(("claude-", "gpt-", "gemini-", "deepseek-", "glm-")) for n in offered["models"]), offered
+    assert offered["labels"] == dict(zip(families, ["Fable", "Opus", "Sonnet", "Haiku", "Sol", "Terra", "Luna", "Astra", "Gemini", "DeepSeek", "GLM"])), offered
+    config = f.home / ".razor/config.toml"
+    config.write_text(config.read_text().replace('[models.fable]\nwindow = 123456\n', ''))
+    # The exact-ID row applies when the family has no row, including after a native resume.
+    pid = server.start(f)
+    os.kill(pid, signal.SIGTERM)
+    server.gone(pid)
+    server.start(f)
+    row = json.loads(server.send(f, "GET", f"/sessions/{session}/agent").read())
+    assert row["model"] == "fable" and row["served_model"] == served, row
+    f.ask("--resume", session, "Keep the conversation.")
+    entries = list(f.record(session))
+    assert entries[-1]["model"] == "fable" and entries[-1]["window"] == 234567, entries[-1]
+    row = json.loads(server.send(f, "GET", f"/sessions/{session}/agent").read())
+    assert row["model"] == "fable" and row["served_model"] == served, row
+    assert not any(e["kind"] == "rebuild" for e in entries), entries
+    with Terminal(f, "--resume", session) as t:
+        t.shown("FAMILY_28")
+        t.send("/status\r")
+        t.shown("served", served)
+        t.send("\x1b")
+        t.shown("FAMILY_28")
+        t.send("/model\r")
+        t.shown("▸ Fable", "Opus")
+        assert served not in t.text(), t.text()
+        t.send("\x1b")
+        t.until(lambda t: "▸ Fable" not in t.text())
+        t.send("/model GPT 6.1 Sol\rTYPED_FAMILY_28\r")
+        t.shown("flow done")
+    entries = list(f.record(session))
+    assert f.request(5)["model"] == "gpt-6.1-sol" and entries[-1]["model"] == "sol", entries[-1]
+    assert next(e for e in entries if e.get("text") == "TYPED_FAMILY_28")["model"] == "sol", entries
+
+reply = done()
+reply = replace(reply, body=reply.body.replace(b'"status": "completed"', b'"status": "completed", "model": "gpt-6.1-sol-served"'))
+with flow([reply] * 3, model="GPT 6.1 Sol") as f:
+    for index, spelling in enumerate(("GPT 6.1 Sol", "sol"), 1):
+        session = f.ask(*(["--model", spelling] if index > 1 else []), "Use Sol.")["session"]
+        entries = list(f.record(session))
+        assert entries[0]["model"] == entries[-1]["model"] == "sol", entries
+        assert f.request(index)["model"] == "gpt-6.1-sol", f.request(index)
+        assert entries[-1]["served_model"] == "gpt-6.1-sol-served", entries[-1]
+    pid = server.start(f)
+    os.kill(pid, signal.SIGTERM)
+    server.gone(pid)
+    f.ask("--resume", session, "Keep Sol.")
+    assert f.request(3)["model"] == "gpt-6.1-sol" and not any(e["kind"] == "rebuild" for e in f.record(session))
+    # Unknown names keep their spelling in the refusal; provider IDs keep theirs on the wire.
+    refused = f.run("--print", "--model", "Unknown Family", "Check a name.")
+    assert refused.returncode != 0 and "Unknown Family" in refused.stderr, refused
+
+with flow([done()], model="gateway/Claude Fable", config='[providers.gateway]\nformat = "responses"\nbase_url = "{standin}"\n[models."gateway/Claude Fable"]\nwindow = 200000\n') as f:
+    session = f.ask("Use a provider.")["session"]
+    assert f.request(1)["model"] == "Claude Fable" and next(f.record(session))["model"] == "gateway/Claude Fable"
 
 source = 'text("flow exec 🪶"); text(await tools.web__run({search_query: [{q: "flow kingfisher"}]}))'
 items = [
@@ -76,7 +156,9 @@ with flow(replies, model="gpt-6.1-sol", config='startup = ["razor", "project"]\n
     # system prompt to let agents know about agent browser and agent desktop").
     # 12,226 with the agent tool's start_top (Trey, 2026-11-06: top-level agents "spin up other
     # root level agents for me").
-    assert estimate <= 12_226, estimate
+    # 12,248 with "if that call would be a wait, end the turn instead" (2026-11-10): an answer
+    # written before a wait was lost in thinking 8/18 (Fable) and 10/18 (Opus), 0/18 for each after.
+    assert estimate <= 12_248, estimate
     offered = next(i for i in prefix if i["type"] == "additional_tools")["tools"]
     tools = next(t for t in offered if t["name"] == "functions")["tools"]
     assert {t["name"] for t in tools} == {"exec", "wait"}, tools
@@ -175,6 +257,6 @@ with flow([]) as f:
         config.write_text(original + f'\n[models.opus]\n{field}\n')
         refused = f.run("serve")
         assert refused.returncode != 0 and "positive window" in refused.stderr, refused
-    config.write_text(original + '\n[models.sol]\nthreshold = 0.5\n[models."gpt-6.1-sol"]\nthreshold = 0.6\n')
+    config.write_text(original + '\n[models.sol]\nthreshold = 0.5\n[models."GPT Sol"]\nthreshold = 0.6\n')
     refused = f.run("serve")
     assert refused.returncode != 0 and "same model" in refused.stderr, refused

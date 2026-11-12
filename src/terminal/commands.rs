@@ -24,7 +24,8 @@ pub fn run(app: &mut App) {
     app.composer = typed;
     match word {
         "/name" if args.is_empty() => app.say("Use /name <new name> to rename this session."),
-        "/name" => rename(app, args.to_owned()),
+        "/name" => rename(app, "name", args.to_owned()),
+        "/avatar" => rename(app, "avatar", args.to_owned()),
         "/fast" | "/ultrafast" => {
             picker::fast(app, word, args);
             clear(app);
@@ -148,13 +149,13 @@ fn attach(app: &mut App, name: &str) {
     }
 }
 
-// `/name`: the addressed session takes `name` now.
-fn rename(app: &mut App, name: String) {
+// `/name` and `/avatar`: the addressed session takes the new value now.
+fn rename(app: &mut App, field: &'static str, name: String) {
     let Some(id) = app.focus.clone() else {
-        return app.say("No session has started yet, so there is nothing to rename.");
+        return app.say("Start a session before changing its name or avatar.");
     };
     if app.write(|api| async move {
-        let renamed = api.rename(&id, name).await;
+        let renamed = api.rename(&id, field, name).await;
         move |app: &mut App| renamed.err().iter().for_each(|e| app.say(&e.to_string()))
     }) {
         clear(app);

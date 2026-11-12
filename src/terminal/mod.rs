@@ -74,6 +74,7 @@ pub async fn run(
     home: PathBuf,
     agents: bool,
 ) -> Result<(), Error> {
+    let session = session.map(|s| s.on(&server.server));
     let (done, mut finished) = mpsc::channel(16);
     // At most 16 lines in flight and 8 MiB of their bytes, or one larger whole entry alone.
     let (lines, mut incoming) = mpsc::channel(16);
@@ -83,7 +84,7 @@ pub async fn run(
     );
     api.stream(None, 0, lines.clone(), budget.clone());
     let mut app = App::new(api, done, lines, budget, server.cwd);
-    app.remote = server.remote;
+    app.server = server.server;
     // At most eight audio effects wait; a recording's levels skip a draw rather than wait.
     let (sender, mut audio) = mpsc::channel(8);
     #[cfg(target_os = "macos")]
@@ -268,7 +269,6 @@ fn error(context: impl Into<String>) -> Error {
 /// streams; drafts and emoji history belong to the API, and the rest is disposable.
 #[derive(Default)]
 struct App {
-    remote: bool,
     // At most one voice note and one player, and their programs' newest task.
     audio: audio::Audio,
     bindings: bindings::Bindings,

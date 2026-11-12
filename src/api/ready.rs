@@ -6,7 +6,6 @@ use super::{Error, KEY, LOCAL, SOCKET, client::answering};
 use crate::config::{Config, setup};
 use crate::profiles::{self, Model, Transport};
 use crate::{claude, protocol::SessionId, residents, responses::Responses, tools::web};
-use serde_json::Value;
 use std::{collections::BTreeMap, io::IsTerminal, path::Path, time::Duration};
 
 /// `razor doctor`: one line for each thing Razor runs on, found or missing with what to do, a
@@ -32,15 +31,34 @@ pub async fn doctor(home: &Path) -> Result<(), Error> {
     }
     match &config {
         Err(e) => println!("Settings: invalid. {e} Edit the named file, then run razor doctor."),
-        Ok(config) => println!("Pairing: {}", pairing(home, &config.server).await),
+        Ok(config) if config.server.address.is_some() => println!(
+            "Settings: server.address is no longer used; remove address under [server] in {}.",
+            home.join("config.toml").display()
+        ),
+        Ok(_) => {}
     }
     programs(home).await;
     let client = reqwest::Client::builder().unix_socket(home.join(SOCKET));
     let client = client.timeout(Duration::from_secs(2)).build().ok();
     if let Some(client) = &client
-        && answering(home, client).await.is_some()
+        && let Some(key) = answering(home, client).await
     {
         println!("Server: running.");
+        let lines = super::client::json::<Vec<String>>(
+            client
+                .get(format!("{LOCAL}/v1/network"))
+                .bearer_auth(key)
+                .timeout(Duration::from_secs(130)),
+        )
+        .await;
+        match lines {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+            Err(e) => println!("Network: diagnostics unavailable. {e}"),
+        }
     } else if config.is_ok() {
         println!("Server: stopped; your next razor command starts it.");
     }
@@ -68,36 +86,6 @@ pub async fn doctor(home: &Path) -> Result<(), Error> {
     }
     println!("Razor can run on {}.", config.model);
     Ok(())
-}
-
-/// Doctor's word on pairing: whether this server answers at `server.address` under its name.
-async fn pairing(home: &Path, server: &crate::config::Server) -> String {
-    let settings = home.join("config.toml");
-    let settings = settings.display();
-    let Some(address) = &server.address else {
-        return format!(
-            "no reachable server address; run razor setup with Tailscale running, or set address under [server] in {settings}."
-        );
-    };
-    let listening = async {
-        let probe = reqwest::Client::builder().no_proxy();
-        let probe = probe.timeout(Duration::from_secs(2)).build().ok()?;
-        let reply = probe
-            .get(format!("http://{address}/v1/pair"))
-            .send()
-            .await
-            .ok()?;
-        let identity: Value = reply.error_for_status().ok()?.json().await.ok()?;
-        Some(identity["name"] == server.name)
-    };
-    match listening.await {
-        Some(true) => {
-            format!("listening at {address} (reachability from other machines untested).")
-        }
-        _ => format!(
-            "not listening at {address}; check Tailscale and address/name under [server] in {settings}, then run razor restart."
-        ),
-    }
 }
 
 /// Doctor's line for each program agents drive: the browser and the desktop daemon.

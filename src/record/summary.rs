@@ -91,6 +91,7 @@ pub(crate) struct Summary {
     pub(crate) last_end: Option<End>,
     /// The model the latest turn end naming one ran on, the open conversation's.
     pub(crate) ran: Option<String>,
+    pub(crate) served_model: Option<String>,
     /// Each list keeps four ids through the latest rebuild cut, plus ids after that cut.
     pub(crate) asks: Vec<EntryId>,
     pub(crate) parent_inputs: Vec<EntryId>,
@@ -116,6 +117,7 @@ pub(crate) struct Summary {
     /// The name the session answers to, fixed by its Start: a child's own, a root's stored one,
     /// else its id's (`SessionId::name`), so a record from before keeps the name it showed.
     pub(crate) name: String,
+    pub(crate) avatar: Option<String>,
     /// One small row per child ever started; settled rows remain addressable in the tree.
     pub(crate) children: Vec<ChildSummary>,
     pub(crate) headline: String,
@@ -140,6 +142,8 @@ pub(crate) struct Summary {
     pub(crate) mail_questions: Vec<MailId>,
     /// Latest due time per schedule name, at most 64 names; a new name evicts the stalest due.
     pub(crate) scheduled: BTreeMap<String, Millis>,
+    /// Its own input came from the `dream` schedule; a resident's home that started a dream did not.
+    pub(crate) dream: bool,
     /// The latest turn end closed the session and no input has come since: it stays closed
     /// until its next input, across a reload too.
     pub(crate) closed: bool,
@@ -171,7 +175,7 @@ impl Summary {
             resident_project: thread.and_then(|t| t.resident_project.clone()),
             job: thread
                 .and_then(|t| t.job.clone())
-                .or_else(|| self.scheduled.contains_key("dream").then(|| "dream".into())),
+                .or_else(|| self.dream.then(|| "dream".into())),
         }
     }
 
@@ -209,6 +213,7 @@ impl Summary {
             waits: Vec::new(),
             last_end: None,
             ran: None,
+            served_model: None,
             asks: Vec::new(),
             parent_inputs: Vec::new(),
             videos: Vec::new(),
@@ -224,6 +229,7 @@ impl Summary {
             child_task: None,
             child_turn: Default::default(),
             name: String::new(),
+            avatar: None,
             children: Vec::new(),
             headline: String::new(),
             headline_at: None,
@@ -241,6 +247,7 @@ impl Summary {
             questions: Vec::new(),
             mail_questions: Vec::new(),
             scheduled: BTreeMap::new(),
+            dream: false,
             closed: false,
             close_reason: None,
             interrupted: false,
@@ -351,6 +358,7 @@ impl Summary {
                 child,
                 name,
                 thread,
+                ..
             } => {
                 (self.cwd, self.model, self.settings) = (cwd.clone(), model.clone(), *settings);
                 self.profile_version = profile_version.clone();
@@ -371,6 +379,7 @@ impl Summary {
                 event,
             } => self.voice_call(entry.id, call, *source, event),
             Body::Name { name } => self.name = name.clone(),
+            Body::Avatar { name } => self.avatar = (!name.is_empty()).then(|| name.clone()),
             Body::Effort { effort } => self.settings.effort = *effort,
             Body::Fresh { schedule, due, .. } => self.schedule(schedule, *due),
             Body::Withdrawn { inputs } => {
@@ -413,6 +422,7 @@ impl Summary {
                 close_reason,
                 context,
                 model,
+                served_model,
                 window,
                 report,
                 ..
@@ -420,6 +430,9 @@ impl Summary {
                 self.context = *context;
                 self.window = *window;
                 self.ran = model.clone().or(self.ran.take());
+                if model.is_some() {
+                    self.served_model.clone_from(served_model);
+                }
                 // A turn's report is always of the task it worked on, the current one.
                 self.reported = report.as_ref().map(|_| entry.id).or(self.reported);
                 self.turn_end(inputs, end, usage, *closed);
@@ -517,6 +530,7 @@ impl Summary {
             | Body::Child { .. }
             | Body::Withdrawn { .. }
             | Body::Name { .. }
+            | Body::Avatar { .. }
             | Body::Effort { .. }
             | Body::Notice { .. }
             | Body::VoiceCall { .. } => self.suggestion,
@@ -731,7 +745,10 @@ impl Summary {
                 self.parent_inputs.push(id)
             }
             Origin::Answer { ask } => self.questions.retain(|q| q.id.1 != *ask),
-            Origin::Schedule { name, due } => self.schedule(name, *due),
+            Origin::Schedule { name, due } => {
+                self.dream |= name == "dream";
+                self.schedule(name, *due)
+            }
             Origin::Razor if input.upkeep => self.upkeep = 3,
             Origin::Report { child, status } => {
                 if *status == ReportStatus::Finished && self.upkeep < 2 {

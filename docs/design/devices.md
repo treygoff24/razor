@@ -25,7 +25,7 @@ impl Devices {
     pub async fn enroll(&self, name: String, address: Option<String>, key: Option<String>) -> Result<Device, Error>;
     pub async fn revoke(&self, name: &str) -> Result<(), Error>;
     /// Authenticate to a direct peer through the shared pool, without redirects or retries.
-    pub fn request(&self, device: &Device, method: Method, path: &str) -> RequestBuilder;
+    pub async fn request(&self, device: &Device, request: Request<Bytes>, connect: Connect) -> Result<Response<razor_network::Body>, razor_network::Error>;
     /// Bounded JSON within two seconds; a fresh status line, independent of the API cache.
     pub async fn fetch<T: DeserializeOwned>(&self, device: &Device, path: &str, query: &impl Serialize, bound: usize) -> Option<T>;
     pub async fn snapshot(&self, device: &Device) -> Option<Vec<AgentView>>;
@@ -42,17 +42,17 @@ impl Devices {
 5. Authorization and peer subscriptions receive the existing per-device revocation receiver.
 6. Mail, children, search, recall and status lookup read current enrollment from memory.
 7. Tool lookup requests a fresh status line; the API keeps its bounded cached peer snapshots.
-8. Requests share bearer authentication and disable redirects; mutations are never retried.
+8. Requests authenticate by enrolled iroh keys; mutations are never retried.
 9. API forwarding retains its one-hop guard, header deadline and streaming cancellation.
 10. Post rings its local controller directly; it has no separate peer HTTP path.
 
-The hard decision is three clients built once under this owner: reads and relay reuse their
-pool with two seconds to connect; child mutations use a separate client with the same connect
-deadline and no idle connections; mail has five seconds to connect and no idle connections.
-A fresh connection lets a refused mutation say it was not sent, even after an earlier read's
-connection went silent. Children keep thirty seconds overall, mail ten, and bounded reads two.
-One universal client would change a deadline or give up read reuse. There is no second
-enrollment cache or per-call client builder.
+The endpoint owns one shared network client, replaced when the endpoint changes. Each
+request resolves current enrollment and its stored relays, and revocation closes its admitted connections in both directions.
+Ordinary reads and forwarding share cached connections with a five-second handshake limit;
+child mutations dial afresh with two seconds to connect, and mail with five. Only a failed fresh handshake proves no request was
+sent. Children retain thirty seconds overall, mail ten, and bounded reads two. Neither failed
+nor uncertain mutations are replayed. Legacy HTTP pairing retains its own HTTP client until
+the switch release. Endpoint hooks retain weak enrollment ownership to avoid a reference cycle.
 
 The existing notification-token, follow and open-stream operations move with enrollment; their
 revocation channels and limits are retained. `list` redacts credentials and notification tokens;

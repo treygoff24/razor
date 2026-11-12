@@ -69,7 +69,7 @@ text = "Check ~/scout/inbox and tell me what needs me."
 
 **Its night** comes at 03:00 unless `night` says otherwise. The home session gets one input asking it to close finished tasks, make every promise a task with a due date and write its state note. When that turn ends, its context is rebuilt from the record. A night missed while the server was down is not made up. A separate [dreaming pass](memory.md#dreaming) checks memory against recent sessions and sources, files wiki pages and merges state notes; it runs on `[memory] night`, independently of the resident's rebuild time.
 
-**Its memory** is its folder's project memory ([Memory](memory.md)). The home session writes the project's state note; threads keep rulings, facts and notes, and when you close a thread with `/done` it mails the home session what to keep instead of writing a state note.
+**Its memory** is its folder's project memory, with a layer of its own beside it for how it does its job, which only its own sessions read ([Memory](memory.md#an-always-on-agents-own-memory)). The home session writes the state note of that layer; threads keep rulings, facts and notes, and when you close a thread with `/done` it mails the home session what to keep instead of writing a state note.
 
 ## Hearing from it
 
@@ -111,4 +111,5 @@ Starting a thread prints its session id; open it with `razor --resume <id>`. A s
 | `schedules.<job>.at`, `.days`, `.text`, `.model`, `.effort` | as for the heartbeat | The same, for one named schedule. At most 64 schedules are read. |
 | `schedules.<job>.deliver` | `"none"` | `"notify"` ends the run with a note to you; `"ask"` with a question. |
 | `schedules.<job>.fresh` | `false` | Runs each time in a thread of its own that closes when the run ends. |
+| `avatar` | none | A name from `[brand.avatars]`: the picture its home and threads wear unless a session chooses another ([Configuration](configuration.md#the-terminal-app)). |
 | `sky` | none | A JSON file, relative to `cwd`, that a separately distributed phone client draws from. |

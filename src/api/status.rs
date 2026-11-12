@@ -126,9 +126,13 @@ pub(super) async fn status(
                 server: home,
                 servers,
                 agents,
+                brand,
                 ..
             } = &mut line
             {
+                if !q.avatars {
+                    brand.avatars.clear();
+                }
                 **home = server(app).await;
                 *servers = if q.local && !q.servers {
                     vec![*home.clone()]

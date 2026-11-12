@@ -173,6 +173,7 @@ fn complete(
     };
     let end_turn = completed["end_turn"] != false;
     Ok(Response {
+        model: completed["model"].as_str().map(str::to_owned),
         items: done.into_values().collect(),
         usage,
         end_turn,

@@ -14,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import tarfile
+import tempfile
 import threading
 import time
 
@@ -23,6 +24,8 @@ import server
 import terminal
 
 INSTALLER = Path(__file__).resolve().parents[1] / 'scripts/install-release.sh'
+# Beside the flows' scratch folders, so a release links its archive rather than copying it.
+ARCHIVES = tempfile.TemporaryDirectory(prefix='razor-flow-81-')
 PLATFORM = {('Linux', 'x86_64'): 'linux-x64', ('Linux', 'aarch64'): 'linux-arm64',
             ('Darwin', 'arm64'): 'darwin-arm64'}[(platform.system(), platform.machine())]
 
@@ -57,25 +60,8 @@ def releases(f):
 
     def publish(tag, *, damaged=False):
         archive = files / f'razor-{tag}-{PLATFORM}.tar.gz'
-        # Actual binary and real npm installation, with no third-party package downloads.
-        bundle = f.home / 'bundle'
-        (bundle / 'bridge').mkdir(parents=True, exist_ok=True)
-        shutil.copy2(BINARY, bundle / 'razor')
-        dependency = bundle / 'bridge/dependency'
-        dependency.mkdir(exist_ok=True)
-        (dependency / 'package.json').write_text('{"name":"release-dependency","version":"1.0.0"}')
-        (bundle / 'bridge/package.json').write_text(json.dumps({
-            'name': 'release-flow', 'version': '1.0.0',
-            'dependencies': {'release-dependency': 'file:dependency'}}))
-        (bundle / 'bridge/package-lock.json').write_text(json.dumps({
-            'name': 'release-flow', 'version': '1.0.0', 'lockfileVersion': 3,
-            'packages': {'': {'name': 'release-flow', 'version': '1.0.0',
-                              'dependencies': {'release-dependency': 'file:dependency'}},
-                         'dependency': {'name': 'release-dependency', 'version': '1.0.0'},
-                         'node_modules/release-dependency': {'resolved': 'dependency', 'link': True}}}))
-        with tarfile.open(archive, 'w:gz', compresslevel=1) as tar:
-            tar.add(bundle / 'razor', arcname='razor')
-            tar.add(bundle / 'bridge', arcname='bridge')
+        archive.unlink(missing_ok=True)
+        os.link(bundled(), archive)
         digest = '0' * 64 if damaged else hashlib.file_digest(archive.open('rb'), 'sha256').hexdigest()
         archive.with_suffix('.gz.sha256').write_text(f'{digest}  {archive.name}\n')
         (files / 'install.sh').write_text(
@@ -89,6 +75,31 @@ def releases(f):
         http.shutdown()
         http.server_close()
         thread.join()
+
+
+def bundled():
+    """The release archive, built once a run: its contents do not depend on the tag."""
+    archive = Path(ARCHIVES.name) / 'razor.tar.gz'
+    if archive.exists():
+        return archive
+    # Actual binary and real npm installation, with no third-party package downloads.
+    bundle = Path(ARCHIVES.name) / 'bundle'
+    dependency = bundle / 'bridge/dependency'
+    dependency.mkdir(parents=True)
+    (dependency / 'package.json').write_text('{"name":"release-dependency","version":"1.0.0"}')
+    (bundle / 'bridge/package.json').write_text(json.dumps({
+        'name': 'release-flow', 'version': '1.0.0',
+        'dependencies': {'release-dependency': 'file:dependency'}}))
+    (bundle / 'bridge/package-lock.json').write_text(json.dumps({
+        'name': 'release-flow', 'version': '1.0.0', 'lockfileVersion': 3,
+        'packages': {'': {'name': 'release-flow', 'version': '1.0.0',
+                          'dependencies': {'release-dependency': 'file:dependency'}},
+                     'dependency': {'name': 'release-dependency', 'version': '1.0.0'},
+                     'node_modules/release-dependency': {'resolved': 'dependency', 'link': True}}}))
+    with tarfile.open(archive, 'w:gz', compresslevel=1) as tar:
+        tar.add(BINARY, arcname='razor')
+        tar.add(bundle / 'bridge', arcname='bridge')
+    return archive
 
 
 def installed(f, tag='0.1.0'):
@@ -151,7 +162,10 @@ with flow([], model='gpt-6.1-sol') as f, releases(f) as (publish, requests):
                 assert 'invalid stream line' not in t.text(), t.text()
                 # A heartbeat after the transient notice expires must not show it again.
                 t.until(lambda t: 'RAZOR 0.2.0 IS READY' not in t.text(), timeout=8)
-                t.pump(16)
+                # A views change sends the server line a heartbeat sends, at once.
+                views = server.send(f, 'PUT', '/views', json.load(server.send(f, 'GET', '/views')))
+                assert views.status == 200, views.read()
+                t.quiet()
                 assert 'RAZOR 0.2.0 IS READY' not in t.text(), 'heartbeat repeated the notice'
         finally:
             terminal.BINARY = original

@@ -1,12 +1,19 @@
 [package]
 name = "razor-harness"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.91"
 description = "Razor: a harness for AI agents."
 license = "MIT OR Apache-2.0"
 publish = false
 default-run = "razor"
+
+[workspace]
+members = ["network", "flows/peer"]
+resolver = "3"
+
+[workspace.dependencies]
+iroh = { version = "1.4.1", default-features = false, features = ["tls-aws-lc-rs", "portmapper", "platform-verifier"] }
 
 [[bin]]
 name = "razor"
@@ -22,6 +29,7 @@ crossterm = { version = "0.29", features = ["event-stream", "use-dev-tty"] }
 jiff = "0.2"
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "webp"] }
 png = "=0.18.1"
+qrcode = { version = "0.14", default-features = false }
 icu_properties = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
@@ -35,18 +43,27 @@ base64 = "0.23.1"
 futures-util = { version = "0.3.34", default-features = false }
 getrandom = "0.4.3"
 http-range = "0.1.6"
-libc = "0.2.191"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+iroh = { workspace = true }
+razor-network = { path = "network" }
+# Held for the whole workspace at 0.2.189, the last libc with the iOS items (in6_ifreq, net/route.h's
+# constants) that iroh's netwatch 0.19 and netdev 0.46 use there; 0.2.190 dropped them, and the phone's
+# build of razor-network fails on any later libc. Lift when iroh's releases build for iOS.
+libc = "=0.2.189"
 memchr = "2"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "form", "rustls", "stream", "http2"] }
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 rmcp = { version = "3.8.0", default-features = false, features = ["client", "transport-child-process", "auth", "transport-streamable-http-client-reqwest"] }
 serde = { version = "1", features = ["derive"] }
+serde_urlencoded = "0.7"
+serde_path_to_error = "0.1"
 serde_json = { version = "1.0.154", features = ["raw_value"] }
 shlex = "2.0.1"
-socket2 = { version = "0.6.5", features = ["all"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "net", "sync", "signal", "time", "io-std"] }
 tokio-tungstenite = { version = "=0.29.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 tokio-util = { version = "0.7.20", features = ["io"] }
+tower = { version = "0.5", features = ["util"] }
 toml = { version = "1.1.8", default-features = false, features = ["parse", "serde"] }
 vt100 = { version = "0.18.1", default-features = false }
 toml_edit = { version = "0.25", features = ["serde"] }

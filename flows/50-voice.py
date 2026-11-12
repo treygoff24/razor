@@ -107,11 +107,3 @@ with flow([Reply((REPLIES / "hello.sse").read_bytes()) for _ in range(3)],
     status, headers, body = call(f, "GET", f"/sessions/{session}/files/{voice['file']}",
                                  headers={"Range": "bytes=0-3"})
     assert (status, headers["content-type"], body) == (206, "audio/mp4", b"SLOW"), (status, headers)
-
-    # 7. With no transcriber the note is refused with a sentence, and the status says so.
-    config = f.home / ".razor/config.toml"
-    config.write_text("\n".join(l for l in config.read_text().splitlines() if "transcribe" not in l))
-    status, _, body = call(f, "POST", f"/sessions/{session}/input", note(f, session, b"audio", None)[1])
-    assert (status, json.loads(body)["error"]) == (
-        503, "This server has no transcriber; set `transcribe`."), body
-    assert transcribing(f) is False

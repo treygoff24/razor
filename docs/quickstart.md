@@ -22,9 +22,8 @@ Answer setup's questions:
 
 1. **Claude, ChatGPT, both, or an API key.** Enter means Claude. Choosing ChatGPT alone makes `sol` your default model, unless your settings already name one. Choosing a key asks whose: Anthropic, OpenAI, Google, RunInfra, or another endpoint, such as your company's AI gateway, whose API, address, model id and context window you give. You type the key hidden; setup saves it in `~/.razor/keys.toml`, readable only by you, and makes that provider's model your default ([Models and sign-in](models.md#providers)).
 2. **Contact nothing but your model provider.** Asked after an API key, for work machines: yes turns on `provider_only`, so Razor itself reaches only the providers in your settings ([Security](security.md#contacting-only-your-model-provider)). The default is no.
-3. **Connect to your Razor servers on other machines.** Yes gives this server an address on your tailnet, with Tailscale running, so your other machines can pair with it ([More machines](machines.md)); no gives it none. It is not asked once `provider_only` is on.
-4. **Run Razor in the background when you log in.** Say yes to have the server start at login, which always-on agents need. You can run `razor install` later.
-5. **Sign in with your provider.** Setup skips providers already signed in, and an API key needs no sign-in. Claude uses your subscription; to use Anthropic Console billing, run `razor setup --console`, which signs Claude in again even when an account is already signed in. For Claude, a browser opens, or you visit the link it prints and paste the code back. For ChatGPT it prints a link and a code to enter at OpenAI.
+3. **Run Razor in the background when you log in.** Say yes to have the server start at login, which always-on agents need. You can run `razor install` later.
+4. **Sign in with your provider.** Setup skips providers already signed in, and an API key needs no sign-in. Claude uses your subscription; to use Anthropic Console billing, run `razor setup --console`, which signs Claude in again even when an account is already signed in. For Claude, a browser opens, or you visit the link it prints and paste the code back. For ChatGPT it prints a link and a code to enter at OpenAI.
 
 To repeat setup, run `razor setup`. It keeps existing settings and sign-ins.
 
@@ -106,7 +105,7 @@ razor --print "List the TODO comments in this repository."
 
 [Using Razor from scripts](scripting.md) covers its JSON and streamed output, carrying a conversation across calls, and the API behind it.
 
-To connect another machine, put both on the same Tailscale network and run `razor setup` on each. Setup prints this server's hostname and reachable address without replacing values you set. `razor devices find` finds the other servers and prints the command to pair one; run the confirmation command on the other machine too. [More machines](machines.md) covers pairing, manual addresses and what access a paired server gets.
+To connect another machine, run `razor devices add <its name>` on one, which shows a code, and `razor devices join <the first one's name>` on the other, which asks for it. [More machines](machines.md) covers pairing, relays, the phone and Mac apps and what access a paired server gets.
 
 Next: [Concepts](concepts.md) explains sessions, helpers and memory; [Configuration](configuration.md) lists every setting.
 

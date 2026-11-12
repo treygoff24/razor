@@ -138,6 +138,9 @@ pub(crate) enum FromBridge {
     /// The turn's result, usage and model window, and the latest input it took, which the path
     /// will not hand the model again; a path takes inputs in the order it received them.
     TurnEnd {
+        /// The provider-reported ID, independent of the session's chosen family.
+        #[serde(default)]
+        model: Option<String>,
         success: bool,
         reason: Option<String>,
         message: String,
@@ -148,7 +151,11 @@ pub(crate) enum FromBridge {
     /// This conversation's latest account readings, at most 32 named windows.
     Usage { windows: Vec<UsageWindow> },
     /// The marked batch settled and the native conversation closed, retaining its turn's usage.
-    Settled { usage: Usage },
+    Settled {
+        usage: Usage,
+        #[serde(default)]
+        model: Option<String>,
+    },
     /// A conversation ended by itself, with a reason on failure.
     Closed { error: Option<String> },
 }

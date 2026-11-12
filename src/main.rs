@@ -162,7 +162,7 @@ const COMMANDS: &[&str] = &[
     "stop                       stop this home's server",
     "restart                    stop and start this home's server",
     "update                     install the latest release; restart when ready",
-    "devices                    list paired devices\ndevices find               discover tailnet servers\ndevices add <name> [--address <host:port>] [--key <key>]  pair a device\ndevices remove <name>      remove a paired device",
+    "devices                    list paired devices\ndevices add <name>         show a code here; wait for the other device\ndevices join <name>        paste a code on the joining device\ndevices add <name> --key <key>  enroll a program on this machine with a key\ndevices remove <name>      remove a paired device",
     "mcp list                   list MCP servers\nmcp add <name> --scope <global|project|private> --config '<JSON>'\nmcp remove|enable|disable <name> --scope <global|project|private>\nmcp reconnect|sign-in|sign-out <name>  reconnect or change sign-in\nmcp import <file> --scope <global|project|private>  preview definitions; apply with /mcp import in the app\nmcp complete '<redirect address>'  finish a browser sign-in\n  --scope defaults to private",
     "config get <key>           print an effective setting and its source\nconfig set <key> <value> [--project|--local]  save a setting\nconfig unset <key> [--project|--local]  remove an override\nconfig path [--project|--local]  print the settings file\n  default: your own file; --project: shared project; --local: private project\nconfig get|set|unset voice.<field>  read or change a voice setting this home's server keeps",
     "plugins                    list configured plugins",
@@ -399,27 +399,17 @@ async fn run(home: PathBuf, words: Vec<String>) -> Result<ExitCode, Error> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `razor login` and `razor devices [add <name> [--address <host:port>] [--key <key>] |
-/// remove <name>]`, through the server.
+/// `razor login` and `razor devices [add <name> [--key <key>] | join <name> | remove <name>]`,
+/// through the server.
 async fn manage(home: PathBuf, words: &[String]) -> Result<(), Error> {
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    let (address, given) = match words[..] {
-        ["login"] | ["devices"] | ["devices", "find"] | ["devices", "remove", _] => (None, None),
-        ["devices", "add", _, ref flags @ ..] => {
-            let (mut address, mut given) = (None, None);
-            for pair in flags.chunks(2) {
-                match pair {
-                    ["--address", value] => address = Some(*value),
-                    ["--key", value] => given = Some(*value),
-                    _ => return Err(Usage(api::DEVICES_USE.into())),
-                }
-            }
-            (address, given)
-        }
-        ["config", "get" | "unset", _] | ["config", "set", _, _] => (None, None),
+    match words[..] {
+        ["login"] | ["devices"] | ["devices", "add" | "join" | "remove", _] => {}
+        ["devices", "add", _, "--key", _] => {}
+        ["config", "get" | "unset", _] | ["config", "set", _, _] => {}
         ["config", ..] => return Err(Usage(VOICE_USE.into())),
         _ => return Err(Usage(api::DEVICES_USE.into())),
-    };
+    }
     let (client, key) = api::connect(&home).await?;
     let text = match words[..] {
         ["login"] => {
@@ -427,8 +417,9 @@ async fn manage(home: PathBuf, words: &[String]) -> Result<(), Error> {
             signed.map_err(|e| Failed(format!("{e} Run razor login.")))?;
             "Razor is signed in to ChatGPT.".into()
         }
-        ["devices", "add", name, ..] => api::enroll(&client, &key, name, address, given).await?,
-        ["devices", "find"] => api::find(&client, &key).await?,
+        ["devices", "add", name] => api::add_command(&client, &key, name).await?,
+        ["devices", "join", name] => api::join_command(&client, &key, name).await?,
+        ["devices", "add", name, _, given] => api::enroll(&client, &key, name, given).await?,
         ["devices", "remove", name] => api::revoke(&client, &key, name).await?,
         ["config", ..] => api::voice(&client, &key, &words[1..]).await?,
         _ => api::devices(&client, &key).await?,

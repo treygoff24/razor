@@ -131,10 +131,10 @@ with flow([response([call("handover", json.dumps({"note": "Continue inspecting t
 with flow([response([message("PHONE_82")])], model="sol", config=PLAIN) as f:
     server.start(f)
     session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
-    phone = f.run("devices", "add", "phone").stdout.splitlines()[1]
+    phone = server.phone(f, "phone")
     origins = [{"number": 1, "path": "IMG_82.HEIC in Photos", "device": "", "copy": "scaled"},
                {"number": 2, "path": "s82/drop.png", "device": "mac82", "copy": "scaled"}]
-    sent = server.send(f, "POST", f"/sessions/{session}/input", {"text": "From the phone.", "images": [PNG, PNG], "image_origins": origins}, key=phone)
+    sent = server.send(phone, "POST", f"/sessions/{session}/input", {"text": "From the phone.", "images": [PNG, PNG], "image_origins": origins})
     assert sent.status == 200, sent.read()
     entries = server.until(f, session, lambda es: any(e["kind"] == "turn_end" for e in es))
     person = next(e for e in entries if e["kind"] == "input" and e["from"] == "person")

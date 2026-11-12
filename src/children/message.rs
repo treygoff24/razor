@@ -432,9 +432,9 @@ pub(crate) fn project(s: &Summary) -> String {
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
 }
 
-/// The repository the session's folder belongs to: the origin remote's last path segment less
-/// `.git`, else the main checkout's folder name; None outside git. Read once per folder from the
-/// git files, never by running git.
+/// The repository the session's folder belongs to, named by its main checkout's folder, so a
+/// worktree folds under it; None outside git. Read once per folder from the git files, never by
+/// running git.
 pub(crate) fn repo(s: &Summary) -> Option<String> {
     static REPOS: LazyLock<Mutex<HashMap<PathBuf, Option<String>>>> =
         LazyLock::new(Default::default);
@@ -447,14 +447,24 @@ pub(crate) fn repo(s: &Summary) -> Option<String> {
         .clone()
 }
 
-/// A checkout's display name and cross-server identity, read from the same origin.
+/// A checkout's display name, its main checkout's folder name, and its cross-server identity,
+/// from its origin remote, else its path.
 pub(crate) fn repo_info(folder: &Path) -> Option<(String, String)> {
     let top = folder.ancestors().find(|d| d.join(".git").exists())?;
-    let mut common = top.join(".git");
+    let (mut common, mut main) = (top.join(".git"), top.canonicalize().ok()?);
     if let Ok(link) = std::fs::read_to_string(&common) {
         common = top.join(link.strip_prefix("gitdir:")?.trim());
-        let shared = std::fs::read_to_string(common.join("commondir")).unwrap_or_default();
-        common = common.join(shared.trim());
+        // A linked worktree is named by its main checkout, or its bare repository less `.git`;
+        // one of a submodule or of a separate git folder, both rare, by that git folder.
+        if let Ok(shared) = std::fs::read_to_string(common.join("commondir")) {
+            common = common.join(shared.trim()).canonicalize().ok()?;
+            main.clone_from(&common);
+            if main.ends_with(".git") {
+                main.pop();
+            } else if main.extension().is_some_and(|e| e == "git") {
+                main.set_extension("");
+            }
+        }
     }
     let config = std::fs::read_to_string(common.join("config")).unwrap_or_default();
     let origin = config
@@ -466,20 +476,9 @@ pub(crate) fn repo_info(folder: &Path) -> Option<(String, String)> {
             .trim()
             .trim_end_matches('/')
     });
-    let name = match url {
-        Some(url) => url
-            .rsplit(['/', ':'])
-            .next()?
-            .trim_end_matches(".git")
-            .to_owned(),
-        None => common
-            .canonicalize()
-            .ok()?
-            .parent()?
-            .file_name()?
-            .to_str()?
-            .to_owned(),
-    };
+    // A checkout at the filesystem root is named by its path.
+    let name = main.file_name().unwrap_or(main.as_os_str());
+    let name = name.to_string_lossy().into_owned();
     let identity = match url {
         Some(url) => {
             let (scheme, url) = url
@@ -502,7 +501,7 @@ pub(crate) fn repo_info(folder: &Path) -> Option<(String, String)> {
         }
         None => path_identity(top),
     };
-    (!name.is_empty()).then_some((name, identity))
+    Some((name, identity))
 }
 
 pub(crate) fn path_identity(path: &Path) -> String {

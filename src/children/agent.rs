@@ -67,7 +67,7 @@ pub(super) struct Start {
     pub(super) server: Option<String>,
     pub(super) brief: String,
     pub(super) shared_brief: Option<PathBuf>,
-    /// A task of the parent's project to claim for the child.
+    /// A task of the child's project to claim for it.
     pub(super) task: Option<u32>,
     #[serde(default)]
     pub(super) kind: Kind,
@@ -193,19 +193,7 @@ impl Children {
                         .await
                 }
             }
-            Agent::Start(start) => {
-                let (task, name) = (start.task, start.name.clone());
-                let mut started = self.start(controller, caller, at, start).await?;
-                let child = started["session"].as_str().unwrap_or_default().to_owned();
-                if let (Some(id), Ok(child)) = (task, SessionId::try_from(child)) {
-                    let parent = controller.summary(caller).await?;
-                    let memory = controller.memory();
-                    if let Err(e) = memory.start(controller, &parent, (&child, &name), id).await {
-                        started["task"] = json!(e.to_string());
-                    }
-                }
-                Ok(started)
-            }
+            Agent::Start(start) => self.start(controller, caller, at, start).await,
             Agent::Continue {
                 child,
                 brief,
@@ -267,18 +255,7 @@ impl Children {
             Agent::Settle { child, decision } => {
                 self.settle(controller, caller, &child, decision).await
             }
-            Agent::Stop { child } => {
-                let child = find(&controller.summary(caller).await?, &child)?;
-                controller.close(&child.session).await?;
-                if child.session.address().is_none() {
-                    files(controller, &child.session).await?;
-                }
-                let (session, event) = (child.session, ChildEvent::Stopped);
-                controller
-                    .append(caller, Body::Child { session, event })
-                    .await?;
-                Ok(json!({}))
-            }
+            Agent::Stop { child } => stop(controller, caller, &child).await,
             Agent::Wait { timeout_ms } => {
                 let timeout = Duration::from_millis(timeout_ms.unwrap_or(600_000));
                 let Some(entry) = controller.wait_input(caller, at, timeout).await? else {
@@ -398,6 +375,7 @@ impl Children {
                 effort,
                 speed,
                 in_place: matches!(start.placement, Placement::InPlace),
+                task: start.task,
                 input,
             };
             let result = controller.devices().child(server, &request).await;
@@ -420,32 +398,60 @@ impl Children {
             controller.append(caller, stopped).await?;
             return Err(e);
         }
+        let task = controller
+            .memory()
+            .start(controller, &cwd, &session, &child, start.task)
+            .await;
         controller.admit(&session, input).await?;
         let branch = worktree.map(|_| branch(&session));
-        Ok(json!({ "session": session, "cwd": cwd, "branch": branch }))
+        let mut answer = json!({ "session": session, "cwd": cwd, "branch": branch });
+        if let Some(task) = task {
+            answer["task"] = task;
+        }
+        Ok(answer)
     }
 
-    /// Settles report-only helpers after closeout releases the parent session's task.
+    /// Settles every remaining helper as discard when a session ends for good: the person's
+    /// close of a root (`/done` after its closing turn, `/quit`), after its final turn releases its
+    /// task. An idle close reopens the same session and a helper's finish leaves it continuable, so
+    /// neither calls this; a helper's settlement by its parent reaches its own helpers through
+    /// `close_children`.
     pub(crate) fn closed(&self, c: &Controller, parent: &Summary) {
         let (c, parent) = (c.clone(), parent.clone());
         tokio::spawn(async move {
-            for child in parent.children {
-                let finished = child
-                    .report
-                    .is_some_and(|r| r.status == ReportStatus::Finished && r.no_changes);
-                if child.settled.is_none() && !child.stopped && finished {
-                    let result = c.children().settle(
-                        &c,
-                        &parent.session,
-                        &child.child.name,
-                        Decision::Discard,
-                    );
-                    if let Err(e) = result.await {
-                        eprintln!("razor: settling helper {}: {e}", child.session);
-                    }
-                }
+            if let Err(e) = c.children().close_children(&c, &parent).await {
+                eprintln!("razor: settling helpers of {}: {e}", parent.session);
             }
         });
+    }
+
+    /// Settles a session's direct helpers as discard, each settlement cascading to its own, before
+    /// the session's checkout goes, since a descendant's worktree may use it as its git origin.
+    pub(super) async fn close_children(
+        &self,
+        c: &Controller,
+        parent: &Summary,
+    ) -> Result<(), Error> {
+        let mut failure = None;
+        for child in parent
+            .children
+            .iter()
+            .filter(|child| child.settled.is_none())
+        {
+            let result = async {
+                if child.working() {
+                    stop(c, &parent.session, &child.child.name).await?;
+                }
+                self.settle(c, &parent.session, &child.child.name, Decision::Discard)
+                    .await
+            }
+            .await;
+            if let Err(e) = result {
+                eprintln!("razor: settling helper {}: {e}", child.session);
+                failure = Some(e);
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 
     async fn settle(
@@ -460,26 +466,51 @@ impl Children {
         if child.settled.is_some() || (child.report.is_none() && !child.stopped) {
             return refuse("Settle a finished or stopped child once; stop a working child first.");
         }
+        let memory = controller.memory();
+        let report = memory
+            .settled(controller, &parent, &child, decision)
+            .await
+            .map_err(|e| Error::Refused(e.to_string()))?;
         let text = if let Some((session, server)) = child.session.address() {
             controller
                 .devices()
-                .child(server, &ChildRequest::Settle { session, decision })
+                .child(
+                    server,
+                    &ChildRequest::Settle {
+                        session,
+                        decision,
+                        report: report.clone(),
+                    },
+                )
                 .await?["text"]
                 .as_str()
                 .unwrap_or_default()
                 .to_owned()
         } else {
-            self.settle_git(controller, &child.session, &child.child, decision)
+            self.settle_git(controller, &child.session, &child.child, decision, None)
                 .await?
         };
-        let memory = controller.memory();
-        memory.settled(controller, &parent, &child, decision).await;
+        memory
+            .released(controller, &parent, &child, report.as_ref())
+            .await;
         let (session, event) = (child.session, ChildEvent::Settled(decision));
         controller
             .append(caller, Body::Child { session, event })
             .await?;
         Ok(json!({ "text": text }))
     }
+}
+
+/// The explicit stop and close-time cleanup share the recorded stop before settlement.
+async fn stop(c: &Controller, caller: &SessionId, name: &str) -> Result<Value, Error> {
+    let child = find(&c.summary(caller).await?, name)?;
+    c.close(&child.session).await?;
+    if child.session.address().is_none() {
+        files(c, &child.session).await?;
+    }
+    let (session, event) = (child.session, ChildEvent::Stopped);
+    c.append(caller, Body::Child { session, event }).await?;
+    Ok(json!({}))
 }
 
 /// Refuses one more working child once `children.max` of the parent's are at work.

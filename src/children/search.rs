@@ -3,7 +3,7 @@
 
 use super::{Error, other, parse};
 use crate::controller::Controller;
-use crate::protocol::{BODY_BYTES, Body, Entry, EntryId, Found, Hit, Search};
+use crate::protocol::{BODY_BYTES, Body, Entry, EntryId, Found, Hit, Search, SessionId};
 use crate::record::REASONING;
 use serde_json::Value;
 use std::cmp::Reverse;
@@ -45,6 +45,28 @@ pub(crate) async fn search(c: &Controller, q: Search) -> Result<Found, Error> {
     Ok(Found { hits, partial })
 }
 
+/// `session`'s digest in at most `bytes`, here or from its paired server.
+pub(crate) async fn digest(
+    c: &Controller,
+    session: &SessionId,
+    bytes: usize,
+) -> Result<String, Error> {
+    let Some((native, server)) = session.address() else {
+        let digest = crate::record::digest(c.home(), session, bytes).await;
+        return digest.map_err(other("reading a session's digest"));
+    };
+    let devices = c.devices();
+    let missing = || {
+        Error::Refused(format!(
+            "The digest of {session} could not be read; check its paired server."
+        ))
+    };
+    let server = devices.peer(server).await.ok_or_else(missing)?;
+    let (path, limit) = (format!("/v1/sessions/{native}/digest"), [("limit", bytes)]);
+    let digest = devices.fetch(&server, &path, &limit, BODY_BYTES).await;
+    digest.ok_or_else(missing)
+}
+
 /// Session-only recall returns a digest; a query returns hits, and an id the whole entry,
 /// here or on its paired server. Thinking entries are refused as a session's own are.
 pub(super) async fn recall(c: &Controller, input: Value) -> Result<Value, Error> {
@@ -54,26 +76,7 @@ pub(super) async fn recall(c: &Controller, input: Value) -> Result<Value, Error>
         return serde_json::to_value(search(c, q).await?).map_err(other("answering a search"));
     };
     let Some(id) = id else {
-        let text = match session.address() {
-            None => crate::record::digest(c.home(), session, 24 * 1024)
-                .await
-                .map_err(other("reading a session's digest"))?,
-            Some((native, server)) => {
-                let devices = c.devices();
-                let missing = || {
-                    Error::Refused(format!(
-                        "The digest of {session} could not be read; check its paired server."
-                    ))
-                };
-                let server = devices.peer(server).await.ok_or_else(missing)?;
-                let path = format!("/v1/sessions/{native}/digest");
-                devices
-                    .fetch(&server, &path, &(), BODY_BYTES)
-                    .await
-                    .ok_or_else(missing)?
-            }
-        };
-        return Ok(Value::String(text));
+        return Ok(Value::String(digest(c, session, 24 * 1024).await?));
     };
     let missing = || Error::Refused(format!("{session} has no entry {} to recall.", id.0));
     let entry: Entry = match session.address() {

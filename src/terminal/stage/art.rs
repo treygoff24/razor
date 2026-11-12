@@ -56,11 +56,7 @@ pub(super) enum Pose {
     Messy = 5,
     MessyYawn,
 }
-/// Stable FNV-1a selection.
-pub(super) fn hash(seed: &str) -> u32 {
-    seed.bytes()
-        .fold(2166136261, |h, c| (h ^ u32::from(c)).wrapping_mul(16777619))
-}
+pub(super) use crate::protocol::family_hash as hash;
 /// A root's native id always chooses the same family as its server's voice selection.
 pub(super) fn member(root: &str) -> usize {
     crate::protocol::family(root.split('@').next().unwrap_or(root))
