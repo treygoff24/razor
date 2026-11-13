@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
-    sync::Arc,
     sync::atomic::{AtomicU64, Ordering::Relaxed},
+    sync::{Arc, Mutex},
 };
 use tokio::sync::{mpsc, watch};
 
@@ -31,6 +31,8 @@ struct Call {
 struct Turn {
     stop: watch::Sender<bool>,
     request: Option<BoxFuture<'static, Result<Response, Error>>>,
+    /// Raw reply deltas of this request; bounded by the stream's 64 MiB cap, reset on Void.
+    words: Arc<Mutex<String>>,
     /// The latest response's calls, answered to the model in call order.
     calls: VecDeque<Call>,
     /// Calls from cells, awaiting admission and then their result.
@@ -184,9 +186,6 @@ impl Task {
                     Some(message) => self.message(message).await?,
                 },
                 Some(response) = async { Some(request?.await) } => {
-                    if let Some(turn) = &mut self.turn {
-                        turn.request = None;
-                    }
                     match response {
                         Ok(response) => self.response(response).await?,
                         Err(error) => self.failed(error).await?,
@@ -304,13 +303,19 @@ impl Task {
         );
         let (outgoing, open, lite) = (self.outgoing.clone(), self.open, profile.code_mode);
         let thoughts = self.thoughts.clone();
+        turn.words = Arc::default();
+        let words = turn.words.clone();
         turn.request = Some(Box::pin(async move {
             let say = |mut says| {
                 match &mut says {
                     FromBridge::Thought { n, start, .. } => {
                         *n = thoughts.fetch_add(u64::from(*start), Relaxed) + u64::from(*start)
                     }
-                    FromBridge::Void { n } => *n = thoughts.load(Relaxed),
+                    FromBridge::Delta { text } => words.lock().unwrap().push_str(text),
+                    FromBridge::Void { n } => {
+                        *n = thoughts.load(Relaxed);
+                        words.lock().unwrap().clear();
+                    }
                     _ => {}
                 }
                 // A full display channel drops a live line; it never holds up the response.
@@ -347,6 +352,7 @@ impl Task {
         let Some(turn) = &mut self.turn else {
             return Ok(());
         };
+        turn.request = None;
         let usage = response.usage;
         turn.turn_state = response.turn_state;
         turn.model = response.model.or(turn.model.take());
@@ -572,8 +578,40 @@ impl Task {
         self.end(Some(End::Error(error.to_string())), reason).await
     }
 
+    /// Records the unfinished request's words and keeps their native assistant message.
+    async fn keep_words(&mut self) -> Result<(), Error> {
+        let text = self
+            .turn
+            .as_ref()
+            .filter(|t| t.request.is_some())
+            .map(|t| std::mem::take(&mut *t.words.lock().unwrap()));
+        if let Some(text) = text {
+            // Use the stream's suggestion hold before consuming any pending native additions.
+            let (shown, _) = crate::record::Hold::default().push(&text);
+            if shown.is_empty() {
+                return Ok(());
+            }
+            let mut items = vec![if self.conversation.is_chat() {
+                json!({"role": "assistant", "content": text})
+            } else {
+                json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]})
+            }];
+            let additions = self.conversation.response(&mut items);
+            // This unfinished reply carries its own native words; a completed Text's items
+            // are on its Response entry. The body keeps only what the person can see.
+            let native = Some(Native::Responses { additions, items });
+            self.emit(FromBridge::Entry {
+                body: Body::Text { text: shown },
+                native,
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Ends the turn and stops its cells; `None` settles the conversation instead.
     async fn end(&mut self, end: Option<End>, reason: Option<&str>) -> Result<(), Error> {
+        self.keep_words().await?;
         let Some(mut turn) = self.turn.take() else {
             return Ok(());
         };

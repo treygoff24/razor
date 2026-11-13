@@ -301,7 +301,8 @@ with flow(replies, config='\n'.join(f'{k} = {json.dumps(v)}' for k, v in command
         assert list((f.home / '.razor/sessions' / session).rglob('voice.wav')) == files
         assert sum(e['kind'] == 'input' for e in f.record(session)) == 1
         t.resize(40, 120)
-        t.shown('└' + '─' * 118 + '┘', 'first spoken reply', 'second spoken reply')
+        # /listen reads the newest completed reply: its words can draw before its turn ends, its lit cap only after.
+        t.until(lambda t: '└' + '─' * 118 + '┘' in t.text() and any('▶' in cap and 'first spoken reply' in words for cap, words in zip(t.screen.display, t.screen.display[1:])))
         played.write_text('')
         heard.write_text('')
         t.send('\x15/listen\r')
@@ -392,7 +393,7 @@ with flow(replies, config='\n'.join(f'{k} = {json.dumps(v)}' for k, v in command
         t.until(lambda t: 'PRESS CTRL-C' not in t.text())
     assert not list((f.home / 'tmp').glob('razor-audio-*'))
 
-    # A voice input must leave the open ask, its answer text and its answer address intact.
+    # A voice note settles a question being answered in words; the words wait for a second Enter.
     mode.write_text('sound')
     root = 'VOICE_QUESTION_ROOT'
     replies += [message(root, 'question', text='Keep this answer addressed?', options=['yes', 'no']),
@@ -410,10 +411,13 @@ with flow(replies, config='\n'.join(f'{k} = {json.dumps(v)}' for k, v in command
         t.shown('spoken-words', 'voice-arrived', 'typed answer')
         inputs = [e for e in f.record(session) if e['kind'] == 'input']
         assert inputs[-1]['text'] == 'spoken-words' and 'answer' not in inputs[-1]['from']
+        t.until(lambda t: 'in words' not in t.text())
+        t.send('\r')
+        t.shown('QUESTION CLOSED', 'typed answer')  # Notices are drawn in capitals.
+        assert [e for e in f.record(session) if e['kind'] == 'input'] == inputs
         t.send('\r')
         t.shown('answer-arrived')
-        question = next(e['id'] for e in f.record(session) if e['kind'] == 'call' and e.get('name') == 'mcp__razor__message')
-        assert [e for e in f.record(session) if e['kind'] == 'input'][-1]['from']['answer']['ask'] == question
+        assert [(e['text'], 'answer' in e['from']) for e in f.record(session) if e['kind'] == 'input'][-1] == ('typed answer', False)
 
     # Starting capture reaps a player; quitting reaps capture and removes its private file.
     replies.append(reply(None, text='completed reply'))

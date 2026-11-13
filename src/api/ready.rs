@@ -13,7 +13,14 @@ use std::{collections::BTreeMap, io::IsTerminal, path::Path, time::Duration};
 /// Claude Code may create its own config directory during the sign-in check. Ok when the settings
 /// load and the default model can run, which on a provider takes a test request.
 pub async fn doctor(home: &Path) -> Result<(), Error> {
-    let config = Config::load(home).await;
+    if let Some(notice) = residents::release_action().await {
+        println!("{notice}");
+    }
+    let settings = crate::config::Settings::open(home.to_path_buf());
+    for notice in settings.iter().flat_map(|s| &s.notices) {
+        println!("Settings: {notice}");
+    }
+    let config = settings.map(|s| s.config);
     let sign_in = config.as_ref().map_or(&[][..], |c| &c.claude.sign_in);
     let checks = credentials(home, Some(sign_in), None).await;
     let fix = "For optional web search, run razor keys.";
@@ -29,13 +36,8 @@ pub async fn doctor(home: &Path) -> Result<(), Error> {
             Some(why) => println!("{name}: missing. {why}"),
         }
     }
-    match &config {
-        Err(e) => println!("Settings: invalid. {e} Edit the named file, then run razor doctor."),
-        Ok(config) if config.server.address.is_some() => println!(
-            "Settings: server.address is no longer used; remove address under [server] in {}.",
-            home.join("config.toml").display()
-        ),
-        Ok(_) => {}
+    if let Err(e) = &config {
+        println!("Settings: invalid. {e} Edit the named file, then run razor doctor.");
     }
     programs(home).await;
     let client = reqwest::Client::builder().unix_socket(home.join(SOCKET));

@@ -25,8 +25,15 @@ const LATIN: &[u8; 160] = b"aaaaaa.ceeeeiiii.nooooo.ouuuuy.yaaaaaaccccccccddddee
 
 /// One character for each: lowercase, a Latin letter without its accent, and a space for
 /// anything but a letter or digit, so a word begins at the start or after a space.
-fn fold(text: &str) -> String {
+pub(super) fn fold(text: &str) -> String {
     let fold = |c: char| {
+        if c.is_ascii() {
+            return if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            };
+        }
         let c = c.to_lowercase().next().unwrap_or(c);
         match LATIN.get((c as usize).wrapping_sub(0xE0)) {
             _ if !c.is_alphanumeric() => ' ',
@@ -141,11 +148,7 @@ fn build(dir: &Path, session: &SessionId) -> std::io::Result<()> {
 /// None for a query of no words, more than 8, or over 200 bytes. On a blocking thread it reads
 /// only search files, each from its end until it holds its newest hit.
 pub(crate) async fn search(home: &Path, q: &Search, limit: usize) -> Option<Vec<Hit>> {
-    let folded = fold(&q.q);
-    let words: Vec<String> = folded.split_whitespace().map(str::to_owned).collect();
-    if q.q.len() > 200 || !(1..=8).contains(&words.len()) {
-        return None;
-    }
+    let words = words(&q.q)?;
     let (home, q) = (home.to_owned(), q.clone());
     let scan = move || scan(&home, &q, &words, limit);
     Some(tokio::task::spawn_blocking(scan).await.unwrap_or_default())
@@ -211,7 +214,7 @@ fn scan(home: &Path, q: &Search, words: &[String], limit: usize) -> Vec<Hit> {
                         at: line.at,
                         entry: EntryId(line.entry),
                         from: lossy(line.from),
-                        snippet: snippet(&line, words),
+                        snippet: snippet(line.fold, line.text, words),
                     });
                 }
             }
@@ -280,19 +283,27 @@ fn parse(buf: &[u8], at: usize) -> Option<Line<'_>> {
 }
 
 /// Where `word` first begins a word of the folded `text`.
-fn begins(text: &[u8], word: &str) -> Option<usize> {
+pub(super) fn begins(text: &[u8], word: &str) -> Option<usize> {
     memmem::find_iter(text, word.as_bytes()).find(|&i| i == 0 || text[i - 1] == b' ')
 }
 
 /// The line's text from shortly before the first word it holds, at most 200 characters: the
 /// folded text has one character for each of the text's.
-fn snippet(line: &Line, words: &[String]) -> String {
-    let at = words.iter().filter_map(|w| begins(line.fold, w)).min();
-    let before = lossy(&line.fold[..at.unwrap_or(0)]).chars().count();
+pub(super) fn snippet(fold: &[u8], text: &[u8], words: &[String]) -> String {
+    let at = words.iter().filter_map(|w| begins(fold, w)).min();
+    let before = lossy(&fold[..at.unwrap_or(0)]).chars().count();
     let skip = before.saturating_sub(40);
-    lossy(line.text).chars().skip(skip).take(200).collect()
+    lossy(text).chars().skip(skip).take(200).collect()
 }
 
 fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+pub(crate) const SEARCH_WORDS: &str = "Search for 1 to 8 words, in at most 200 bytes.";
+
+/// The shared query limits for conversation and transcript search.
+pub(crate) fn words(query: &str) -> Option<Vec<String>> {
+    let words: Vec<String> = fold(query).split_whitespace().map(str::to_owned).collect();
+    (query.len() <= 200 && (1..=8).contains(&words.len())).then_some(words)
 }

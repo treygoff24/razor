@@ -308,7 +308,7 @@ pub enum Role { Root, Child, Thread }
 
   No home record is read. A closed fresh run is read once, folded from its own small record, and then cached. A typical day of an hourly heartbeat, five schedules and the night is 30 runs of about 300 bytes.
 - **Runs:** at most 512 per resident (about 150 KB at the cap), plus one per job in `latest`; none for other sessions beyond a fresh run's own row. They stay bounded with no scan because the fold sees each entry once, at open and at each append.
-- **Fresh runs:** each is a closed session folder on disk. Once closed it holds no conversation, and its task unloads, unless a question it asked is still open: that keeps the task loaded until answered. Also, `record::list` opens every folder when it names a new top-level session or lists repositories, so a frequent fresh job slows those. **Threads:** each costs what any top-level session costs.
+- **Fresh runs:** each is a closed session folder on disk. Once closed it holds no conversation, and its task unloads, unless a question it asked is still open: a run ending itself keeps that question until answered. The person's next chat message or own close settles every open `message` question without another answer, allowing the task to unload once its other work is finished. MCP and sign-in questions still require their own answers. Also, `record::list` opens every folder when it names a new top-level session or lists repositories, so a frequent fresh job slows those. **Threads:** each costs what any top-level session costs.
 - **`GET /v1/deliveries`:** unchanged; it reads the whole index each call, and notes make the index grow faster.
 
 ## The hard decision: where runs come from

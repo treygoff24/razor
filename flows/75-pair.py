@@ -1,7 +1,8 @@
 """A home that ran 0.5.0 updates and starts: its settings with `[server] address` and a `[remote]`
 holding an address and key, and its devices.json with a server paired by address and a phone's
-key, token and notification settings, load unchanged; doctor asks for the address's removal and
-session commands refuse the remote. Pairing by code under the old names upgrades each entry where
+key, token and notification settings, load unchanged; doctor and server.log ask for the address's
+removal, session commands refuse the remote, and a valid server beside the old address and key
+gets a notice that repeats neither. Pairing by code under the old names upgrades each entry where
 it is, keeping its settings and leaving its old key and address behind, and an entry with network
 keys never answers to a shared key; a name that holds network keys is still refused to another
 key. A terminal keeps the churn fixture live while fresh
@@ -37,7 +38,32 @@ with flow([], config=OLD + REMOTE) as f, flow([], config='[server]\nname = ""\n'
     assert "server.address is no longer used; remove address under [server]" in f.run("doctor").stdout
     refused = f.run("--print", "Hello.")
     assert refused.returncode != 0 and "[remote] names a paired server" in refused.stderr, refused
-    assert "server.address" not in (first / "server.log").read_text()
+    # The retired setting is a notice: logged once, naming the file, never the address.
+    log = wait(lambda: (text := (first / "server.log").read_text()).count("server.address is no longer used") and text, 10, "no notice logged")
+    assert log.count("server.address") == 1 and str(first / "config.toml") in log and "desk.tailnet" not in log, log
+    config = first / "config.toml"
+    original = config.read_text()
+
+    def snapshot():
+        with send(first, "GET", "/status") as stream:
+            return json.loads(stream.readline())
+
+    def about(line, words):
+        return [n for n in line.get("notices", []) if words in n]
+    assert about(snapshot(), "server.address") and not about(snapshot(), "[remote]"), snapshot()
+    # An invalid server: still no [remote] notice, and session commands still refuse it. The
+    # address's removal in the same write shows the server reread it.
+    config.write_text(original.replace("[remote]\n", '[remote]\nserver = "Not A Name"\n').replace('address = "desk', '# "desk'))
+    line = wait(lambda: None if about(l := snapshot(), "server.address") else l, 10, "the address notice stayed")
+    assert not about(line, "[remote]"), line
+    refused = f.run("--print", "Hello.")
+    assert refused.returncode != 0 and "[remote] names a paired server" in refused.stderr, refused
+    # Beside a valid server, the old address and key are one notice that repeats neither value.
+    config.write_text(original.replace("[remote]\n", '[remote]\nserver = "beta"\n'))
+    shown = wait(lambda: l if about(l := snapshot(), "[remote]") else None, 10, "no [remote] notice")
+    assert shown["config"] is None and len(about(shown, "[remote]")) == 1 and "laptop" not in " ".join(shown["notices"]), shown
+    config.write_text(original)
+    wait(lambda: not about(snapshot(), "[remote]"), 10, "the [remote] notice stayed")
 
     # Pairing by code under each old name upgrades its entry whole but for the old key and
     # address; the phone keeps its token and settings. Another key cannot take a paired name.

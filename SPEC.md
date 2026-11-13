@@ -60,7 +60,7 @@ Every open session, on every route and residents included, asks once for a hando
 
 **Identity.** A child's identity is its name and its free-text role instructions. A resident has an `identity.toml` file, loaded separately from memory. The resident may edit its own through ordinary file operations; those calls and results are recorded like other file edits. No incarnations, lineages, registries or adoption.
 
-**Trust.** Exactly three guards. Resolve supported literal `pkill` forms only to this session's own running job handles and stop them through the ordinary job stop; refuse unsupported selectors, non-termination signals, no matches and every-process targets (Trey, 2026-11-02: "can we infer the job handle for them from their wrong command and run it for them? No retry that way"). Refuse deleting what the person did not make, as a config switch (in the person's file or a pack, never a project's), on by default, and Trey turns it off for himself: "It should be in here, but it should be toggleable. It's on by default for others, but I want it off for me." Refuse a memory write whose file would hold what looks like a secret key (a known key prefix or shape, or a private-key block), in a sentence that never repeats it (Trey, 2026-11-09, asked whether Razor should refuse to save any memory that looks like an API key: "Yes, every memory"). The first two are checks of the command text an agent submits (a pattern stop scoped to owned jobs; a deletion of a path this session did not create), best effort and not a sandbox: a program an agent runs can still do either; the third is a pattern match and misses a key of no known shape. Nothing else in Razor refuses; a configured hook may refuse under its own contract (Extension surface). A refusal is a sentence, not a policy engine.
+**Trust.** Exactly three guards. Resolve supported literal `pkill` forms only to this session's own running job handles and stop them through the ordinary job stop; refuse unsupported selectors, non-termination signals, no matches and every-process targets (Trey, 2026-11-02: "can we infer the job handle for them from their wrong command and run it for them? No retry that way"). Refuse deleting what the session did not create, as a config switch (in the person's file or a pack, never a project's), off unless the person turns it on (Trey, 2026-11-12: "off by default"). Refuse a memory write whose file would hold what looks like a secret key (a known key prefix or shape, or a private-key block), in a sentence that never repeats it (Trey, 2026-11-09, asked whether Razor should refuse to save any memory that looks like an API key: "Yes, every memory"). The first two are checks of the command text an agent submits (a pattern stop scoped to owned jobs; a deletion of a path this session did not create), best effort and not a sandbox: a program an agent runs can still do either; the third is a pattern match and misses a key of no known shape. Nothing else in Razor refuses; a configured hook may refuse under its own contract (Extension surface). A refusal is a sentence, not a policy engine.
 
 **Phone meetings.** A session's agent follows an in-person meeting recorded on the phone through the existing call facts, with speaker names and a meeting source; new lines never start a turn. Razor receives contiguous live PCM and digest-checked finalized pieces on that session's own server, acknowledges only durable bytes, and hands the folder to meetrec, which does all speech work. A final transcript sends one ordinary notes input from Razor carrying the meeting id and the recording phone, so the existing phone reply notification rule applies.
 
@@ -80,9 +80,11 @@ F2 or `/agents` opens the list by default with its keys, and Left at the start o
 
 Left from the list beside a session, F3 or the list's ⤢ opens the agents overview (Trey, 2026-11-05: "I need some sort of a holistic view of, 'In these projects, you have these agents running. They are working on this high-level objective that you set for this session, and what they are currently doing at the present moment is X.' And then I can click into any one of them or keyboard my way into any one of them."): the whole screen, the selected view's groups at their depths, each agent's server, project, headline as its goal, its question, failure, latest words and running call, and its helpers beside it, one line an agent when that does not fit, scrolling last. It takes the list's keys: Up and Down move between agents and folded groups, Space folds the selected agent's group, Enter or Right unfolds a selected folded group, and Left does nothing. Enter, Right or a click opens an agent through the same guarded switch, folding the overview into the list beside it, and F3 or Escape folds it back into the view beneath without switching. Motion off or under 80 columns makes the fold instant, and under 80 columns Left goes from the session straight to the overview.
 
-The addressed session has a cyan edge and tint in the list; its hiding row or the border identifies it when folded or scrolled away. `/quit` or `/done` with the list open addresses the next open top-level row below, else above (a root or a resident’s thread, never another tree’s helper), if the person is still on the closed session: a closed helper addresses its parent, and with no such row the closed session stays on screen; one who moved on while its last turn ran stays where they are, and a new agent's unsent words wait for its composer while another session is addressed (Trey, 2026-11-06: "It just switched me to a different agent, and I didn't want to"). A session's closing turn says "closing after this turn" in its working line and list row. The four-row cyan top bar centres the displayed session's headline beside the two-row clock, followed by `agent · repo · branch · N changed`; the agent name clips first. Its top edge carries context used/window and percentage, a green fill and fixed amber/red marks at 70%/90%. The normal transcript has no separate context tape. The composer and question band always address the actual recipient. Ctrl-T and the status chip open the status pane, at the inbox when deliveries are unread; it shows every paired server's deliveries and shared read state. Paired sessions open, accept input, answer and stop through their owner.
+The addressed session has a cyan edge and tint in the list; its hiding row or the border identifies it when folded or scrolled away. `/quit` or `/done` with the list open addresses the next open top-level row below, else above (a root or a resident’s thread, never another tree’s helper), if the person is still on the closed session: a closed helper addresses its parent, and with no such row the closed session stays on screen; one who moved on while its last turn ran stays where they are, and a new agent's unsent words wait for its composer while another session is addressed (Trey, 2026-11-06: "It just switched me to a different agent, and I didn't want to"). A session's closing turn says "closing after this turn" in its working line and list row. The four-row cyan top bar centres the displayed session's headline beside the two-row clock, followed by `agent · repo · branch · N changed`; the agent name clips first. Its top edge carries context used/window and percentage, a green fill and fixed amber/red marks at 70%/90%. The normal transcript has no separate context tape. The composer and question band always address the actual recipient. Prefix h/l and prefix Tab/Shift-Tab move the keys among the agents list, conversation and status pane; plain Tab/Shift-Tab do so from a side or an open panel. Tab with an empty draft still steps through click targets. Only the cyan edge and name tab change with focus. Ctrl-T and the status chip give the status pane the keys at its inbox; Escape returns to the conversation. Enter or a delivery click opens the file in the conversation card, or plays a voice note. The reader holds up to 256 KiB, names omitted bytes for larger files, and names Escape, then `y` in the inbox, to copy its path. HTML, PDF and non-text files name the phone or Mac app as the place to open them. The status pane shows every paired server's deliveries and shared read state. Paired sessions open, accept input, answer and stop through their owner.
 
 Every terminal keyboard action has a configurable binding under `[ui.keys.<context>]` in the existing TOML config, for example `[ui.keys.global]` with `prefix = ["Ctrl-A"]`. Missing actions inherit defaults; `[]` unbinds. The shipped data catalogue uses the same format and supplies the plain descriptions shown by `/keys`. Accepted live settings compile once; unknown actions, malformed keys and collisions within a context retain the terminal's last valid bindings and show an error. Hints show effective keys. Trey approved this redesign and configurable keys on 2026-11-02.
+
+`/search <words>` searches the addressed session's recorded transcript, including tool calls, results and displayed summaries, by words in any order, each possibly the start of a word; Enter opens a result at its transcript entry.
 
 `/name <new name>` renames the addressed session immediately through the existing name route, including on a paired server; its top bar and agents list row update from the status stream (Trey, 2026-11-04: "I want the ability to run /name <new name> and it take immediate effect."). The server owns name validation and its refusal sentence.
 
@@ -139,26 +141,26 @@ Prompt-cache discipline is a rule of the architecture: the default GPT profile's
 
 ## 6. Budgets
 
-The ceiling is 86,459 lines: non-blank, non-comment lines of source (Rust, TypeScript, Swift, the flows' language, shell) in this repository, counted by one checked-in counter the gate runs per module from the first commit; the table's rows bind the same way; Razor-specific code moved into another repository counts here too. A raise needs Trey's written yes. Starting table:
+The ceiling is 88,371 lines: non-blank, non-comment lines of source (Rust, TypeScript, Swift, the flows' language, shell) in this repository, counted by one checked-in counter the gate runs per module from the first commit; the table's rows bind the same way; Razor-specific code moved into another repository counts here too. A raise needs Trey's written yes. Starting table:
 
 | Module | Lines |
 | --- | ---: |
-| Protocol and types | 1,894 |
-| Session controller | 3,718 |
-| Record and rebuild | 2,709 |
+| Protocol and types | 1,900 |
+| Session controller | 3,728 |
+| Record and rebuild | 2,963 |
 | Context, prompts, profiles | 2,377 |
-| Model paths (Responses loop, Claude bridge in TypeScript) | 2,904 |
-| Tool service, MCP, skills | 4,008 |
+| Model paths (Responses loop, Claude bridge in TypeScript) | 2,935 |
+| Tool service, MCP, skills | 4,020 |
 | Shell and jobs | 742 |
-| Children, mail, schedules, memory client | 7,578 |
-| API server and configuration | 10,997 |
+| Children, mail, schedules, memory client | 7,826 |
+| API server and configuration | 11,042 |
 | Extension surface (events, command hooks, JavaScript plugins; provisional until its events are named) | 2,000 |
-| Terminal app | 28,372 |
+| Terminal app | 28,995 |
 | Network (the client crate and the C interface the apps link) | 1,395 |
-| Flows, stand-ins, eval runner | 18,164 |
+| Flows, stand-ins, eval runner | 18,847 |
 | Performance harness | 657 |
 | Skill scripts shipped in packs | 269 |
-| **Total** | **86,459** |
+| **Total** | **88,371** |
 
 A raise changes only this table's numbers and the ceiling above; the maintainers keep each raise's record, with its measured counts and the ruling that granted it.
 

@@ -9,6 +9,7 @@ import server
 from terminal import Terminal
 
 LEFT, RIGHT, UP, DOWN, BACKTAB = "\x1b[D", "\x1b[C", "\x1b[A", "\x1b[B", "\x1b[Z"
+CYAN = "3fd9f2"
 names = ["older74", "middle74", "newest74"]
 wait = 'async function wait(run) { let job = await run; while (!job.end) job = await tools.write_stdin({session_id:job.job, yield_time_ms:300000}); }'
 source = wait + "await Promise.all([" + ",".join(f'wait(tools.{n}({{path:"{n}"}}))' for n in names) + "]);"
@@ -72,7 +73,9 @@ with flow(replies, model="sol", config=config) as f:
     order(a, work, b, c)
     with Terminal(f, "--resume", c, rows=20) as t:
         t.send("\x1bOQ")
-        t.until(lambda _: all(any(n in line[:40] for line in t.screen.display) for n in ("c74", "kid74")))
+        # The list in the order just saved: layouts publish at most once a second, and /quit picks its neighbour from the rows shown.
+        at = lambda n: next((i for i, line in enumerate(t.screen.display) if n in line[:40]), 99)
+        t.until(lambda _: at("a74") < at("work74") < at("b74") < at("kid74") < at("c74") < 99)
         t.send("/quit\r")
         t.until(lambda _: "b74" in t.screen.display[2][41:])
         # Quitting beside the list names the session on screen, though another was opened first.
@@ -81,13 +84,12 @@ with flow(replies, model="sol", config=config) as f:
         t.quit()
         assert b"Left work74; it stays open." in t.output, t.output[-300:]
     order(b, a, work)
-    time.sleep(1.1)  # the next layout, published at most once a second, leaves c out
     with wall_clock() as (clock, env, advance), Terminal(replace(f, env={**f.env, **env}), "--resume", a, rows=20) as t:
         # A real clock passes the minute boundary; a frozen one must start clear of it.
         advance(-(int((clock / "now").read_text()) % 60000))
         t.shown("transcript-a74")
-        t.send(LEFT)
-        t.shown("AGENTS · WORK", "transcript-a74")
+        t.send(LEFT)  # the next layout, published at most once a second, leaves c out
+        t.until(lambda _: "transcript-a74" in t.text() and "AGENTS · WORK" in t.text() and at("b74") < at("a74") < at("c74") == 99)
         t.send(LEFT)  # The list has the keys and opens the overview; frozen time cannot finish a fold.
         t.shown("PROJECT74", "work74", "a74", "b74")
 
@@ -132,8 +134,19 @@ with flow(replies, model="sol", config=config) as f:
         t.shown("AGENTS · WORK", "transcript-b74")
         t.send("\x0e\r")  # Beside the list, Ctrl-N selects b's helper's card and Enter opens it.
         t.until(lambda _: "kid74" in t.screen.display[2][41:])
-        t.send(LEFT + "\x14draft74")  # Left goes back to b, and Ctrl-T closes the pane Ctrl-N opened.
-        t.until(lambda _: "b74" in t.screen.display[2][41:] and "STATUS" not in t.text() and "draft74" in t.text())
+        # Left goes back to b. Ctrl-T gives the pane Ctrl-N opened the keys, marking its tab; Ctrl-T
+        # again gives them back and leaves the pane open; Esc from the conversation closes it.
+        t.send(LEFT)
+        t.until(lambda _: "b74" in t.screen.display[2][41:] and "STATUS" in t.text())
+        tab = lambda: "STATUS" in t.text() and (lambda y, x: t.screen.buffer[y][x].bg)(*t.find("STATUS"))
+        t.send("\x14")
+        t.until(lambda _: tab() == CYAN)
+        t.send("\x14")
+        t.until(lambda _: tab() not in (CYAN, False))
+        t.send("\x1b")
+        t.until(lambda _: "STATUS" not in t.text())
+        t.send("draft74")
+        t.until(lambda _: "b74" in t.screen.display[2][41:] and "draft74" in t.text())
         t.send("\x01" + RIGHT + "X")  # Select all, collapse to its end, then append.
         t.shown("draft74X", "AGENTS · WORK")
         t.send(RIGHT)

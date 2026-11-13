@@ -33,7 +33,7 @@ An always-on agent, which Razor calls a resident, is an agent defined in your se
 
    On macOS the service starts Razor.app first, a small program installed once in `~/.local/share/razor/Razor.app`, which hands over to the server. macOS counts what the server and its agents do as Razor's, so a permission you give Razor holds across updates. To let agents see the screen and use the mouse and keyboard, run `razor doctor` in a terminal and answer yes when it asks; Razor's server asks macOS for both permissions, which puts Razor in System Settings, Privacy & Security, under Accessibility (Device Control and Data Access on macOS 27) and under Screen & System Audio Recording. Turn Razor on in both, then run `razor restart`. `razor doctor` says whether the running server has both. Every agent on that Mac, in every Razor home, then has them ([Security](security.md#screen-and-control-on-macos)).
 
-While the server runs, a new resident starts within a minute of saving the file, since Razor rereads the settings at least once a minute. Its name is its session's id, so you talk to it directly:
+While the server runs, a new resident starts within about a second of saving the file. Its name is its session's id, so you talk to it directly:
 
 ```sh
 razor --resume scout
@@ -73,7 +73,7 @@ text = "Check ~/scout/inbox and tell me what needs me."
 
 ## Hearing from it
 
-`deliver = "notify"` tells a schedule's turn to end by sending you a note, and `deliver = "ask"` to end by asking you a question. Notes go to your inbox in the terminal app and through the `notify` program; questions wait in the question band and go through `ask` ([Configuration](configuration.md#notifications)). If a scheduled run fails or is stopped, Razor tells you through `notify` too.
+`deliver = "notify"` tells a schedule's turn to end by sending you a note, and `deliver = "ask"` to end by asking you a question. Notes go to your inbox in the terminal app and through the `notify` program; questions wait in the question band and go through `ask` ([Configuration](configuration.md#notifications)). If a scheduled run fails or is stopped, Razor tells you through `notify` too, with the failed run's session id, name and project in the environment; the message itself names the resident.
 
 Any session, a resident included, that has had unanswered input for 15 minutes (`[stuck] after`) with no command running, no question open and no helper working shows as stuck; open it and see, or stop it.
 

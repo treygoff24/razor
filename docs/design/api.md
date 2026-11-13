@@ -133,7 +133,7 @@ pub async fn revoke(client: &reqwest::Client, key: &str, name: &str) -> Result<S
 ### Routes, under `/v1`
 
 A refusal is a status code and `{"error": "<one sentence>"}`:
-- 400: a malformed body or id; a picture that is not JPEG, PNG or WebP, or past the limits; an ask already answered; an input already taken; a file name that leaves the session's directory.
+- 400: a malformed body or id; a picture that is not JPEG, PNG or WebP, or past the limits; an ask already answered or settled; an input already taken; a file name that leaves the session's directory.
 - 401: no key, or a key that no longer works.
 - 404: no such session, resident, device or file.
 - 409: 64 inputs are already waiting, the session is busy, or the device name is taken.
@@ -142,7 +142,7 @@ A refusal is a status code and `{"error": "<one sentence>"}`:
 
 | request | body | answer |
 | --- | --- | --- |
-| `GET /sessions?cwd=&limit=` | | `[Listed]`, newest first. `limit` is 50 by default, 1,000 at most. |
+| `GET /sessions?cwd=&limit=&skip_dreams=` | | `[Listed]`, newest first. `limit` is 50 by default, 1,000 at most. `skip_dreams=true` leaves out unnamed roots other than resident homes and threads; omitted or false keeps them. `--continue` sets it; older servers ignore it. |
 | `POST /sessions` | `{cwd, model?, effort?, call?}` | `{session}`: a session holding only its `Start`, idle until its first input. With `call: true`, a model or effort left out is `call_model`'s or `call_effort`'s (docs/design/call.md). |
 | `POST /sessions/{id}/input` | `ClientInput` | `{entry}` once admitted. Any session: a child, or a resident, whose session id is its name. A person's input that is one landed sign-in address (the callback address with its query, nothing else) completes its sign-in instead, as the callback does: it answers the ask of whichever session began the sign-in, else signs in directly, and the reply is `{signed_in: true}`. Its code reaches neither the record nor the model. |
 | `DELETE /sessions/{id}/input/{entry}` | | `{}`. The controller records `Withdrawn { inputs: [entry] }`, so the input is never delivered or carried into rebuilt context, across a restart too; no turn ends. Refused once the model has taken it. This cancels an accepted scheduled job. |
@@ -150,7 +150,7 @@ A refusal is a status code and `{"error": "<one sentence>"}`:
 | `POST /sessions/{id}/done` | | `{entry}` once `/done`'s closing input is admitted; that turn runs on in the server, and when it ends the session closes (docs/design/done.md). |
 | `POST /sessions/{id}/quit` | | `{}` once the session is closed with no closing turn: the turn ending now is its last, as `/done`'s closing turn would be, so a running turn stops, inputs still waiting are Withdrawn, its jobs and children close, and a closed turn end is recorded (an empty one when idle); its next input reopens it (`/quit`, Trey 2026-10-30). |
 | `POST /sessions/{id}/handover` | | `{entry}` once the threshold's continuation-note input is admitted, or `{}` if already requested/rebuilding; never waits for the rebuild. A closed child gets 400 with a sentence. |
-| `POST /sessions/{id}/asks/{entry}` | `Answer` | `{entry}`: the input carrying the answer. Refused once the ask is answered from any device. |
+| `POST /sessions/{id}/asks/{entry}` | `Answer` | `{entry}`: the input carrying the answer. Refused once the ask is answered or settled. |
 | `GET /sessions/{id}/events?after=N&native=&heartbeat=` | | NDJSON: the session's stream. |
 | `GET /sessions/{id}/entries?before=N&limit=L&native=` | | NDJSON: the stored lines of up to `L` entries before `N` (default: the end), in record order. A page is at most 8 MiB, except that one entry larger than that comes whole and alone; entries are never split. `L` is 256 by default, 1,024 at most. Entry `N` alone is `before=N+1&limit=1`. |
 | `GET /sessions/{id}/project` | | `{"commits": N, "merges": M, "branch": "main"}` from the session folder's git history; absent facts are omitted, including the branch on a detached head; `{}` outside git or after two seconds. |
@@ -178,7 +178,7 @@ A refusal is a status code and `{"error": "<one sentence>"}`:
 
 On both, an entry leaves out its `native`, the model path's replay data that no client draws (on a GPT response about 100 KB, nearly all of the entry); `native=true` sends each stored line byte for byte. The record and `recall` keep it, and a paired server's `recall` asks for it.
 
-A client's cursor is the last entry it consumed, never `attached.last` or a live line. A client 1,024 lines behind gets `attached` again and the entries it missed: the session's task takes the replay range and the subscription in one step, so no entry falls between them. Only live lines are lost, each superseded by something the client still gets: a delta by its `Text` entry, a thought by its `Thinking` entry, `taken` by the `TurnEnd` naming that input, a tail by the next tail or the job's end. `--print stream` prints exactly these lines.
+A client's cursor is the last entry it consumed, never `attached.last` or a live line. A client 1,024 lines behind gets `attached` again and the entries it missed: the session's task takes the replay range and the subscription in one step, so no entry falls between them. Only live lines are lost, each superseded by something the client still gets: a delta by its `Text` entry on every route ([response retention](responses.md#data-flow)), a completed thought by its `Thinking` entry, `taken` by the `TurnEnd` naming that input, a tail by the next tail or the job's end. `--print stream` prints exactly these lines.
 
 A delta is `{"kind": "delta", "text": "…", "start": true}` for the first words shown of a reply block and the same without `start` for the rest; a block ends with its `Text` entry, the turn's end or a void line, and words the stream holds back (a line that may be a suggestion) are not shown, so `start` rides the first words that are. A void line also drops the words of a reply cut before its `Text` entry, which the retry sends again from a new `start`. A client that attaches mid-block sees no `start` until the next block, and knows the words before it are missing.
 
@@ -389,3 +389,15 @@ impl Config {
 - A list replaces a list whole, the more specific file winning, as any value does.
 - Read live: each turn's admission re-reads changed settings files, and the next fresh open, rebuild or Claude resume uses the list as it then is.
 - `[profiles] claude_prompt` is gone, with its `ClaudePrompt` type, since the prompt A/B was decided (the evaluation design): 12 lines here.
+
+## Search within a session
+
+`GET /v1/sessions/{id}/search?q=<words>&limit=<n>` searches only the addressed
+record, through the usual authentication and owning-server forwarding. It returns
+`Found` with `partial: false`; `Hit.entry` names the destination transcript row,
+including the Call for a matching result. The limit defaults to 20 and clamps to
+1–50. There is no paging. Queries use 1–8 word prefixes and at most 200 UTF-8 bytes.
+The route obtains indexed pages through the controller; the record module decodes
+and matches each page on a blocking thread. An existing unloaded session follows
+the ordinary page-loading path. Old clients remain unchanged; an old server
+without the route returns 404. The terminal reports that it needs an update.

@@ -237,10 +237,16 @@ impl Api {
         length: u64,
     ) -> Result<(Vec<u8>, u64), Error> {
         let retry = "The saved output could not be read; close and reopen the card to retry.";
-        let path = format!("v1/sessions/{session}/files/{file}");
+        let mut path = self.server.clone();
+        path.path_segments_mut()
+            .map_err(|_| error(retry))?
+            .pop_if_empty()
+            .extend(["v1", "sessions", session.as_str(), "files"])
+            .extend(file.split('/'));
+        let path = path.path();
         let range = format!("bytes={offset}-{}", offset.saturating_add(length - 1));
         let request = self
-            .request(Method::GET, &path)?
+            .request(Method::GET, path)?
             .header(header::RANGE, range);
         let mut response = Self::send(request, 30, retry).await?;
         let range = response

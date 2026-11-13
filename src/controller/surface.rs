@@ -70,7 +70,7 @@ impl Controller {
         // renames its thread at once.
         let name = match (&id, &child) {
             (None, None) => {
-                let roots = record::list(&self.inner.home, None, None, false, usize::MAX).await?;
+                let roots = record::list(home, None, None, false, usize::MAX, false).await?;
                 let held = roots.iter().filter(|(.., name, at)| {
                     !name.is_empty() && !at.elapsed().is_ok_and(|age| age >= WEEK)
                 });
@@ -163,10 +163,35 @@ impl Controller {
     async fn seed(&self, session: &SessionId) -> Result<(), Error> {
         let summary = self.summary(session).await?;
         let row = self.row(&summary).await;
-        let mut status = lock(&self.inner.status);
-        status.row(row);
-        status.child_rows(&summary);
+        lock(&self.inner.status).row(row);
+        self.child_rows(&summary).await;
         Ok(())
+    }
+
+    /// Rebuilds evicted local helpers from their records before applying their parent's facts.
+    pub(super) async fn child_rows(&self, parent: &Summary) {
+        for child in &parent.children {
+            if child.session.address().is_none()
+                && child.report.as_ref().is_some_and(Report::listed)
+                && !child.stopped
+                && child.settled.is_none()
+                && !lock(&self.inner.status).agents.contains_key(&child.session)
+            {
+                // Read without entering a child's queue: its load may be waiting on this parent.
+                match self.inner.summaries.read(self.home(), &child.session).await {
+                    Ok(summary) => {
+                        let mut row = self.row(&summary).await;
+                        children::child_row(&parent.session, child, &mut row);
+                        let mut status = lock(&self.inner.status);
+                        if !status.agents.contains_key(&child.session) {
+                            status.row(row);
+                        }
+                    }
+                    Err(e) => eprintln!("razor: reading child {}'s row: {e}", child.session),
+                }
+            }
+        }
+        lock(&self.inner.status).child_rows(parent);
     }
 
     /// Seeds missing local display rows without loading session tasks.
@@ -517,7 +542,7 @@ impl Controller {
     /// publisher trims these candidates on its first pass. No session task starts; a stat of
     /// the record decides before any of it is folded.
     pub(super) async fn recent(&self) {
-        let roots = record::list(&self.inner.home, None, None, false, usize::MAX).await;
+        let roots = record::list(&self.inner.home, None, None, false, usize::MAX, false).await;
         let mut roots = roots.unwrap_or_default();
         roots.sort_by_key(|root| std::cmp::Reverse(root.4));
         let mut taken = BTreeMap::<SessionId, usize>::new();
@@ -541,9 +566,11 @@ impl Controller {
         resident: Option<&SessionId>,
         jobs: bool,
         limit: usize,
+        skip_dreams: bool,
     ) -> Result<Vec<Listed>, Error> {
         let mut listed = Vec::new();
-        let roots = record::list(&self.inner.home, cwd.as_deref(), resident, jobs, limit);
+        let cwd = cwd.as_deref();
+        let roots = record::list(self.home(), cwd, resident, jobs, limit, skip_dreams);
         for (session, ..) in roots.await? {
             let summary = self.summary(&session).await?;
             let repo = children::repo(&summary);

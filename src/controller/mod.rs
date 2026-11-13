@@ -45,6 +45,7 @@ struct Inner {
     home: PathBuf,
     /// The last good config; holding its lock also serializes reloads.
     config: tokio::sync::Mutex<Settings>,
+    resident_wake: Notify,
     network: tokio::sync::Mutex<network::Network>,
     mcp_auth: Auth,
     mcp_revision: AtomicU64,
@@ -73,7 +74,7 @@ struct Inner {
     started: Millis,
 }
 
-/// The controller-wide stream: a row per agent, with its own readings, and the config notice.
+/// The controller-wide stream: agent readings, settings errors and nonblocking notices.
 struct Status {
     agents: BTreeMap<SessionId, AgentView>,
     /// One last look and seen entry per looked-at session, until its record is gone or restart.
@@ -81,6 +82,7 @@ struct Status {
     /// Outstanding foreign child facts survive their parent's display row for report recovery.
     remote: BTreeMap<SessionId, SessionId>,
     config: Option<String>,
+    notices: Vec<String>,
     /// The brand, `[ui]` and `[phone]` settings last sent.
     shown: (Brand, Ui, Phone),
     /// 1,024 lines; a client further behind gets a fresh snapshot.
@@ -119,6 +121,7 @@ impl Controller {
             readings: BTreeMap::new(),
             remote: BTreeMap::new(),
             config: None,
+            notices: Vec::new(),
             shown: (
                 config.brand.shown(&config.residents),
                 config.ui,
@@ -136,6 +139,7 @@ impl Controller {
                 ),
                 plugins: crate::extensions::Plugins::new(home.clone()),
                 config: tokio::sync::Mutex::new(settings),
+                resident_wake: Notify::new(),
                 network: Default::default(),
                 mcp_auth: Auth::new(home.clone()),
                 mcp_revision: AtomicU64::new(0),
@@ -259,6 +263,11 @@ impl Controller {
         &self.inner.memory
     }
 
+    /// The residents loop's wake signal.
+    pub(crate) fn resident_wake(&self) -> &Notify {
+        &self.inner.resident_wake
+    }
+
     /// The delivery index and subscription the session actions and the API share.
     pub fn deliveries(&self) -> Deliveries {
         self.inner.deliveries.clone()
@@ -355,7 +364,11 @@ impl Controller {
     }
 
     /// Pending inputs, last entry, replay and subscription, taken in one session operation.
-    async fn attachment(&self, session: &SessionId, after: EntryId) -> Result<Attachment, Error> {
+    pub(crate) async fn attachment(
+        &self,
+        session: &SessionId,
+        after: EntryId,
+    ) -> Result<Attachment, Error> {
         self.ask(session, move |s| Box::pin(s.attachment(after)))
             .await
     }
@@ -391,8 +404,10 @@ impl Controller {
     /// brand or ui reaches the status stream once.
     pub async fn config(&self) -> Config {
         let mut settings = self.inner.config.lock().await;
-        settings.read();
-        let config = &settings.config;
+        if settings.read() {
+            self.inner.resident_wake.notify_one();
+        }
+        let (config, notices) = (&settings.config, &settings.notices);
         self.inner
             .summaries
             .configure(config.residents.keys().cloned());
@@ -405,26 +420,29 @@ impl Controller {
             .await
             .configure(&self.inner.home, config, self.inner.devices.clone())
             .await;
-        let notice = settings
+        let error = settings
             .errors
             .iter()
-            .chain(&settings.notices)
             .cloned()
             .chain(network.err().map(|e| e.to_string()))
             .chain(plugins)
             .reduce(|a, b| format!("{a} {b}"));
         let mut status = lock(&self.inner.status);
-        if status.config != notice {
-            let shown = notice.as_deref().unwrap_or("config.toml is valid again.");
+        if status.config != error {
+            let shown = error.as_deref().unwrap_or("config.toml is valid again.");
             eprintln!("razor: {shown}");
+        }
+        if status.notices != *notices {
+            notices.iter().for_each(|l| eprintln!("razor: {l}"));
         }
         let shown = (
             config.brand.shown(&config.residents),
             config.ui.clone(),
             config.phone.clone(),
         );
-        if status.config != notice || status.shown != shown {
-            (status.config, status.shown) = (notice, shown);
+        if status.config != error || status.notices != *notices || status.shown != shown {
+            (status.config, status.shown) = (error, shown);
+            status.notices.clone_from(notices);
             let _ = status.lines.send(status.snapshot());
         }
         config.clone()
@@ -573,6 +591,7 @@ impl Status {
         Live::Agents {
             agents: self.agents.values().cloned().collect(),
             config: self.config.clone(),
+            notices: self.notices.clone(),
             brand: Box::new(self.shown.0.clone()),
             ui: Box::new(self.shown.1.clone()),
             phone: self.shown.2.clone(),
@@ -683,22 +702,6 @@ impl Status {
         }
     }
 
-    /// Stores and publishes the fold; a session's first row also projects its children's facts.
-    fn record(
-        &mut self,
-        s: &Summary,
-        state: State,
-        context: Option<u64>,
-        closing: Option<bool>,
-        limits: (Option<u64>, f64),
-    ) {
-        let first = !self.agents.contains_key(&s.session);
-        self.row(self.build(s, state, context, closing, limits));
-        if first {
-            self.child_rows(s);
-        }
-    }
-
     /// A parent's record decides its children's reports and whether they are done.
     fn child_rows(&mut self, parent: &Summary) {
         for child in &parent.children {
@@ -710,29 +713,17 @@ impl Status {
                     self.remote.remove(&child.session);
                 }
             }
-            if child.session.address().is_none()
-                && child.report.as_ref().is_some_and(Report::listed)
-                && !child.stopped
-                && child.settled.is_none()
-                && !self.agents.contains_key(&child.session)
-            {
-                self.row(children::child(&parent.session, child));
-            }
-            let Some(row) = self.agents.get_mut(&child.session) else {
+            let Some(mut row) = self.agents.get(&child.session).cloned() else {
                 continue;
             };
-            let before = row.clone();
             row.report = child.report.clone().filter(|_| !child.stopped);
             row.settled = child.settled;
             if !child.working() {
                 row.state = State::Done;
-            } else if before.state == State::Done {
+            } else if row.state == State::Done {
                 row.state = State::NeedsYou;
             }
-            if *row != before {
-                let row = row.clone();
-                let _ = self.lines.send(Live::Agent(Box::new(row)));
-            }
+            self.row(row);
         }
     }
 }

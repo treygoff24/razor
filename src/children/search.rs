@@ -31,7 +31,7 @@ pub(crate) async fn search(c: &Controller, q: Search) -> Result<Found, Error> {
         .map(|(device, _)| devices.fetch(device, "/v1/search", &asked, BODY_BYTES));
     let there = futures_util::future::join_all(there);
     let (here, there) = tokio::join!(crate::record::search(c.home(), &q, limit), there);
-    let words = "Search for 1 to 8 words, in at most 200 bytes.";
+    let words = crate::record::SEARCH_WORDS;
     let (mut hits, mut partial) = (here.ok_or_else(|| Error::Refused(words.into()))?, false);
     for ((device, _), answer) in servers.iter().zip(there) {
         partial |= answer.is_none();

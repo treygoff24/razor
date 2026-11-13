@@ -18,7 +18,7 @@ impl Residents {
     ) -> Result<Vec<ResidentProject>, Error> {
         let dir = self.resident(resident).await?.cwd.join("projects");
         let home = self.inner.controller.home();
-        let roots = crate::record::list(home, None, Some(resident), false, usize::MAX).await;
+        let roots = crate::record::list(home, None, Some(resident), false, usize::MAX, false).await;
         let roots = roots.map_err(other("listing the resident's chats"))?;
         let threads: Vec<_> = (roots.into_iter())
             .filter_map(|(_, _, t, _, at)| Some((t?.resident_project?, at)))

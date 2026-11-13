@@ -302,7 +302,14 @@ pub fn click(app: &mut App, action: Option<view::Action>) {
 /// Lays the list or the chosen server out in the panel's box over `r`, keeps the chosen row
 /// on screen, and makes each server row of the list a click target. Asks the frame clock for
 /// the pulse only while a drawn server connects and motion is on.
-pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<view::Hit>) {
+pub fn draw(
+    app: &mut App,
+    b: &mut Buffer,
+    r: Rect,
+    edge: ratatui::style::Color,
+    now: u64,
+    hits: &mut Vec<view::Hit>,
+) {
     let Some(Panel::Mcp(mcp)) = &app.panel else {
         return;
     };
@@ -330,7 +337,7 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<vie
     foot.push(Line::from(span(bindings::hints(app, keys, " · "), GRAY)));
     let title = open.map_or("mcp".into(), |row| format!("mcp · {}", row.name));
     let at = targets.iter().find(|t| t.1 == mcp.chosen).map(|t| t.0);
-    let words = panel::frame(b, r, &title, BEZEL_HI);
+    let words = panel::frame(b, r, &title, edge);
     let height = words.height.saturating_sub(foot.len() as u16);
     let body = Rect::new(words.x, words.y, words.width, height);
     if let Some(at) = at {

@@ -2,7 +2,8 @@
 files, and exits 1; with credentials it exits 0; a configured Claude sign-in command is
 what it checks. A silent server cannot hang it (docs/design/done.md). Help and refused commands
 touch no state (docs/design/setup.md). The server runs the cua-driver shipped beside it as its
-daemon (docs/design/starter.md)."""
+daemon (docs/design/starter.md). Settings a release no longer reads are notices, not errors
+(docs/configuration.md)."""
 import json
 import os
 import shutil
@@ -10,8 +11,10 @@ import socket
 import subprocess
 import sys
 from pathlib import Path
+import claude
 from driver import AUTH, BINARY, flow
 import server
+from terminal import Terminal
 
 with flow([]) as f:
     fresh, home = f.home.parent / "fresh", f.home.parent / "fresh/home"
@@ -140,3 +143,57 @@ with flow([]) as f:
         subprocess.run([shipped / "razor", "doctor"], env={**f.env, "PATH": f"{shipped}:/usr/bin:/bin"}, capture_output=True, timeout=30)
         assert {name: made("--socket").get(name) for name in want} == want, made("--socket")
         os.kill(int(pid), 0)  # Still reading after doctor's run: the server holds the pipe open.
+
+# A home an older release left, with a key file and `[server] address`: each is a notice that stops
+# nothing and repeats no value. An agent runs a turn; doctor, the agents feed, server.log (once) and
+# the terminal's alerts say each, a notice never in an error's ink; an error beside a notice keeps
+# both, each in its own field; removing them clears them without a restart, and the feed then leaves
+# the field out.
+OLD = '[server]\naddress = "desk.example:7433"\n'
+with flow([claude.reply(text="old home works")], config=OLD) as f:
+    state = f.home / ".razor"
+    (state / "key").write_text("flow-old-key")
+    session = f.ask("Hello.")["session"]
+    assert any(e["kind"] == "turn_end" for e in f.record(session)), list(f.record(session))
+    pid = json.loads((state / "server.json").read_text())["pid"]
+
+    def feed(test, why):
+        """The first agents snapshot `test` passes, within 10 s."""
+        def line():
+            with server.send(f, "GET", "/status") as stream:
+                line = json.loads(stream.readline())
+            return line if test(line) else None
+        return server.wait(line, 10, why)
+
+    def ink(t, words):
+        """The colour of the first cell of `words` on screen."""
+        y, x = t.find(words)
+        return t.screen.buffer[y][x].fg
+
+    line = feed(lambda l: len(l.get("notices", [])) == 2, "the two notices never reached the feed")
+    key, address = sorted(line["notices"])
+    assert line["config"] is None and str(state / "key") in key and str(state / "config.toml") in address, line
+    assert "flow-old-key" not in json.dumps(line) and "desk.example" not in json.dumps(line), line
+    doctor = f.run("doctor")
+    assert doctor.stdout.count(key) == doctor.stdout.count(address) == 1 and not doctor.stderr, doctor
+    assert "flow-old-key" not in doctor.stdout + doctor.stderr, doctor
+    with Terminal(f, rows=60, columns=160) as t:
+        t.shown("Key file:", "server.address")
+        (state / "key").unlink()
+        feed(lambda l: l.get("notices") == [address], "removing the key file kept its notice")
+        t.until(lambda t: "Key file:" not in t.text())
+        config = state / "config.toml"
+        good = config.read_text()
+        config.write_text(good + "[ui]\nmotin = false\n")
+        line = feed(lambda l: l["config"], "the error never reached the feed")
+        assert "motin" in line["config"] and "server.address" not in line["config"] and line["notices"] == [address], line
+        t.shown("motin")
+        assert ink(t, "motin") != ink(t, "server.address"), t.text()
+        config.write_text(good.replace(OLD, ""))
+        feed(lambda l: l["config"] is None and "notices" not in l, "the notices never cleared")
+        t.until(lambda t: "ALERTS" not in t.text())
+    assert "Settings:" not in f.run("doctor").stdout
+    assert json.loads((state / "server.json").read_text())["pid"] == pid, "the server restarted"
+    # Many rereads later, the key file's notice was logged once, when it appeared, and never its content.
+    log = (state / "server.log").read_text()
+    assert log.count("Key file:") == 1 and "flow-old-key" not in log and "desk.example" not in log, log

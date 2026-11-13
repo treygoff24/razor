@@ -1,5 +1,6 @@
-//! A card over the transcript: `/status`, `/tasks`, `/login` with the server's sign-in
+//! A card over the transcript: `/tasks`, `/login` with the server's sign-in
 //! instructions, or `/mcp`.
+use super::keys::Pane;
 use super::{App, mcp, text::*, view};
 use crate::protocol::Login;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -11,9 +12,10 @@ use ratatui::{
 use std::collections::VecDeque;
 
 pub enum Panel {
-    Status,
+    Delivery(super::reader::Reader),
     /// The addressed project's grouped task list and selected task card.
     Tasks,
+    Search,
     Help,
     Keys,
     // Sign-in instructions are transient API output, at most 64 KiB in 128 lines.
@@ -25,11 +27,11 @@ pub enum Panel {
     Mcp(mcp::Mcp),
 }
 
-/// Opens the panel `word` names (`/status`, `/help`, `/keys`, `/tasks` or `/login`); false for
+/// Opens the panel `word` names (`/help`, `/keys`, `/tasks` or `/login`); false for
 /// another command.
 pub fn command(app: &mut App, word: &str, args: &str) -> bool {
     match word {
-        "/status" => open(app, Panel::Status),
+        "/search" => super::search::open(app, args),
         "/help" => open(app, Panel::Help),
         "/keys" => open(app, Panel::Keys),
         "/tasks" => {
@@ -50,6 +52,7 @@ pub fn command(app: &mut App, word: &str, args: &str) -> bool {
 
 /// Shows `panel` from its top, unsearched.
 pub fn open(app: &mut App, panel: Panel) {
+    app.keys = Pane::Conversation;
     (app.panel, app.panel_scroll, app.panel_search) = (Some(panel), 0, None);
 }
 
@@ -112,6 +115,9 @@ fn show(app: &mut App, text: &str, ended: bool) {
 /// One key: an open `/mcp` takes it first, and what it leaves scrolls or closes the panel; while
 /// a search is typed, a character without Ctrl is its word.
 pub fn key(app: &mut App, key: KeyEvent) {
+    if matches!(app.panel, Some(Panel::Search)) && super::search::key(app, key) {
+        return;
+    }
     if matches!(app.panel, Some(Panel::Tasks)) && super::tasks::key(app, key) {
         return;
     }
@@ -138,6 +144,9 @@ pub fn key(app: &mut App, key: KeyEvent) {
             0
         }
         KeyCode::Esc => {
+            if matches!(app.panel, Some(Panel::Delivery(_))) {
+                app.keys = super::keys::Pane::Status;
+            }
             if let (Some(Panel::Login { .. }), Some(task)) = (&app.panel, app.login.take()) {
                 task.abort();
             }
@@ -166,9 +175,14 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<vie
     let r = Rect::new(r.x + inset, r.y, r.width - 2 * inset, r.height);
     let width = r.width.saturating_sub(4) as usize;
     let found = |rows| found(rows, app.panel_search.as_deref(), width);
+    let edge = [BEZEL_HI, CYAN][usize::from(app.keys == Pane::Conversation)];
     let (title, rows) = match &app.panel {
-        Some(Panel::Status) => ("status", super::status::rows(app, width, now)),
-        Some(Panel::Tasks) => return super::tasks::draw(app, b, r, hits),
+        Some(Panel::Delivery(_)) => return super::reader::draw(app, b, r, edge),
+        Some(Panel::Search) => (
+            "Search this session",
+            super::search::rows(app, width, r.height.saturating_sub(3) as usize),
+        ),
+        Some(Panel::Tasks) => return super::tasks::draw(app, b, r, edge, hits),
         Some(Panel::Help) => ("help", found(super::composer::completion::help(width))),
         Some(Panel::Keys) => ("keys", found(super::bindings::rows(app))),
         Some(Panel::Login { lines, running, .. }) => {
@@ -178,21 +192,32 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<vie
             let title = ["login", "login · waiting for sign-in"][usize::from(*running)];
             (title, rows.collect())
         }
-        Some(Panel::Mcp(_)) => return mcp::draw(app, b, r, now, hits),
+        Some(Panel::Mcp(_)) => return mcp::draw(app, b, r, edge, now, hits),
         None => return,
     };
-    let words = frame(b, r, title, BEZEL_HI);
+    let words = frame(b, r, title, edge);
     let body = Rect {
         height: words.height.saturating_sub(1),
         ..words
     };
+    let selected = matches!(app.panel, Some(Panel::Search)).then_some(app.panel_scroll);
+    if selected.is_some() {
+        app.panel_scroll = 0;
+    }
     scroll(app, b, body, &rows);
+    if let Some(selected) = selected {
+        app.panel_scroll = selected;
+    }
     let search = match (&app.panel_search, searchable(app)) {
         (Some(words), _) => format!("/{words}▏ · "),
         (None, true) => "<panel.search> search · ".into(),
         (None, false) => String::new(),
     };
-    let keys = format!("{search}<panel.up>/<panel.down> scroll · <panel.cancel> back");
+    let keys = if selected.is_some() {
+        "<panel.up>/<panel.down> select · <panel.accept> open · <panel.search> refine · <panel.cancel> back".into()
+    } else {
+        format!("{search}<panel.up>/<panel.down> scroll · <panel.cancel> back")
+    };
     let keys = super::bindings::hints(app, &keys, " · ");
     put(
         b,

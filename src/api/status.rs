@@ -44,6 +44,7 @@ async fn server(app: &App) -> Server {
         meetings: app.meetings.available,
         load: load::load().await,
         release_ready: crate::residents::release_ready().await,
+        release_action: crate::residents::release_action().await,
         residents: app.residents.days().await,
         views_version: Some(app.views.views.borrow().version),
         silent: *app.asleep.borrow(),

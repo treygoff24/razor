@@ -28,14 +28,16 @@ No setting needs a key's value: a provider names the variable that holds its key
 
 An agent's shell is bash, as your user, in the session's folder. It starts from the server's environment minus the web and voice keys, every name `keys.toml` lists and Claude's sign-in variables (`EXA_API_KEY`, `PARALLEL_API_KEY`, `FIRECRAWL_API_KEY`, `ELEVENLABS_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`), so a command that prints its environment does not put them in the record. MCP servers and script tools start the same way. That is protection against accidents, not against an agent that sets out to read a file: anything your user can read, an agent can read, `keys.toml` included. Keys you export for other models and do not list in `keys.toml`, such as `GEMINI_API_KEY`, stay in agents' environments.
 
-Razor refuses two kinds of command, by checking the command's text before it runs:
+Razor checks command text before it runs. The deletion guard is off unless you turn it on with `razor config set guards.delete true`:
 
-| Refused | What counts | Can it be turned off |
+| Refused | What counts | Setting |
 | --- | --- | --- |
-| A kill by pattern | `pkill`, `killall`, `kill -1`, or `kill` fed by `pgrep` or `pidof`. A plain `pkill` whose pattern matches the session's own running jobs stops those jobs instead. | No |
-| Deleting what the session did not create | `rm`, `rmdir`, `unlink`, `shred`, `find -delete`, `find -exec rm`, `git clean` without `-n`, or a patch that deletes a file, aimed at a file that existed before the session started or whose creation time the filesystem does not record, or at a path written with a wildcard, `~`, a variable or a command substitution | Yes: `[guards] delete = false` in your own file or a pack (a folder of default settings, such as the starter pack Razor ships) |
+| A kill by pattern | `pkill`, `killall`, `kill -1`, or `kill` fed by `pgrep` or `pidof`. A plain `pkill` whose pattern matches the session's own running jobs stops those jobs instead. | Always on |
+| Deleting what the session did not create | `rm`, `rmdir`, `unlink`, `shred`, `find -delete`, `find -exec rm`, `git clean` without `-n`, or a patch's Delete File, aimed at a file that existed before the session started or whose creation time the filesystem does not record, or at a path written with a wildcard, a variable or a command substitution | Off by default; `[guards] delete = true` in your own file or a pack (a folder of default settings, such as the starter pack Razor ships) |
 
-Both are best effort. The check sees through `sudo`, `env`, `nohup`, `timeout` and similar wrappers, but a program an agent runs can still kill or delete whatever you could, a command can be written in ways the check does not see, and script tools' commands are not checked. Plugins can refuse more under their own rules ([Configuration](configuration.md#plugins)).
+An unquoted `~` or `~/` resolves to the server user's home; `~user` is refused, as is an unquoted tilde when the command text contains `HOME=`. For an unresolved path, a refusal tells the agent only to write the path in full. For a file older than the session or of unknown age, it tells the agent to tell you that you can delete it, or turn this guard off with `razor config set guards.delete false`.
+
+Both checks are best effort, not a sandbox. The check sees through `sudo`, `env`, `nohup`, `timeout` and similar wrappers, but a program an agent runs can still kill or delete whatever you could, a command can be written in ways the check does not see, and script tools' commands are not checked. Plugins can refuse more under their own rules ([Configuration](configuration.md#plugins)).
 
 ## Contacting only your model provider
 

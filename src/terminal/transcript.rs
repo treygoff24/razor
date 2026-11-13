@@ -8,7 +8,7 @@ mod rows;
 pub(super) mod select;
 
 use super::{markdown, motion, pictures, text::*, tools, view};
-use crate::protocol::{Body, CallId, End, Entry, EntryId, JobId, SessionId};
+use crate::protocol::{Body, CallId, End, Entry, EntryId, JobId, Origin, SessionId};
 pub(super) use pages::{jump, read_visible};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color, text::Line};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -110,9 +110,6 @@ pub(super) struct Transcript {
     // One dismissal per session, retained when history pages replace the visible entries.
     pub(super) dismissed_suggestion: Option<EntryId>,
     pub(super) partial: String,
-    // Streamed words a stopped turn never recorded, by its retained turn end: the only copy
-    // there is, counted in that entry's size and evicted with it.
-    unsaved: BTreeMap<EntryId, String>,
     pub(super) delta_at: Option<u64>,
     // Where the reader holds the view: `None` follows the newest row; else the entry whose rows
     // hold the top line and that line's row within it, negative while PageUp presses wait for an
@@ -346,6 +343,21 @@ impl Transcript {
             Some(id)
         };
         self.detail_scroll = 0;
+    }
+    /// A navigation destination is opened idempotently; deliberate clicks still toggle.
+    fn open(&mut self, id: EntryId) {
+        match self.entries.get(&id).map(|e| &e.body) {
+            Some(Body::Text { .. } | Body::Thinking { .. }) => self.expand([id], true),
+            Some(Body::Call { .. })
+            | Some(Body::Input(crate::protocol::Input {
+                from: Origin::Report { .. } | Origin::Mail { .. },
+                ..
+            })) => {
+                self.opened = None;
+                self.toggle(id);
+            }
+            _ => {}
+        }
     }
     /// Opens or folds the replies, and the runs of calls by their first, that `ids` names; the
     /// view holds its top line, so what a reply gains goes below.

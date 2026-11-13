@@ -380,6 +380,9 @@ pub struct Server {
     /// A newer selected release, ready for the person to restart this server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) release_ready: Option<String>,
+    /// A pending release action for the person, with its update commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) release_action: Option<String>,
     /// Locally stored saved-views version; absent until a paired server reports it.
     pub(crate) views_version: Option<u64>,
     /// Its residents by name; left out when it has none.
@@ -730,6 +733,8 @@ pub enum Live {
     Agents {
         agents: Vec<AgentView>,
         config: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        notices: Vec<String>,
         /// The last good config's; sent again whenever it changes.
         brand: Box<Brand>,
         /// As `brand`.

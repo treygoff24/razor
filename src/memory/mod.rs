@@ -96,7 +96,13 @@ struct Text {
     waits: String,
     overdue: String,
     offline: String,
-    conflict: String,
+    stale_read: String,
+    rebase: String,
+    rollback: String,
+    not_written: String,
+    push_unknown: String,
+    paths_incomplete: String,
+    git_lock: String,
     changed: String,
     settings: String,
     identity: String,
@@ -131,7 +137,7 @@ static TEXT: LazyLock<Text> = LazyLock::new(|| {
 /// is replaced by one rename.
 pub(crate) struct Memory {
     home: PathBuf,
-    lock: tokio::sync::Mutex<()>,
+    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     /// Whether releases may be owed: set at start and when a release fails, so the next tick
     /// looks for claims that a closed or settled session still holds.
     owed: AtomicBool,
@@ -273,7 +279,7 @@ type Note = (String, String);
 impl Memory {
     /// Memory for the server whose home is `home`. It reads and writes nothing until a call.
     pub(crate) fn new(home: &Path) -> Memory {
-        let (home, lock, owed) = (home.into(), tokio::sync::Mutex::new(()), true.into());
+        let (home, lock, owed) = (home.into(), Default::default(), true.into());
         Memory { home, lock, owed }
     }
 
@@ -481,25 +487,49 @@ impl Memory {
     }
 
     /// `op` on `cwd`'s tasks, first brought up to date when they are shared and the last fetch
-    /// is over 30 seconds old; a remote out of reach leaves them as they are.
+    /// is over 30 seconds old; a failed refresh returns local data with a warning.
     async fn read<F>(&self, c: &Controller, cwd: &Path, op: F) -> Answer
     where
         F: FnOnce(&Project) -> Answer + Send + 'static,
     {
         let p = self.files(c, cwd, Ok).await?;
-        if matches!(p.remote, Ok(Some(_))) && share::stale(&p.tasks).await {
-            let held = self.lock.lock().await;
-            let (_, notes) = self.locked(c, &p, None).await;
-            drop(held);
-            send(c, notes).await;
-        }
-        blocking(move || op(&p)).await
+        let c = c.clone();
+        tokio::spawn(async move {
+            let memory = c.memory();
+            let mut refresh = None;
+            if matches!(p.remote, Ok(Some(_))) && share::stale(&p.tasks).await {
+                let held = memory.lock.lock().await;
+                let (answer, notes) = memory.locked(&c, &p, None).await;
+                refresh = answer.err();
+                drop(held);
+                send(&c, notes).await;
+            }
+            let mut answer = blocking(move || op(&p)).await;
+            if let Some(why) = refresh {
+                let warning = fill(&TEXT.stale_read, &[("why", &why)]);
+                match &mut answer {
+                    Ok(value) => value["warning"] = warning.into(),
+                    Err(why) => *why = refuse(&format!("{why}; {warning}")),
+                }
+            }
+            answer
+        })
+        .await
+        .map_err(other("waiting for the task read"))?
     }
 
     /// One change, `edit`, to `cwd`'s tasks by session `by.0`, named `by.1`. On a shared project
     /// it is on the remote before it answers. The notes it causes go out once the lock is
     /// released, and a claim becomes the claimant's headline.
     async fn edit(&self, c: &Controller, cwd: &Path, by: By<'_>, edit: Edit) -> Answer {
+        let (c, cwd, session, name) = (c.clone(), cwd.to_owned(), by.0.clone(), by.1.to_owned());
+        tokio::spawn(async move { c.memory().editing(&c, &cwd, (&session, &name), edit).await })
+            .await
+            .map_err(other("waiting for the task write"))?
+    }
+
+    /// Owns the complete write and its lock; stopping the caller only stops waiting for it.
+    async fn editing(&self, c: &Controller, cwd: &Path, by: By<'_>, edit: Edit) -> Answer {
         let held = self.lock.lock().await;
         let p = self.files(c, cwd, Ok).await?;
         // A question is for someone who has written to the shared list, as the remote now has

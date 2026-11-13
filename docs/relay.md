@@ -12,7 +12,7 @@ Build `iroh-relay` at the version of iroh that Razor uses. Razor's `Cargo.lock` 
 cargo install iroh-relay --version 1.4.1 --locked --features server
 ```
 
-The relay gets its own TLS certificate from Let's Encrypt, so it needs a DNS name pointing at the server. Many hosts give each server one already (Akamai's look like `72-14-182-114.ip.linodeusercontent.com`); a name on your own domain works too. Save as `/etc/iroh-relay.toml`:
+The relay gets its own TLS certificate from Let's Encrypt, so it needs a DNS name pointing at the server. Many hosts give each server one already (Akamai's look like `203-0-113-7.ip.linodeusercontent.com`); a name on your own domain works too. Save as `/etc/iroh-relay.toml`:
 
 ```toml
 http_bind_addr = "[::]:80"

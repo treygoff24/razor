@@ -230,11 +230,11 @@ impl Session {
             self.blocked |= parent.children.iter().any(held);
         }
         self.publish_row();
-        children::recover_loaded(self.c.clone(), self.record.summary());
-        lock(&self.c.inner.status).child_rows(self.record.summary());
         if let Some(parent) = &parent {
             lock(&self.c.inner.status).child_rows(parent);
         }
+        children::recover_loaded(self.c.clone(), self.record.summary());
+        self.c.child_rows(self.record.summary()).await;
         // Only `create` hands over a record, whose first entry is the `Start` it just wrote.
         if created && let Ok(start) = self.record.get(EntryId(1)).await {
             let cwd = &self.record.summary().cwd;
@@ -381,7 +381,7 @@ impl Session {
         let _ = self.lines.send((Some(id), line));
         self.publish_row();
         if children {
-            lock(&self.c.inner.status).child_rows(self.record.summary());
+            self.c.child_rows(self.record.summary()).await;
         }
         Ok(id)
     }
@@ -406,7 +406,8 @@ impl Session {
             (_, true) => self.state,
             _ => State::NeedsYou,
         };
-        lock(&self.c.inner.status).record(
+        let mut status = lock(&self.c.inner.status);
+        let row = status.build(
             self.record.summary(),
             state,
             self.context,
@@ -415,6 +416,7 @@ impl Session {
                 .map(|(_, working)| working),
             limits,
         );
+        status.row(row);
     }
 
     /// UNREAD inputs held or sent unread: a person's input or an answer is refused, any other

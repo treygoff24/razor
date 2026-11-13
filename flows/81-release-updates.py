@@ -1,5 +1,6 @@
 """A real release installation updates through a local HTTP release, keeps its running server,
 announces readiness once in a newly launched terminal, and starts current on restart.
+A release marked as needing action is held, unless this server already meets its mark.
 Source installs, opt-out, older releases and damaged downloads never select a new version.
 """
 from contextlib import contextmanager
@@ -13,6 +14,7 @@ import platform
 import shutil
 import signal
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -24,6 +26,9 @@ import server
 import terminal
 
 INSTALLER = Path(__file__).resolve().parents[1] / 'scripts/install-release.sh'
+RELEASE = INSTALLER.with_name('release.sh')
+# release.sh's own line that writes install.sh, its action mark included.
+WRITE = next(line for line in RELEASE.read_text().splitlines() if line.startswith('{ head -n 2 scripts/install-release.sh'))
 # Beside the flows' scratch folders, so a release links its archive rather than copying it.
 ARCHIVES = tempfile.TemporaryDirectory(prefix='razor-flow-81-')
 PLATFORM = {('Linux', 'x86_64'): 'linux-x64', ('Linux', 'aarch64'): 'linux-arm64',
@@ -58,15 +63,14 @@ def releases(f):
     base = f'http://127.0.0.1:{http.server_port}'
     f.env['RAZOR_RELEASE_URL'] = base
 
-    def publish(tag, *, damaged=False):
+    def publish(tag, *, damaged=False, mark=''):
         archive = files / f'razor-{tag}-{PLATFORM}.tar.gz'
         archive.unlink(missing_ok=True)
         os.link(bundled(), archive)
         digest = '0' * 64 if damaged else hashlib.file_digest(archive.open('rb'), 'sha256').hexdigest()
         archive.with_suffix('.gz.sha256').write_text(f'{digest}  {archive.name}\n')
-        (files / 'install.sh').write_text(
-            '#!/bin/sh\n' + f'RAZOR_BASE_URL=${{RAZOR_BASE_URL:-{base}}}\n'
-            + f'RAZOR_VERSION=${{RAZOR_VERSION:-{tag}}}\n' + INSTALLER.read_text())
+        subprocess.run(['bash', '-c', WRITE], cwd=RELEASE.parents[1], check=True, env={
+            'PATH': os.environ['PATH'], 'base': base, 'version': tag, 'out': str(files), 'RAZOR_ACTION': mark})
 
     publish.pause = None
     try:
@@ -128,6 +132,27 @@ def start(f, binary):
     return child
 
 
+def notes(f):
+    """Each notification's text, then which sender variables it had."""
+    log = f.home / 'notify.py.log'
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def held(f, root, requests, seen, checks):
+    """The action status shows once the server's `checks`th release check ends, nothing downloaded
+    since request `seen` and 0.2.0 still selected and running."""
+    log = f.home / '.razor/server.log'
+    server.wait(lambda: log.read_text().count('razor: Razor ') >= checks, why='release check did not end')
+    assert not any(r.endswith('.tar.gz') for r in requests[seen:]), requests
+    assert (root / 'current').readlink() == Path('0.2.0')
+    if platform.system() == 'Linux':
+        pid = json.loads((f.home / '.razor/server.json').read_text())['pid']
+        assert Path(f'/proc/{pid}/exe').resolve() == (root / '0.2.0/razor').resolve()
+    status = json.loads(server.send(f, 'GET', '/status').readline())['server']
+    assert 'release_ready' not in status, status
+    return status['release_action']
+
+
 def config(f, enabled):
     path = f.home / '.razor/config.toml'
     path.write_text(f'release_updates = {str(enabled).lower()}\n' + path.read_text())
@@ -136,7 +161,11 @@ def config(f, enabled):
 with flow([], model='gpt-6.1-sol') as f, releases(f) as (publish, requests):
     root, command = installed(f)
     old = root / '0.1.0/razor'
-    publish('0.2.0')
+    script = f.home / 'notify.py'
+    script.write_text('import json, os, sys\nwith open(sys.argv[0] + ".log", "a") as log:\n    print(json.dumps([sys.argv[1], *(k for k in ("RAZOR_SESSION", "RAZOR_NAME", "RAZOR_PROJECT", "RAZOR_ASK") if k in os.environ)]), file=log)\n')
+    settings = f.home / '.razor/config.toml'
+    settings.write_text(f'notify = {json.dumps([sys.executable, str(script)])}\n' + settings.read_text())
+    publish('0.2.0', mark='0.1.1 Selected already meets this.')  # Not newer than the selected 0.1.1.
     (root / '0.1.1').mkdir()
     (root / '0.1.1/razor').symlink_to(BINARY)
     (root / 'current').unlink()
@@ -174,15 +203,37 @@ with flow([], model='gpt-6.1-sol') as f, releases(f) as (publish, requests):
         assert 'run razor restart if your server started before it' in cached.stdout, cached
         assert requests.count('/install.sh') == 2, requests
         assert requests.count(f'/razor-0.2.0-{PLATFORM}.tar.gz') == 1, requests
+        # 0.2.0 predates this release's mark: each check holds it, and the person is told once.
+        first, broken, second = 'Pair every device again.', 'broken Pair by hand.', 'Sign in again.'
+        publish('0.3.0', mark=f'0.3.0 {first}')
+        seen = len(requests)
         restart = run(f, command, 'restart')
         assert restart.returncode == 0, restart.stderr
         running.wait(timeout=30)
         assert running.returncode == 0, running.returncode
-        if platform.system() == 'Linux':
-            pid = json.loads((f.home / '.razor/server.json').read_text())['pid']
-            assert Path(f'/proc/{pid}/exe').resolve() == (root / '0.2.0/razor').resolve()
-        status = json.loads(server.send(f, 'GET', '/status').readline())
-        assert 'release_ready' not in status['server'], status
+        assert first in held(f, root, requests, seen, 1)
+        server.wait(lambda: notes(f), why='the held release was not notified')
+        assert len(notes(f)) == 1 and first in notes(f)[0][0] and notes(f)[0][1:] == [], notes(f)
+        doctor = subprocess.run([str(command), 'doctor'], env={**f.env, 'RAZOR_RELEASE_URL': 'http://127.0.0.1:9'},
+                                cwd=f.cwd, capture_output=True, text=True, timeout=60)  # The release server unreachable.
+        assert first in doctor.stdout, doctor
+        # A malformed mark holds too, shown as written; its new sentence is told once more.
+        publish('0.4.0', mark=broken)
+        assert run(f, command, 'restart').returncode == 0
+        raw = f'RAZOR_ACTION="{broken}"'
+        assert raw in held(f, root, requests, seen, 2)
+        server.wait(lambda: len(notes(f)) >= 2, why='the changed action was not notified')
+        assert [raw in note[0] for note in notes(f)] == [False, True], notes(f)
+        # The person's update selects the latest and says what to do; its download is already there,
+        # as in the cached case below: the first check above proves installing.
+        publish('0.4.0', mark=f'0.4.0 {second}')
+        (root / '0.4.0').mkdir()
+        (root / '0.4.0/razor').symlink_to(BINARY)
+        updated = run(f, command, 'update')
+        assert updated.returncode == 0 and second in updated.stdout, updated
+        assert (root / 'current').readlink() == Path('0.4.0') and not (root / 'release-action').exists()
+        status = json.loads(server.send(f, 'GET', '/status').readline())['server']
+        assert status['release_ready'] == '0.4.0' and 'release_action' not in status, status
     finally:
         if running.poll() is None:
             running.terminate()
@@ -251,3 +302,9 @@ with flow([], model='gpt-6.1-sol') as f, releases(f) as (publish, requests):
     refused = run(f, source, 'update')
     assert refused.returncode != 0 and 'source installation' in refused.stderr, refused
     assert '/install.sh' not in requests, requests
+    # release.sh refuses a mark the updater would misread; a good one goes on to the build.
+    for mark, refused in (('0.2.0 Say "hi".', True), ('0.2.0 Pay $5.', True), ('0.2.0 ' + 'x' * 201, True),
+                          ('0.2.1 Too new.', True), ('0.2.0 ' + 'x' * 200, False)):
+        made = subprocess.run([str(RELEASE), '0.2.0', str(f.home / 'out'), 'https://example.com'], capture_output=True, text=True,
+                              env={'PATH': os.environ['PATH'], 'RAZOR_ACTION': mark, 'RAZOR_PLATFORM': 'none'}, timeout=30)
+        assert made.returncode == 1 and ('Invalid RAZOR_ACTION' in made.stderr) == refused, (mark, made.stderr)

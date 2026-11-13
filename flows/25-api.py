@@ -36,6 +36,41 @@ def lines(stream):
 bare = lambda entry: {k: v for k, v in entry.items() if k != "native"}
 
 
+# Whole-record search keeps occurrence order, tool destinations and the 50-row bound.
+from claude import reply as c_reply
+from urllib.parse import urlencode
+with flow([c_reply((None, "Bash", {"command": "printf 'apiquery first'"}),
+                   (None, "Bash", {"command": "printf 'apiquery second'"}),
+                   *[(None, "mcp__razor__status", {})] * 54,
+                   (None, "mcp__razor__message", {"type": "question", "text": "questionsearch", "options": ["yessearch"]})),
+           c_reply(text="finishedsearch"), c_reply(text="answeredsearch")]) as f:
+    sid = f.ask("Search this recorded session.")["session"]
+    es = list(f.record(sid))
+    def search_record(q, limit=50, session=sid):
+        response = server.send(f, "GET", f"/sessions/{session}/search?" + urlencode({"q": q, "limit": limit}))
+        body = response.read()
+        assert response.status == 200, (response.status, body)
+        return json.loads(body)["hits"]
+    calls = {e["call"]: e for e in es if e["kind"] == "call"}
+    outputs = [e for e in es if e["kind"] == "result" and "apiquery" in e["output"]]
+    expected = [calls[e["call"]]["id"] for e in reversed(outputs)]
+    assert len(expected) == 2 and [h["entry"] for h in search_record("apiquery")] == expected
+    assert [h["entry"] for h in search_record("apiquery", 1)] == expected[:1]
+    assert len(search_record("status", 999)) == 50 and len(search_record("status", 0)) == 1
+    assert search_record("command") == []  # A JSON key alone is not searched.
+    server.send(f, "PUT", f"/sessions/{sid}/name", "uniquenamesearch").read()
+    assert search_record("uniquenamesearch") == [] and search_record("absentsearch") == []
+    ask = next(e["id"] for e in es if e["kind"] == "call" and e["name"] == "mcp__razor__message")
+    server.post(f, f"/sessions/{sid}/asks/{ask}", {"text": "answerwordssearch"})
+    server.until(f, sid, lambda es: es[-1]["kind"] == "turn_end" and any(e.get("text") == "answeredsearch" for e in es))
+    assert [(h["entry"], h["from"]) for h in search_record("answerwordssearch")] == [(ask, "person")]
+    other = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    assert search_record("apiquery", session=other) == []
+    for query in ("", "!", " ".join("word" for _ in range(9)), "x" * 201):
+        response = server.send(f, "GET", f"/sessions/{sid}/search?" + urlencode({"q": query}))
+        assert response.status == 400, (query, response.read())
+
+
 # Each turn reads 3 of its 4 input tokens from the cache; a pack offers the skill `hi`.
 hello = (REPLIES / "hello.sse").read_bytes().replace(b'"cache_read_input_tokens": 0',
                                                      b'"cache_read_input_tokens": 3')

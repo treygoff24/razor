@@ -215,12 +215,13 @@ async fn line(
     }
 }
 
-/// `--continue`: the newest session in the connection's folder.
+/// `--continue`: the newest session other than a dream in the connection's folder.
 pub async fn newest(c: &Connection) -> Result<SessionId, Error> {
     let cwd = c.cwd.to_string_lossy();
     let listed = c
         .http
         .get(format!("{}v1/sessions", c.url))
+        .query(&[("skip_dreams", true)])
         .query(&[("server", &c.server)])
         .bearer_auth(&c.key);
     let listed: Value = json(listed.query(&[("cwd", cwd.as_ref()), ("limit", "1")])).await?;

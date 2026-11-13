@@ -1,4 +1,5 @@
 //! Compiled terminal bindings; defaults, descriptions and contexts live in data/keys.toml.
+use super::keys::Pane;
 use super::{
     App, Error,
     composer::{completion, shortcodes},
@@ -225,7 +226,9 @@ pub fn rows(app: &App) -> Vec<Line<'static>> {
 }
 
 fn available(app: &App, context: &str, action: &str, k: KeyEvent) -> bool {
-    let modal = app.panel.is_some() || app.picker.is_some() || app.start.is_some();
+    let modal = (app.panel.is_some() && app.keys == Pane::Conversation)
+        || app.picker.is_some()
+        || app.start.is_some();
     let modal = modal || app.grid.is_some() || app.goto.is_some();
     let empty = app.composer.text.is_empty();
     match context {
@@ -239,14 +242,24 @@ fn available(app: &App, context: &str, action: &str, k: KeyEvent) -> bool {
         "voice" => super::audio::captures(app, k),
         "goto" => app.goto.is_some(),
         "mcp" => super::mcp::captures(app, k),
-        "panel" => app.panel.is_some(),
+        "panel" => app.panel.is_some() && app.keys == Pane::Conversation,
+        "panes" => {
+            (app.keys != Pane::Conversation || app.panel.is_some()) && app.list.overview.is_none()
+        }
+        "status" => app.keys == Pane::Status,
+        "focus" => {
+            app.picker.is_none()
+                && app.start.is_none()
+                && app.grid.is_none()
+                && (action == "global.status" || action == "global.prefix" && empty)
+        }
         "picker" => app.picker.is_some() && app.panel.is_none(),
         "new" => action == "global.new" && app.panel.is_none() && app.picker.is_none(),
         "start" => app.start.is_some() && app.panel.is_none() && app.picker.is_none(),
-        "open" => action == "list.open" && !modal,
+        "open" => action == "list.open" && (!modal || app.panel.is_some()),
         "list" => {
             let shown = app.list.open || app.list.overview.is_some();
-            action != "list.open" && shown && app.list.keys && !modal
+            action != "list.open" && shown && app.keys == Pane::Agents && !modal
         }
         "emoji" => {
             app.grid.is_some() && app.panel.is_none() && app.picker.is_none() && app.start.is_none()
@@ -305,7 +318,7 @@ fn available(app: &App, context: &str, action: &str, k: KeyEvent) -> bool {
 
 /// The contexts in precedence order, each looking its keys up in its scope's table, named after a
 /// colon where it is not the context's own.
-const CONTEXTS: &str = "clear:composer early:global voice goto mcp panel picker new:global start open:list list emoji global transcript skill attachments completion shortcode suggestion switch:composer targets children queued_input question line_start draft_end attached_images input_history composer editor";
+const CONTEXTS: &str = "clear:composer early:global voice goto focus:global open:list panes status mcp panel picker new:global start list emoji global transcript skill attachments completion shortcode suggestion switch:composer targets children queued_input question line_start draft_end attached_images input_history composer editor";
 
 fn contexts() -> impl Iterator<Item = (&'static str, &'static str)> {
     (CONTEXTS.split_whitespace()).map(|c| c.split_once(':').unwrap_or((c, c)))

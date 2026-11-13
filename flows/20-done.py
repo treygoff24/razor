@@ -1,7 +1,8 @@
 """`/done` through the API: it answers while the closing turn still runs; that turn writes the
 project's state note; an input still waiting when it ends ends stopped and reaches no model; the session's job is stopped, its row reads done, nothing keeps it live, and
 its next input reopens it, though an input hook rewrote the closing input and the server restarted.
-A session closed with `/quit` reads done after that restart too, and neither row's activity moves.
+A session closed with `/quit` reads done after that restart too, and neither row's activity moves;
+that close settled its question and filed it in Earlier.
 Closed rows are read from their direct detail endpoint, outside the live feed.
 A second session in the same folder reads the note at its start, and its own `/done` keeps a separate note
 (docs/design/done.md)."""
@@ -17,7 +18,8 @@ replies = [reply(("toolu_job", "Bash", {"command": "sleep 600", "run_in_backgrou
            reply(text="Started."),
            reply(("toolu_wait", "Bash", {"command": "while [ ! -e go ]; do sleep 0.05; done"})),
            reply(("toolu_note", "mcp__razor__memory", dict(state, text="First closeout."))),
-           reply(text="Closed out."), reply(text="Reopened."), reply(text="Hello."),
+           reply(text="Closed out."), reply(("toolu_ask", "mcp__razor__message", {"type": "question", "text": "Go on?"})),
+           reply(text="Asked."), reply(text="Reopened."), reply(text="Hello."),
            reply(("toolu_next", "mcp__razor__memory", dict(state, text="Second closeout."))),
            reply(text="Closed out again."), reply(text="Both notes read.")]
 
@@ -70,6 +72,8 @@ with flow(replies, config='[[plugins]]\nfile = "rewrite.py"\nbefore = ["input"]\
     assert first["id"] and "signal" in killed["end"], (first, killed)
     assert not (f.home / ".razor/live" / session).exists(), "the closed session is still live"
     quit = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    server.post(f, f"/sessions/{quit}/input", {"text": "Ask me."})
+    server.until(f, quit, lambda es: es[-1]["kind"] == "turn_end")
     # Set to end, a terminal's second Ctrl-C ends the session it addresses, as /quit does.
     with (f.home / ".razor/config.toml").open("a") as config:
         config.write('[ui]\nquit = "end"\n')
@@ -77,6 +81,10 @@ with flow(replies, config='[[plugins]]\nfile = "rewrite.py"\nbefore = ["input"]\
         t.shown("Message the agent")
         t.quit("PRESS CTRL-C AGAIN TO END THIS SESSION")
     server.until(f, quit, lambda es: es[-1].get("closed"))
+    # The person's own close settles its open question; the session unloads into Earlier.
+    assert not json.loads(server.send(f, "GET", f"/sessions/{quit}/agent").read())["asks"], "the close left its question"
+    server.wait(lambda: not (f.home / ".razor/live" / quit).exists() and quit in [
+        row["session"] for row in json.loads(server.send(f, "GET", "/agents").read())["agents"]], 10, "it stayed loaded")
     # /exit leaves the terminal app as /detach does: the session stays open, to resume.
     left = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
     with Terminal(f, "--resume", left) as t:
@@ -95,7 +103,7 @@ with flow(replies, config='[[plugins]]\nfile = "rewrite.py"\nbefore = ["input"]\
     for s, entries in closed.items():
         row = json.loads(server.send(f, "GET", f"/sessions/{s}/agent").read())
         at = next(e["at"] for e in reversed(entries) if e.get("closed"))
-        assert row["state"] == "done" and row["last_activity"] == at, row
+        assert row["state"] == "done" and row["last_activity"] == at and not row["asks"], row
         assert list(f.record(s)) == entries, f"the restart wrote to closed session {s}"
     # Read again, the record says it closed, whatever the closing words were.
     assert server.send(f, "GET", f"/sessions/{session}/entries").status == 200, "the session did not load again"
@@ -103,7 +111,7 @@ with flow(replies, config='[[plugins]]\nfile = "rewrite.py"\nbefore = ["input"]\
     assert reopened.returncode == 0 and json.loads(reopened.stdout)["message"] == "Reopened.", reopened
     assert not [e for e in f.record(session) if e["kind"] == "rebuild"], "the reopening rebuilt"
     second = f.run("--print=json", "Hello.")
-    page = (f.requests / "007.body").read_text()
+    page = (f.requests / "008.body").read_text()
     assert second.returncode == 0 and "First closeout." in page, second
     other = json.loads(second.stdout)["session"]
     entries = server.until(f, other, answered(server.post(f, f"/sessions/{other}/done", {})["entry"], "done"))

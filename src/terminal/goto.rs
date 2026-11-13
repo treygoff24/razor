@@ -316,8 +316,7 @@ fn history(app: &App, g: &Goto, columns: usize, group: usize) -> Vec<Row> {
     let head = vec![span("HISTORY", WHITE), span(format!(" · {said}"), GRAY)];
     let mut out = vec![Row::head(head, group)];
     for hit in answer.into_iter().flatten().flat_map(|f| &f.hits) {
-        let title = format!("    {}", cell(name(&hit.name, &hit.session), 30));
-        let words = Line::from(vec![span(title, WHITE), span(hit.snippet.clone(), GRAY)]);
+        let words = hit_row(hit, name(&hit.name, &hit.session), 30);
         let at = status::location(app, &hit.session, columns / 2);
         let when = clock(hit.at, app.zone.as_ref());
         let place = format!("{at} · {} · {when}", hit.cwd.display());
@@ -407,4 +406,17 @@ pub fn draw(app: &mut App, b: &mut Buffer, area: Rect, now: u64) -> Option<(u16,
     let keys = bindings::hints(app, keys, " · ");
     put(b, r.x, r.bottom() - 1, &keys, r.width, gray);
     cursor
+}
+
+/// The shared hit row: a short source and the original-spelling snippet, safe for the screen.
+pub(super) fn hit_row(
+    hit: &crate::protocol::Hit,
+    title: &str,
+    title_width: usize,
+) -> Line<'static> {
+    let title = format!("    {}", cell(title, title_width));
+    Line::from(vec![
+        span(title, WHITE),
+        span(screen_safe(&hit.snippet).into_owned(), GRAY),
+    ])
 }

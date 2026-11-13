@@ -9,6 +9,7 @@ import signal
 import socketserver
 import subprocess
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler
@@ -189,6 +190,42 @@ with flow(replies, config='[providers.runinfra]\nbase_url = "{standin}"\n',
     assert len([e for e in entries if e["kind"] == "start"]) == 1, entries
     requests = [json.loads(body) for body in f.sent()[-4:]]
     assert all("First ask." in json.dumps(request["messages"]) for request in requests), requests
+
+    # --continue reopens the person's newest session, never the project's later, unnamed dream.
+    replies += [hello, hello, Reply((REPLIES / "continued.sse").read_bytes()), hello]
+    dreamt = part("dreamt")
+    mine = dreamt.ask("Keep my work.")["session"]
+    # A session id leads with the UTC second it started in, so the dream starts in a later one.
+    server.wait(lambda: time.strftime("%Y%m%d-%H%M%S", time.gmtime()) > mine[:15], 2)
+    made = dreamt.run("dream")
+    assert made.returncode == 0, made.stderr
+    server.until(f, made.stdout.strip(), lambda es: es[-1]["kind"] == "turn_end")
+    continued = dreamt.ask("--continue", "Carry on.")
+    assert continued == {"session": mine, "message": "continued reply"}, continued
+    lone = part("lone")
+    made = lone.run("dream")
+    assert made.returncode == 0, made.stderr
+    server.until(f, made.stdout.strip(), lambda es: es[-1]["kind"] == "turn_end")
+    refused = lone.run("--continue", "--print=text", input="Carry on.")
+    assert refused.returncode != 0, refused
+    assert "There is no session in this directory to continue." in refused.stderr, refused.stderr
+
+    # In a resident's folder --continue opens the resident's home, as before dreams were skipped:
+    # its id is its name, so it sorts before its newer thread; a dream there is the resident's
+    # fresh run, left out of the plain list too.
+    kept = part("kept")
+    config.write_text(default + f'\n[residents.keeper]\ncwd={json.dumps(str(kept.cwd))}\n')
+    server.stop(f)
+    server.start(f)
+    server.until(f, "keeper", bool)
+    server.post(f, "/sessions", {"resident": "keeper"})
+    replies += [hello, Reply((REPLIES / "continued.sse").read_bytes())]
+    made = kept.run("dream")
+    assert made.returncode == 0, made.stderr
+    server.until(f, made.stdout.strip(), lambda es: es[-1]["kind"] == "turn_end")
+    continued = kept.ask("--continue", "Carry on.")
+    assert continued == {"session": "keeper", "message": "continued reply"}, continued
+    config.write_text(default)
 
     # Six clients start on a stopped home at once: the servers that lose the lock exit, and the winner
     # answers every call.

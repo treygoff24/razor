@@ -1,5 +1,6 @@
 //! One frame: the bar, the gauge, the transcript, the band above the composer, the composer
 //! and the status pane, or the split while a child is addressed. Each click target is a hit.
+use super::keys::Pane;
 use super::{
     App, bindings, children, composer, gauge, motion, panel, picker, questions, split, status,
     strip, text::*, transcript,
@@ -120,6 +121,23 @@ pub(super) fn draw(app: &mut App, b: &mut Buffer, area: Rect, now: u64) -> Optio
         _ if app.list.open || app.list.area.is_some() => {
             super::agents::frame(app, b, area, now, &mut hits)
         }
+        _ if app.split() && app.keys == Pane::Status => {
+            let width = if area.width < 80 {
+                area.width
+            } else {
+                (area.width / 4).clamp(38, 46)
+            };
+            let body = Rect {
+                width: area.width - width,
+                ..area
+            };
+            if body.width > 0 {
+                split::draw(app, b, body, now, &mut hits);
+            }
+            let pane = Rect::new(body.right(), area.y, width, area.height);
+            status_side(app, b, pane, now, &mut hits);
+            None
+        }
         _ if app.split() => split::draw(app, b, area, now, &mut hits),
         _ => normal(app, b, area, now, &mut hits),
     };
@@ -135,7 +153,7 @@ pub(super) fn draw(app: &mut App, b: &mut Buffer, area: Rect, now: u64) -> Optio
             app.links.push((*r, url.clone()));
         }
     }
-    if app.picker.is_some() || app.panel.is_some() {
+    if app.picker.is_some() || app.panel.is_some() || app.keys != Pane::Conversation {
         cursor = None;
     }
     if app.goto.is_some() {
@@ -202,7 +220,12 @@ pub(super) fn normal(
     hits: &mut Vec<Hit>,
 ) -> Option<(u16, u16)> {
     let phone = area.width < PHONE;
-    let docked = match docked(app) {
+    let reader = matches!(app.panel, Some(super::panel::Panel::Delivery(_)));
+    if area.width < 80 && app.keys == Pane::Status {
+        status_side(app, b, area, now, hits);
+        return None;
+    }
+    let docked = match docked(app) || reader && area.width >= 80 {
         true => (area.width / 4).clamp(38, 46),
         false => 0,
     };
@@ -249,7 +272,9 @@ pub(super) fn normal(
     let side = hits.len();
     let pane = match docked {
         // A floating pane is at most 46 wide, the full width on a phone.
-        0 if app.pane_open.unwrap_or(area.width >= 140) => {
+        0 if (app.keys == Pane::Status || app.pane_open.unwrap_or(area.width >= 140))
+            && !reader =>
+        {
             let w = [area.width.min(46), area.width][usize::from(phone)];
             Some(Rect::new(area.right() - w, y, w, transcript.height))
         }
@@ -727,4 +752,15 @@ fn queued(app: &App, now: u64) -> Vec<Queued> {
         rows.insert(at, (words(&input), None, lit));
     }
     rows
+}
+
+// A status pane occupying the right side keeps notices on its last row.
+fn status_side(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit>) {
+    status::draw(app, b, r, now, hits);
+    notice(
+        app,
+        b,
+        Rect::new(r.x, r.bottom().saturating_sub(1), r.width, 1),
+        now,
+    );
 }

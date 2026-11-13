@@ -311,8 +311,9 @@ pub(crate) struct Sessions {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Server {
     /// The address a server listened on before pairing by code: loaded and unused, so a config
-    /// written for it still starts the server; doctor asks for its removal.
-    pub(crate) address: Option<String>,
+    /// written for it still starts the server; a notice asks for its removal.
+    #[serde(rename = "address", skip_serializing)]
+    _address: Option<serde::de::IgnoredAny>,
     pub(crate) https_url: Option<String>,
     /// The machine's shorthand the other servers pair this one under (`desk`, `laptop`): the
     /// first word of every root's name, read at each root's start. Empty: its project's.
@@ -361,7 +362,7 @@ pub(crate) struct PushKey {
     pub(crate) key_id: String,
     pub(crate) key: PathBuf,
 }
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct Guards {
     delete: bool,
@@ -525,11 +526,6 @@ impl Default for Sessions {
             handover_tokens: 50_000,
             close_minutes: 0.0,
         }
-    }
-}
-impl Default for Guards {
-    fn default() -> Self {
-        Self { delete: true }
     }
 }
 impl Default for Children {

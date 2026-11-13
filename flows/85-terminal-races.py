@@ -116,7 +116,9 @@ for handed85 in (False, True):
     replies85 = ([] if handed85 else [claude.reply((None, "mcp__razor__skill", {"name": "plan"}))])
     replies85 += [claude.reply(text="loaded85"), claude.reply((None, "mcp__razor__handover", {"note": "hand85"})),
                   claude.reply(text="rebuilt85"), claude.reply(text="handed85")]
-    with flow(replies85) as f:
+    # The click below aims at rows that must not move: with motion on, an ended turn's closing line
+    # appears 1.7 s after the terminal attaches and lifts the transcript two rows.
+    with flow(replies85, config="[ui]\nmotion = false\n") as f:
         path = f.cwd / ".agents/skills/plan"
         path.mkdir(parents=True)
         (path / "SKILL.md").write_text("---\ndescription: Plans.\n---\nplan85\n")
@@ -132,7 +134,8 @@ for handed85 in (False, True):
             t.shown("rebuilt85")
             if not handed85:
                 t.send("\x1b1")
-            t.shown("hand it back")
+            # The skill shelf, drawn once the session's row arrives, lifts the transcript too.
+            t.shown("hand it back", "1 ○ plan")
             t.send("unfinished85")
             t.shown("unfinished85")
             draft = lambda: server.send(f, "GET", f"/sessions/{sid}/draft").read()

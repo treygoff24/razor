@@ -2,7 +2,7 @@
 //! working line under them, counted in full but owning strings only for the viewport.
 mod replies;
 
-use self::replies::{card, input_rows, limit_words, reply, thought, unsaved};
+use self::replies::{card, input_rows, limit_words, reply, thought};
 use super::{Action, Row, Transcript};
 use crate::protocol::{Body, End, Entry, EntryId, Input, MailKind, Origin, ReportStatus, Trigger};
 use crate::terminal::{
@@ -193,10 +193,6 @@ impl Transcript {
             Body::Call { .. } => self.call_rows(e, place, columns, model, rows),
             Body::Rebuild { trigger, note, .. } => self.rebuild(e, *trigger, note, columns, rows),
             Body::TurnEnd { end, inputs, .. } => {
-                if let Some(words) = self.unsaved.get(&e.id) {
-                    reply(words, columns, Some((model, &self.name)), rows, None);
-                    unsaved(columns, rows);
-                }
                 match (end, self.limited.filter(|l| l.0 == e.id)) {
                     (End::Error(_), Some((_, at, minute))) => {
                         let words = limit_words(at, minute * 60_000, self.zone.as_ref());

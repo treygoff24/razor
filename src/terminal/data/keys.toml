@@ -73,9 +73,9 @@
 "done" = ["X"]
 "split" = ["v", "-"]
 "close_split" = ["x"]
-"left" = ["h"]
+"left" = ["h", "BackTab"]
 "right" = ["l"]
-"switch" = ["Tab", "BackTab"]
+"switch" = ["Tab"]
 "wider" = ["L"]
 "narrower" = ["H"]
 "list.open" = ["w", "b", "s"]
@@ -166,11 +166,24 @@
 "keep" = ["1"]
 "handover" = ["2"]
 
+[keys.panes]
+"next" = ["Tab"]
+"previous" = ["BackTab"]
+
+[keys.status]
+"up" = ["Up", "k", "p"]
+"down" = ["Down", "j", "n"]
+"accept" = ["Enter"]
+"copy" = ["y"]
+"cancel" = ["Esc"]
+"toggle" = ["-"]
+
 [keys.panel]
+"accept" = ["Enter"]
 "up" = ["Up", "k"]
 "down" = ["Down", "j"]
 "page_up" = ["PageUp", "Shift-PageUp"]
-"page_down" = ["PageDown", "Shift-PageDown"]
+"page_down" = ["PageDown", "Shift-PageDown", "Space"]
 "half_page_up" = ["Ctrl-U"]
 "half_page_down" = ["Ctrl-D"]
 "top" = ["Home", "g"]
@@ -290,7 +303,7 @@
 "global.new" = "Choose a project and server for a new agent"
 "global.emoji" = "Open the emoji picker"
 "global.stop" = "Stop the addressed turn"
-"global.status" = "Open or close the status pane"
+"global.status" = "Give the inbox the keys, or return without closing a pane already open"
 "global.copy" = "Copy the selection, draft, or shown question"
 "global.cut" = "Copy and remove the selected draft text"
 "global.prefix" = "Start a prefix action with an empty draft; pressed twice, the key itself"
@@ -352,9 +365,9 @@
 "prefix.done" = "Type /done; Enter closes the addressed session after its last turn"
 "prefix.split" = "Open the selected child card, or the first child, in a split"
 "prefix.close_split" = "Close the child's split, back to its parent"
-"prefix.left" = "Give the keys to the agents list, opening it"
-"prefix.right" = "Give the keys to the conversation"
-"prefix.switch" = "Move the keys between the agents list and the conversation"
+"prefix.left" = "Give the previous part the keys"
+"prefix.right" = "Give the next part the keys"
+"prefix.switch" = "Move the keys round the agents list, conversation and status pane"
 "prefix.wider" = "Widen the agents list, or open it"
 "prefix.narrower" = "Narrow the agents list, or open it"
 "prefix.waiting" = "Open the oldest question waiting for you, else what the status chip opens"
@@ -417,6 +430,7 @@
 "picker.cancel" = "Close the model chooser"
 "picker.keep" = "Switch models keeping the conversation"
 "picker.handover" = "Switch models starting from a handover note"
+"panel.accept" = "Submit transcript search words or open the selected result"
 "panel.up" = "Scroll the panel up one row"
 "panel.down" = "Scroll the panel down one row"
 "panel.page_up" = "Scroll the panel up one page"
@@ -517,3 +531,12 @@
 "skill.7" = "Open the lit skill in slot 7"
 "skill.8" = "Open the lit skill in slot 8"
 "skill.9" = "Open the lit skill in slot 9"
+
+"panes.next" = "Give the next part the keys"
+"panes.previous" = "Give the previous part the keys"
+"status.up" = "Select the previous status item"
+"status.down" = "Select the next status item"
+"status.accept" = "Open the selected status item"
+"status.cancel" = "Return the keys; a docked pane stays, a floating pane stays only if explicitly opened"
+"status.toggle" = "Keep the status pane open or hide it when the keys leave"
+"status.copy" = "Copy the delivery path or link"

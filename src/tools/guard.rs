@@ -24,6 +24,7 @@ pub(super) async fn command(
         chars: text.chars().peekable(),
         piped: false,
         heredocs: Vec::new(),
+        home_set: text.contains("HOME="),
     };
     let (mut pgrep, mut post, mut jobs, mut bare) = (false, false, BTreeSet::new(), true);
     while let Some((words, piped)) = lexer.command() {
@@ -117,25 +118,25 @@ pub(super) async fn deletable(
     since: Millis,
 ) -> Result<(), Error> {
     let reason = if !literal {
-        Some("a path the command's text does not name literally")
+        "a path the command's text does not name literally; write the path in full.".into()
     } else {
         let born = match tokio::fs::symlink_metadata(cwd.join(target)).await {
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
             Ok(metadata) => metadata.created().ok(),
             Err(_) => None,
         };
-        match born.and_then(|t| t.duration_since(UNIX_EPOCH).ok()) {
-            Some(born) if born.as_millis() >= u128::from(since) => None,
-            Some(_) => Some("which existed before this session started"),
-            None => Some("and the filesystem does not say when it was made"),
-        }
+        let reason = match born.and_then(|t| t.duration_since(UNIX_EPOCH).ok()) {
+            Some(born) if born.as_millis() >= u128::from(since) => return Ok(()),
+            Some(_) => "which existed before this session started;",
+            None => "and the filesystem does not say when it was made;",
+        };
+        format!(
+            "{reason} tell the person they can delete it, or turn this guard off with `razor config set guards.delete false`."
+        )
     };
-    match reason {
-        Some(reason) => Err(Error::Refused(format!(
-            "`{name}` would delete {target}, {reason}; ask the person to delete it."
-        ))),
-        None => Ok(()),
-    }
+    Err(Error::Refused(format!(
+        "`{name}` would delete {target}, {reason}"
+    )))
 }
 
 fn targets<'a>(name: &str, args: &'a [Word]) -> Vec<(&'a str, bool)> {
@@ -207,6 +208,7 @@ struct Lexer<'a> {
     chars: Peekable<Chars<'a>>,
     piped: bool,
     heredocs: Vec<(String, bool)>,
+    home_set: bool,
 }
 
 impl Lexer<'_> {
@@ -277,8 +279,18 @@ impl Lexer<'_> {
                     open = true;
                     self.substitution(c, &mut word);
                 }
+                '~' if !open && delimiter.is_none() => {
+                    open = true;
+                    let end = self
+                        .chars
+                        .peek()
+                        .is_none_or(|c| "/ \t\n;()&|<>".contains(*c));
+                    let home = std::env::var("HOME").ok().filter(|_| end && !self.home_set);
+                    word.expands |= home.is_none();
+                    word.text.push_str(home.as_deref().unwrap_or("~"));
+                }
                 c => {
-                    word.expands |= matches!(c, '*' | '?' | '[' | '{') || (c == '~' && !open);
+                    word.expands |= matches!(c, '*' | '?' | '[' | '{');
                     open = true;
                     word.text.push(c);
                 }

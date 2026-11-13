@@ -22,6 +22,8 @@ Razor can run on Claude.
 
 It exits 0 when your settings load and Claude or GPT can run. A missing ChatGPT sign-in or API key does not matter if you use Claude, and the reverse; missing web keys only mean agents use their model's own web tools, and a missing voice key that nothing is read aloud. The OpenAI API key line matters only if you bill GPT through an API key instead of a ChatGPT plan. `Server: stopped; your next razor command starts it.` means no server is running for this home, which is normal before your first `razor` command; if a command then fails to start one, see [the server and settings](#the-server-and-settings) below. On a Mac with the server running, a `Mac permissions` line also says whether agents can see the screen and use the keyboard and mouse; when the service runs the server and either is missing, doctor asks whether to request them from macOS, and yes puts Razor in both lists in System Settings ([Security](security.md#screen-and-control-on-macos)).
 
+Lines beginning `Settings:` also include notices about retired settings and avatar pictures that could not load. A notice does not prevent the server or an agent from starting. The terminal's status pane shows these in amber, and the server logs them when they change. The old `key` file and `[server] address` are ignored; the notice says what to change. Under `[remote]`, old `address` or `key` fields beside a valid `server` are ignored with a notice too. Without a valid paired-server name, session commands still refuse the remote setting so they cannot silently run on the wrong machine.
+
 Two places hold more detail. The server writes its errors to `~/.razor/server.log`; when it runs as the service that `razor install` sets up (the same server, started by systemd or launchd), read them on Linux with `journalctl --user -u razor`. The service is named after its home's folder without the leading dot, so a `RAZOR_HOME` of `~/.razor-work` has `razor-work`. Each session's folder, `~/.razor/sessions/<id>/`, holds its record and `startup.md`, which shows exactly what the conversation was sent at its start (`/startup` shows it in the terminal app).
 
 ## Restarting the server
@@ -96,6 +98,10 @@ export PATH="$HOME/.local/bin:$PATH"
 
 **A session shows as stuck.** It has had unanswered input for 15 minutes with no command running, no question open and no working helper. Open it to see what it last did; Escape stops its turn, and a new message gives it something to do.
 
+## Git locks
+
+**A task or memory write reports `index.lock`: `File exists`.** After a server or machine crash, or a git that had to be killed, check that no git process is still working in the store named by the error, including one that survived the old server. Only once none is running there, remove that one `index.lock` file and retry the write.
+
 ## More machines
 
 **`Settings: server.address is no longer used`** (from `razor doctor`). Servers and apps no longer reach each other at an address. Delete `address` under `[server]` in the file doctor names; nothing else changes.
@@ -133,6 +139,8 @@ For an installed copy, the script is `~/.local/share/razor/current/scripts/speec
 ## Updating
 
 Run `razor update`, then `razor restart` to use the downloaded version. Background updates leave the running server on its existing version. The terminal's restart notice appears once per launch; closing and reopening the terminal does not restart the server. Old bundles stay available while a process runs from them.
+
+**`Razor needs your action: … Run razor update to install the latest release, then razor restart.`** in the terminal's status pane, from `razor doctor` or in a notification. The newest release asks you to do something, such as pairing again, so background updates did not download it and your server stays on its version. Run `razor update`, then `razor restart`, and do what the sentence asks.
 
 If an update fails, the installer reports the cause and keeps the selected version. Check your connection and run `razor update` again. Background failures go to the [server log](#restarting-the-server). To stop future automatic checks, run `razor config set release_updates false`; an update already running finishes.
 

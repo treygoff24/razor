@@ -26,6 +26,7 @@ pub(super) fn routes() -> Router<App> {
         .route("/v1/sessions/{id}/asks/{entry}", post(answer))
         .route("/v1/sessions/{id}/events", get(events))
         .route("/v1/sessions/{id}/entries", get(entries))
+        .route("/v1/sessions/{id}/search", get(transcript_search))
         .route("/v1/sessions/{id}/digest", get(digest))
         .route("/v1/sessions/{id}/agent", get(agent))
         .route("/v1/notifications/{id}", get(notification))
@@ -97,7 +98,9 @@ async fn models(State(app): State<App>, Query(q): Query<Page>) -> Reply<crate::p
 async fn list(State(app): State<App>, Query(q): Query<Page>) -> Reply<Vec<Listed>> {
     let limit = q.limit.unwrap_or(50).min(1_000);
     let jobs = q.jobs.unwrap_or(q.resident.is_some());
-    let listed = app.controller.list(q.cwd, q.resident.as_ref(), jobs, limit);
+    let listed = app
+        .controller
+        .list(q.cwd, q.resident.as_ref(), jobs, limit, q.skip_dreams);
     Ok(Json(listed.await?))
 }
 
@@ -485,4 +488,27 @@ async fn seen(State(app): State<App>, Path(id): Path<SessionId>, Query(q): Query
 
 async fn settings(State(app): State<App>, Path(id): Path<SessionId>) -> Reply<Settings> {
     Ok(Json(app.controller.settings(&id).await?))
+}
+
+async fn transcript_search(
+    State(app): State<App>,
+    Path(id): Path<SessionId>,
+    Query(q): Query<Search>,
+) -> Reply<Found> {
+    let words =
+        crate::record::search_words(&q.q).ok_or_else(|| bad(crate::record::SEARCH_WORDS))?;
+    let (_, _, _subscription) = app.controller.attachment(&id, EntryId(u64::MAX)).await?;
+    let summary = app.controller.summary(&id).await?;
+    let mut search = crate::record::TranscriptSearch::new(words, q.limit.unwrap_or(20), summary);
+    let mut next = Some(None);
+    while let Some(before) = next {
+        let page = app.controller.page(&id, before, 256).await?;
+        let (found, older) = search.page(page).await.map_err(controller::Error::from)?;
+        search = found;
+        next = older.map(Some);
+    }
+    Ok(Json(Found {
+        hits: search.finish(),
+        partial: false,
+    }))
 }

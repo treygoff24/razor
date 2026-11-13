@@ -18,8 +18,8 @@ pub use install::{
     server_running, start, stop,
 };
 pub(crate) use list::{Listed, homes};
-pub(crate) use notify::{ask, failed, notify};
-pub(crate) use updates::release_ready;
+pub(crate) use notify::{ask, environment, failed, notify};
+pub(crate) use updates::{release_action, release_ready};
 pub use updates::{selected_executable, update_release};
 
 use crate::config::{Config, Day, Deliver, Resident, Schedule, Time};
@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 
 /// The most an identity record, an ask command's answer, or a sky file may hold.
 const FILE: u64 = 64 * 1024;
@@ -91,7 +91,6 @@ type Sort = (Option<SessionId>, Vec<SessionId>);
 struct Inner {
     controller: Controller,
     state: Mutex<State>,
-    wake: Notify,
     sorting: watch::Sender<Sort>,
     dreaming: tokio::sync::Mutex<()>,
 }
@@ -119,14 +118,14 @@ impl Residents {
     /// - A heartbeat that came due since the last wake is admitted; `Busy` skips it.
     /// - A night that came due since the last wake asks the controller to rebuild.
     ///
-    /// The task sleeps until the next due time, and at most 60 seconds.
+    /// The task sleeps until the next due time, and at most 60 seconds, so a suspend or clock
+    /// change takes effect within a minute; a settings change wakes it within about a second.
     pub fn open(controller: Controller) -> Residents {
         let (sorting, snapshots) = watch::channel(Sort::default());
         let residents = Residents {
             inner: Arc::new(Inner {
                 controller,
                 state: Mutex::default(),
-                wake: Notify::new(),
                 sorting,
                 dreaming: tokio::sync::Mutex::new(()),
             }),
@@ -252,7 +251,7 @@ impl Residents {
             state.started.remove(name);
         }
         drop(state);
-        self.inner.wake.notify_one();
+        self.inner.controller.resident_wake().notify_one();
         Ok(())
     }
 
@@ -294,8 +293,9 @@ impl Residents {
                 && updates::installation().await.is_some()
             {
                 release_attempted = Some(tokio::time::Instant::now());
-                tokio::spawn(async {
-                    match updates::update_release().await {
+                let config = config.clone();
+                tokio::spawn(async move {
+                    match updates::update_release(Some(&config)).await {
                         Ok(sentence) => eprintln!("razor: {sentence}"),
                         Err(error) => eprintln!("razor: release updates: {error}"),
                     }
@@ -331,7 +331,7 @@ impl Residents {
             last = last.max(now);
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_millis(sleep)) => {}
-                () = self.inner.wake.notified() => {}
+                () = self.inner.controller.resident_wake().notified() => {}
             }
         }
     }

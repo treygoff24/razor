@@ -33,7 +33,7 @@ Run flows by number or name; the command prepares the build, bridge packages and
 scripts/flows.sh 02 session
 ```
 
-With no arguments it runs every numbered flow, eight at a time; repeated selectors run each file once, and `--repeat N` runs the selection N times. `RAZOR_BIN` may name another binary under test; otherwise the command uses this checkout's debug build.
+With no arguments it runs every numbered flow, eight at a time; repeated selectors run each file once, and `--repeat N` runs the selection N times. `RAZOR_BIN` may name another binary under test; otherwise the command uses this checkout's debug build. A flow that moves the server's clock (`flows/clock.py`) shifts it only for a binary named exactly `razor`: keep that file name when copying a build, or a wait on a moved limit hangs.
 
 Each flow prints `PASS 02-session` or its failure, then a `FLOW` line with its time and exit code. A change runs the flows nearest it, and a change that removes a feature removes that feature's flow. A new flow must be able to fail the way the product fails; prove it by breaking the code it covers and watching it fail.
 

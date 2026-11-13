@@ -104,7 +104,7 @@ enum Kind {
 #[derive(Clone, PartialEq)]
 pub(crate) struct Config {
     /// Refuse deleting a path made before `since` (SPEC "Trust"). Key `guards.delete`:
-    /// true by default, false in a pack that turns it off.
+    /// off unless the person or their pack turns it on.
     pub(crate) delete_guard: bool,
     /// The directories searched, in order, for `<name>/SKILL.md`.
     pub(crate) skills: Vec<PathBuf>,

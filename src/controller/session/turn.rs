@@ -203,8 +203,8 @@ impl Session {
         let done = self.done.map(|(entry, _)| entry);
         let closed =
             crate::memory::dreaming(s) || done.is_some_and(|d| d.0 == 0 || inputs.contains(&d));
-        let close_reason = (closed && done != s.job() && !crate::memory::dreaming(s))
-            .then_some(CloseReason::Person);
+        let close_reason =
+            (closed && done.is_some() && done != s.job()).then_some(CloseReason::Person);
         if closed {
             self.close_out(&inputs).await?;
             self.c.inner.children.closed(&self.c, self.record.summary());

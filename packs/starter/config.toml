@@ -54,9 +54,9 @@ answer = ["exa", "parallel"]
 # [live]
 # names = ["Ada", "Razor", "Lisbon"]
 
-# Razor refuses an agent's command that would delete files its session did not create. To allow it:
+# To refuse an agent's command or patch that deletes files its session did not create:
 # [guards]
-# delete = false
+# delete = true
 
 # How many children one session may have at once, and how long a child that stopped without
 # reporting is given before Razor asks it to finish.

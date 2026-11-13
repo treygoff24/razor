@@ -27,8 +27,10 @@ mod panel;
 mod picker;
 mod pictures;
 mod questions;
+mod reader;
 mod recap;
 mod screen;
+mod search;
 mod split;
 mod stage;
 mod start;
@@ -149,6 +151,7 @@ pub async fn run(
                 }
                 children::read_visible(&mut app, now());
                 output::read_visible(&mut app);
+                reader::read_visible(&mut app);
                 transcript::read_visible(&mut app);
                 pictures::read_visible(&mut app);
                 (app.dirty, app.immediate) = (false, false);
@@ -331,6 +334,7 @@ struct App {
     agent_bytes: usize,
     servers: Vec<crate::protocol::Server>,
     config: Option<String>,
+    notices: Vec<String>,
     brand: Brand,
     // The person's display settings; `ui.motion` is the motion switch every drawer reads.
     ui: crate::protocol::Ui,
@@ -370,6 +374,8 @@ struct App {
     // The drawn targets Tab and Ctrl-N cycle, in the cockpit's ring order and without repeats;
     // Enter on an empty composer does what a click on one does.
     targets: Vec<view::Action>,
+    keys: keys::Pane,
+    status_selected: Option<view::Action>,
     selected: Option<view::Action>,
     // The ask the person moved the band to, held by its id; when it closes the band shows the
     // first. A digit or click within 600 ms of the shown ask changing or opening is refused.
@@ -380,8 +386,8 @@ struct App {
     // The ask whose one-row band the person opened to its options, by a click or a first digit.
     ask_open: Option<MailId>,
     notice: Option<(String, u64)>,
-    // A ready release is announced once per terminal launch, including after reconnecting.
-    release_noticed: bool,
+    // The last release notice, so unchanged status does not announce it again.
+    release_noticed: Option<String>,
     // A first Ctrl-C and no key or paste since: the notice row says so and the next Ctrl-C quits.
     quitting: bool,
     // `/detach` was typed, or the session `/done` or `/quit` closed has ended: the loop quits as a
@@ -392,6 +398,7 @@ struct App {
     closing: Option<(SessionId, usize)>,
     panel: Option<panel::Panel>,
     goto: Option<goto::Goto>,
+    search: Option<search::Search>,
     panel_scroll: usize,
     // The words typed after `/` in the key list, commands or tasks, until Esc ends the search.
     panel_search: Option<String>,

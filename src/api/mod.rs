@@ -508,6 +508,9 @@ async fn refusals(request: Request, next: Next) -> Response {
 #[derive(Deserialize)]
 struct Page {
     cwd: Option<PathBuf>,
+    /// The sessions list: leave out dreams, keeping resident homes and threads.
+    #[serde(default)]
+    skip_dreams: bool,
     /// The sessions list: only this resident's threads.
     resident: Option<SessionId>,
     /// The sessions list: fresh runs too; by default only with `resident`.

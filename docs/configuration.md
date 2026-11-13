@@ -78,6 +78,8 @@ Settings about you or the machine may be set only in your own file, `~/.razor/co
 - A server whose own file or pack is broken does not start, and `server.log` says why.
 - A settings file is at most 1 MiB.
 
+Retired settings that still load are ignored with a notice in `razor doctor`, `server.log` and the terminal's status pane, in amber. These notices do not stop agents from starting. The agents feed carries them separately from errors; the phone and Mac apps do not show notices yet. The old `~/.razor/key` file is no longer read: save its key as `OPENAI_API_KEY` in `keys.toml`, then delete the old file. Razor tells you what to change and never rewrites your settings during an update.
+
 ## Keys
 
 API keys are read from the server's environment, and `~/.razor/keys.toml`, readable only by you, holds the ones you save with Razor: one line each, the variable's name and its key. When the server starts it sets each variable its environment lacks from that file, so an exported variable wins, and agents' shells and MCP servers get none of the names the file lists. Setup's API key choice writes a provider's key there, and `razor keys` asks for the optional ones:
@@ -115,7 +117,7 @@ Missing actions keep their defaults; `[]` unbinds an action. `overview` in `glob
 
 ### Moving between agents
 
-By default the arrows in the agents list move its highlight row by row: Up and Down (or `k` and `j`) step through every row, helpers included; Left (or `h`) moves to the parent agent or heading; Right (or `l`) unfolds a heading or an agent's helpers and moves into them; Enter opens the selected agent and closes the list. F2, or the prefix and `h`, gives the list the keys, and the prefix and Tab moves them between the list and the conversation.
+By default the arrows in the agents list move its highlight row by row: Up and Down (or `k` and `j`) step through every row, helpers included; Left (or `h`) moves to the parent agent or heading; Right (or `l`) unfolds a heading or an agent's helpers and moves into them; Enter opens the selected agent and closes the list. F2 gives the list the keys. The prefix and `h`/`l` or Tab/Shift-Tab move them round the list, conversation and status pane. Plain Tab and Shift-Tab move between parts from either side or an open panel; in the conversation with an empty draft they keep stepping through click targets. Ctrl-T gives the status pane the keys at the inbox; Escape returns to typing. Clicking STATUS, or pressing `-` while it has the keys (`status.toggle`), toggles whether the pane stays open after the keys leave.
 
 Unbound by default, these actions instead give a loop for moving between agents and typing to each one from the keyboard alone, the list staying open:
 
@@ -159,8 +161,8 @@ Many actions sit behind a prefix, as in tmux: press backtick (`` ` ``) or Ctrl-B
 | `X` | `done` | Types `/done`; Enter closes this session after its last turn |
 | `v` or `-` | `split` | Opens the selected child card, or the first child, in a split |
 | `x` | `close_split` | Closes the child's split |
-| `h` / `l` | `left` / `right` | Gives the keys to the agents list / to the conversation |
-| `Tab` or Shift-Tab | `switch` | Moves the keys between the agents list and the conversation |
+| `h` / `l` | `left` / `right` | Gives the previous / next part the keys |
+| `Tab` / Shift-Tab | `switch` / `left` | Moves the keys to the next / previous part |
 | `H` / `L` | `narrower` / `wider` | Narrows / widens the agents list |
 | `w`, `b` or `s` | `list.open` | Opens or closes the agents list |
 | `g` | `goto` | Opens Go to, as `/goto` does: find any agent or past conversation and open it |
@@ -186,6 +188,12 @@ Projects follow the agents list: its top-level agents in the list's order, whate
 
 Inside tmux, Herdr or another program whose own prefix is the same key, that program takes the key first. Press its prefix twice to send it on to Razor (tmux's `send-prefix`), or give Razor another prefix in `[ui.keys.global]`.
 
+### Deliveries
+
+In the status pane, Up and Down select an item and Enter opens it. A delivered file opens in the conversation card, with the inbox beside it where room allows. Markdown is formatted and other UTF-8 text is drawn verbatim. HTML, PDF and non-text files show a hint to open them in the phone or Mac app. Escape returns from the reader to the inbox, where `y` copies the file path or link. Space pages the reader, as it does every panel. All these keys are configurable.
+
+The reader fetches up to 256 KiB in bounded ranges and draws each arrival. A larger file names the omitted byte count and names Escape, then `y` in the inbox, to copy its path for opening the whole file in the phone or Mac app. Closing the card drops its source; a pending range finishes and is discarded.
+
 ### The draft
 
 With words or images in the draft, Ctrl-C empties it (`composer.clear`), and the undo key brings them back; with nothing to send, Ctrl-C starts quitting as before. Ctrl-S (`composer.stash`) sets the draft aside, words and images, and empties the box; Ctrl-S with an empty draft brings it back, into whichever conversation is open then. One draft is held at a time, until the terminal app quits, and stashing another while one is held is refused.
@@ -194,11 +202,11 @@ Each conversation keeps your unsent words, up to 1 MiB, as its draft on the serv
 
 ### Vim keys
 
-Panels such as `/keys`, `/help`, `/tasks` and `/status` scroll with `j`/`k`, by half a page with Ctrl-D/Ctrl-U, and to the top and end with `g`/`G`. In `/keys` and `/help`, `/` starts a search: type words and only the rows holding all of them stay; Esc ends the search, and Esc again closes the panel. The model chooser also moves with `h`/`j`/`k`/`l`. With an empty draft, Ctrl-D and Ctrl-U scroll the transcript half a page; with words in the draft they keep their editing meaning. A letter typed into an empty draft is always typed, so `j` and `k` move only while browsing.
+Panels such as `/keys`, `/help`, `/tasks` and the delivery reader scroll with `j`/`k`, by a page with Space or PageDown, by half a page with Ctrl-D/Ctrl-U, and to the top and end with `g`/`G`. In `/keys` and `/help`, `/` starts a search: type words and only the rows holding all of them stay; Esc ends the search, and Esc again closes the panel. The model chooser also moves with `h`/`j`/`k`/`l`. With an empty draft, Ctrl-D and Ctrl-U scroll the transcript half a page; with words in the draft they keep their editing meaning. A letter typed into an empty draft is always typed, so `j` and `k` move only while browsing.
 
 ### Contexts
 
-Each table is a context, the place its keys apply: `global`, `transcript`, `list` (the agents list), `prefix`, `goto` (the Go to panel), `composer`, `line_start` (the start of a composer line), `draft_end` (the end of the draft while the agents list is open), `targets` (selecting click targets), `children`, `input_history` (earlier inputs), `queued_input` (withdrawing queued input), `attached_images` (entering the image selection), `question`, `voice`, `picker`, `panel`, `mcp`, `start`, `emoji`, `completion`, `shortcode`, `attachments` (while selecting an image), `editor` and `skill`.
+Each table is a context, the place its keys apply: `global`, `transcript`, `list` (the agents list), `prefix`, `goto` (the Go to panel), `composer`, `line_start` (the start of a composer line), `draft_end` (the end of the draft while the agents list is open), `panes` (moving keyboard focus), `status` (the status pane), `targets` (selecting click targets), `children`, `input_history` (earlier inputs), `queued_input` (withdrawing queued input), `attached_images` (entering the image selection), `question`, `voice`, `picker`, `panel`, `mcp`, `start`, `emoji`, `completion`, `shortcode`, `attachments` (while selecting an image), `editor` and `skill`.
 
 Run `/keys`, or the prefix and `?`, for every action, its context and effective keys. The [shipped catalogue](https://github.com/treygoff24/razor/blob/main/src/terminal/data/keys.toml) supplies the defaults and descriptions in the same format. Keys accept `Ctrl-`, `Alt-`, `Shift-` and `Super-`, named keys such as `Enter`, `Esc`, `Space`, `Left`, `PageUp` and `F2`, or a single character. Each action accepts up to eight keys. Changes apply while the terminal is open, and hints update with them. An invalid name, key or duplicate within a context shows an error and keeps that terminal's last valid bindings.
 
@@ -315,7 +323,7 @@ An agent can start a helper as a reviewer or a researcher, which gives it Razor'
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `[guards] delete` | `true` | Refuses an agent's command or patch that would delete a file that existed before its session started. A check of the command's text, not a sandbox ([Security](security.md#what-agents-can-run)). |
+| `[guards] delete` | `false` | When turned on, refuses `rm`, `rmdir`, `unlink`, `shred`, `find -delete`, `find -exec rm`, `git clean` without `-n`, and a patch's Delete File on paths the session did not create. Best effort, not a sandbox ([Security](security.md#what-agents-can-run)). |
 
 ### Notifications
 
@@ -323,6 +331,19 @@ An agent can start a helper as a reviewer or a researcher, which gives it Razor'
 | --- | --- | --- |
 | `notify` | `[]`; the starter pack's is Razor's `scripts/notify.sh` | A program and its arguments that carry an agent's note to you; the note is its last argument. |
 | `ask` | `[]`; the starter pack's is Razor's `scripts/notify.sh` | A program that carries a question to you, as its last argument. If it prints something and exits 0, that is the answer; if it prints nothing, the question waits for you in a client. |
+
+Both programs run with empty standard input. Razor sets these environment variables:
+
+| Variable | Value |
+| --- | --- |
+| `RAZOR_SESSION` | The sending session's id. |
+| `RAZOR_NAME` | The session's name, as it signs agent mail. This is not its headline. |
+| `RAZOR_PROJECT` | The last component of its working folder, or its original checkout's folder for a worktree helper. |
+| `RAZOR_ASK` | For a question only, its entry number. A script can answer later through `POST /v1/sessions/<RAZOR_SESSION>/asks/<RAZOR_ASK>` ([Using Razor from scripts](scripting.md#the-local-api)). |
+
+A failed or stopped schedule reports the failed run's session id, name and project; the message itself names the resident. Notes leave `RAZOR_ASK` unset. These programs inherit the server's environment, including keys loaded from `keys.toml`.
+
+Commands run without a shell: `$RAZOR_NAME` inside a TOML argument stays literal. Use a small script or `["sh", "-c", "echo \"$RAZOR_NAME: $1\"", "sh"]` for a one-liner that reads the variables; the final `"sh"` becomes `$0` and the message becomes `$1`.
 
 The starter pack's `notify.sh` shows a desktop notification through `osascript` on macOS or `notify-send` on Linux, and does nothing on a machine with neither. On macOS the notifications come from Script Editor, which you may have to allow once in System Settings. To reach your phone instead, install the [ntfy](https://ntfy.sh) app, subscribe to a topic no one could guess, and put it in both lines:
 
@@ -429,8 +450,8 @@ before = ["call"]
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `release_updates` | `true` | Download newer stable Razor releases at server startup and daily, ready for `razor restart`. Set `false` to stop future background checks; `razor update` still works. Source builds never update automatically, and with `provider_only` on none runs; `razor update`, typed by you, still does. |
-| `[server] address` | none | No longer used: paired servers and the apps reach this one by key ([More machines](machines.md)). A config that still sets it loads, and `razor doctor` asks you to remove it. |
+| `release_updates` | `true` | Download newer stable Razor releases at server startup and daily. A release needing action is neither downloaded nor selected, with its instructions in the terminal, `razor doctor` and one notification; run `razor update`, then `razor restart`. Other releases are ready for `razor restart`. Set `false` to stop future background checks; `razor update` still works. Source builds never update automatically, and with `provider_only` on none runs; `razor update`, typed by you, still does. Servers on 0.6.0 and earlier, or any server sharing their install folder, still select the next release automatically. |
+| `[server] address` | none | No longer used: paired servers and the apps reach this one by key ([More machines](machines.md)). A config that still sets it loads with a notice asking you to remove it. |
 | `[network] relays` | none: iroh's public relays | The only relays this server uses and accepts from a server it pairs with, as a list of addresses ([Running your own relay](relay.md)). |
 | `[remote] server` | none: this server | The enrollment name of the paired server for new sessions, `--continue`, unqualified `--resume` and `--print`; connections go through this machine's local server. |
 | `[server] https_url` | none | An HTTPS address that reaches this server, used to finish MCP sign-ins. Without it, you paste the address the browser landed on. |

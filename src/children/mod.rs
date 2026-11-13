@@ -14,7 +14,7 @@ pub(crate) use remote::{
 pub(crate) use search::{digest, search};
 mod turn;
 mod watch;
-pub(crate) use message::{name, path_identity, project, receive, repo, repo_info};
+pub(crate) use message::{name, path_identity, project, receive, repo, repo_info, sender};
 pub(crate) use post::Post;
 pub(crate) use turn::Turn;
 

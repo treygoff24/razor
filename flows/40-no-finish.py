@@ -193,7 +193,7 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     replies += [agent(LONG, "start", name="long40", brief="Fail long.", model="gpt-6.1-sol", placement="in_place"),
                 agent(LONG, "wait"), reply(LONG, text="long-report-received40"), Reply(f"data: {big}\n\n".encode(), match=long)]
     parent = start(LONG)
-    sid = child(parent, "long40")
+    sid = lone = child(parent, "long40")
     ended(parent, "long-report-received40")
     line = "\n\nContinue long40 to try again."
     cut = f"The model's reply stopped early ({'🪒' * 20000}).".encode()[:65536 - len(line)].decode("utf-8", "ignore")
@@ -239,6 +239,9 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     os.kill(json.loads((f.home / ".razor/server.json").read_text())["pid"], signal.SIGSTOP)
     server.stop(f, signal.SIGKILL)
     server.start(f)
+    # The restart makes the blocked helper without a worktree its row from its own record.
+    row = server.wait(lambda: (r := server.agents(f).get(lone)) and r["report"] and r, 10, "no reported row")
+    assert (row["branch"], row["model"], row["report"]["status"]) == (None, "gpt-6.1-sol", "blocked") and row["last_activity"], row
     ended(parent, "held-report-heard40")
     assert [r["text"] for r in reports(parent, sid)] == ["held-report40"], reports(parent, sid)
     later = server.post(f, f"/sessions/{sid}/input", {"text": "HELD_LATER40"})["entry"]

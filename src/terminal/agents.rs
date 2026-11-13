@@ -8,6 +8,7 @@ mod panel;
 mod sections;
 mod servers;
 mod tiles;
+use super::keys::Pane;
 use super::view::{self, Action, Hit};
 use super::{App, keys, text::*};
 use crate::protocol::views::{Layout, Section, SectionKind, ViewsStatus};
@@ -33,7 +34,6 @@ const LIST_KEYS: [&str; 6] = [
 pub(super) struct List {
     pub earlier: earlier::Earlier,
     pub open: bool,
-    pub keys: bool,
     pub area: Option<Rect>,
     changed: u64,
     pub selected: Option<Action>,
@@ -93,7 +93,7 @@ pub(super) fn toggle(app: &mut App) {
     if app.list.open && (app.sending.is_some() || super::audio::unsent(app)) {
         return app.say("A note or input is pending; wait before entering a session.");
     }
-    (app.list.open, app.list.overview, app.list.keys) = (!app.list.open, None, false);
+    (app.list.open, app.list.overview, app.keys) = (!app.list.open, None, Pane::Conversation);
     app.list.changed = now();
     match app.list.open {
         true => choose(app),
@@ -118,16 +118,18 @@ pub(super) fn outward(app: &mut App, action: &str) {
         overview(app);
     } else {
         toggle(app);
-        app.list.keys = false;
+        app.keys = Pane::Conversation;
     }
 }
 /// Gives the list the keys with the addressed agent selected, opening the list if it is closed;
 /// a new agent's or thread's composer keeps the row that aimed it.
 pub(super) fn choose(app: &mut App) {
     if !app.list.open {
-        return toggle(app);
+        toggle(app);
+        app.list.changed = 0;
+        return;
     }
-    (app.list.keys, app.list.reveal) = (true, true);
+    (app.keys, app.list.reveal) = (Pane::Agents, true);
     let row = app.focus.clone().map(Action::Agent);
     app.list.selected = row.or(app.list.selected.take());
 }
@@ -159,11 +161,11 @@ pub(super) fn press(app: &mut App, action: Action) {
             app.list.selected = Some(Action::Agent(id.clone()));
             // From the overview, a refused or failed switch keeps it; an opened agent lands in
             // the list.
-            app.list.keys = app.list.overview.is_some();
+            app.keys = [Pane::Conversation, Pane::Agents][usize::from(app.list.overview.is_some())];
             keys::focus(app, Some(id.clone()));
             app.after(|app| {
                 if app.focus == Some(id) && app.list.overview.take().is_some() {
-                    (app.list.keys, app.list.open, app.list.reveal) = (false, true, true);
+                    (app.keys, app.list.open, app.list.reveal) = (Pane::Conversation, true, true);
                     overview::fold(app);
                 }
             });
@@ -177,9 +179,8 @@ pub(super) fn press(app: &mut App, action: Action) {
 pub(super) fn key(app: &mut App, action: &str) {
     let (selected, shown) = (app.list.selected.clone(), app.list.overview.is_some());
     match action.trim_start_matches("list.") {
-        "open" => toggle(app),
         "close" if shown => overview(app),
-        "close" => app.ask_open = None,
+        "close" => (app.ask_open, app.keys) = (None, Pane::Conversation),
         "up" | "down" => step(app, action == "list.down", true),
         "previous_agent" | "next_agent" => step(app, action == "list.next_agent", false),
         // The overview is the outermost view.
@@ -267,7 +268,10 @@ pub(super) fn overview(app: &mut App) {
     if shown && app.focus.is_none() {
         return;
     }
-    (app.list.overview, app.list.keys) = ((!shown).then_some(0), !shown);
+    (app.list.overview, app.keys) = (
+        (!shown).then_some(0),
+        [Pane::Agents, Pane::Conversation][usize::from(shown)],
+    );
     // The overview selects a helper's root, which it lists.
     let id = app
         .focus
@@ -416,7 +420,12 @@ fn homes(app: &App) -> impl Iterator<Item = SessionId> {
 /// The resident whose thread `app` would start: that of the selected row while the list has the
 /// keys, else of the addressed session; a thread's helper counts for its thread's resident.
 fn aimed(app: &App) -> Option<SessionId> {
-    let id = match app.list.selected.as_ref().filter(|_| app.list.keys) {
+    let id = match app
+        .list
+        .selected
+        .as_ref()
+        .filter(|_| app.keys == Pane::Agents)
+    {
         Some(Action::Agent(id) | Action::Thread(id)) => id,
         _ => app.focus.as_ref()?,
     };
@@ -437,7 +446,7 @@ pub(super) fn recent(app: &mut App) {
         .map(|(_, id)| id.clone());
     if let Some(id) = id {
         press(app, Action::Agent(id));
-        app.list.keys = true;
+        app.keys = Pane::Agents;
     }
 }
 /// Unfolds what hides `id`'s rows: each section holding it and those over it, the rows over it
@@ -474,7 +483,7 @@ pub(super) fn unfold(app: &mut App, id: &SessionId) {
 }
 /// Aims the composer at a fresh thread with the resident whose home session is `home`.
 fn thread(app: &mut App, home: &SessionId) {
-    (app.list.keys, app.list.overview) = (false, None);
+    (app.keys, app.list.overview) = (Pane::Conversation, None);
     let (name, server) = home.address().unwrap_or((home.clone(), ""));
     super::start::aim(app, server.into(), Default::default(), Some(name));
 }
@@ -534,7 +543,7 @@ pub(super) fn frame(
         let chosen = app.list.width.unwrap_or((area.width / 3).clamp(32, 64));
         (chosen.clamp(32, area.width.saturating_sub(40).max(32)) as f64 * share).round() as u16
     } else {
-        area.width * u16::from(app.list.open && app.list.keys)
+        area.width * u16::from(app.list.open && app.keys == Pane::Agents)
     };
     let list = Rect { width, ..area };
     app.list.area = (width > 0).then_some(list);
@@ -547,7 +556,7 @@ pub(super) fn frame(
     if width > 5 && area.height > 2 {
         draw(app, b, list, wide, now, hits);
     }
-    cursor.flatten().filter(|_| !app.list.keys)
+    cursor.flatten().filter(|_| app.keys != Pane::Agents)
 }
 
 // The list on the panel's ground: its header, its drag edge when wide, its rows from the scroll,
@@ -556,6 +565,7 @@ pub(super) fn frame(
 fn draw(app: &mut App, b: &mut Buffer, list: Rect, wide: bool, now: u64, hits: &mut Vec<Hit>) {
     fill(b, list, style(DATA, PANEL));
     header(app, b, list, now, hits);
+    let edge = [PANEL_INK, CYAN][usize::from(app.keys == Pane::Agents)];
     let inner = Rect::new(
         list.x,
         list.y + 4,
@@ -600,6 +610,9 @@ fn draw(app: &mut App, b: &mut Buffer, list: Rect, wide: bool, now: u64, hits: &
         let column = Rect::new(list.right() - 1, inner.y, 1, inner.height);
         hits.push((column, Action::Edge));
     }
+    for y in list.y..list.bottom() {
+        b[(list.right() - 1, y)].set_fg(edge);
+    }
     // Rows drawn on the glass, the servers line's, take the panel's ground.
     for at in inner.positions() {
         if b[at].bg == GLASS {
@@ -623,7 +636,7 @@ fn keys(app: &App, b: &mut Buffer, r: Rect, above: Option<bool>) {
             let bound = |t: &&str| super::bindings::bound(app, t);
             let into = ["<composer.switch>", "<line_start.choose>"];
             let into: Vec<_> = into.into_iter().filter(bound).collect();
-            let keys = match app.list.keys || into.is_empty() {
+            let keys = match app.keys == Pane::Agents || into.is_empty() {
                 true => LIST_KEYS.join("  "),
                 false => format!("{} to choose an agent", into.join(" or ")),
             };
@@ -652,9 +665,14 @@ fn header(app: &App, b: &mut Buffer, list: Rect, now: u64, hits: &mut Vec<Hit>) 
     let agents = format!(" AGENTS · {view} ");
     let top = Rect::new(list.x, list.y, list.width, 4);
     tiles::frame(b, top, (PANEL_INK, PANEL), true, None);
+    let focused = app.keys == Pane::Agents;
     let tabs = [
         (" RAZOR ", CHIP_INK, CYAN),
-        (agents.as_str(), CYAN, CLOCK_BG),
+        (
+            agents.as_str(),
+            [CYAN, CHIP_INK][usize::from(focused)],
+            [CLOCK_BG, CYAN][usize::from(focused)],
+        ),
     ];
     panel::write(b, list.x + 2, y, &panel::tabs(&tabs, PANEL));
     // At the top right, ‹ closes the list and ⤢ opens the overview, each with its key.

@@ -26,7 +26,7 @@ pub(super) async fn repos(State(app): State<App>, Query(q): Query<Under>) -> Rep
             "Name an absolute folder to look in, such as /Users/you/Code.",
         ));
     }
-    let records = crate::record::list(&app.home, None, None, false, usize::MAX)
+    let records = crate::record::list(&app.home, None, None, false, usize::MAX, false)
         .await
         .map_err(crate::controller::Error::from)?;
     let mut known = BTreeMap::<_, SystemTime>::new();

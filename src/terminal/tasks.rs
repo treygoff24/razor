@@ -434,13 +434,19 @@ pub(super) fn key(app: &mut App, key: KeyEvent) -> bool {
     false
 }
 
-pub(super) fn draw(app: &mut App, b: &mut Buffer, r: Rect, hits: &mut Vec<Hit>) {
+pub(super) fn draw(
+    app: &mut App,
+    b: &mut Buffer,
+    r: Rect,
+    edge: ratatui::style::Color,
+    hits: &mut Vec<Hit>,
+) {
     let width = r.width.saturating_sub(4) as usize;
     let title = match &app.tasks.detail {
         Some(task) => format!("task {} · {}", id(task), project(field(task, "project"))),
         None => format!("tasks · {}", title(&app.tasks)),
     };
-    let area = panel::frame(b, r, &title, BEZEL_HI);
+    let area = panel::frame(b, r, &title, edge);
     let body = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
     let (lines, ids): (Vec<_>, Vec<_>) = rows(app, width).into_iter().unzip();
     panel::scroll(app, b, body, &lines);

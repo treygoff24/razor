@@ -96,7 +96,7 @@ The routes a script needs:
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /v1/sessions?cwd=<folder>&limit=<n>` | | Top-level sessions, most recently started first, each with its `session` id, `cwd`, `model`, `effort`, `name` and `title` (your first message's first line). 50 unless `limit` says otherwise, at most 1,000. |
+| `GET /v1/sessions?cwd=<folder>&limit=<n>` | | Top-level sessions, most recently started first, each with its `session` id, `cwd`, `model`, `effort`, `name` and `title` (your first message's first line). 50 unless `limit` says otherwise, at most 1,000. `skip_dreams=true` leaves out unnamed roots other than resident homes and threads, as `--continue` requests; older servers ignore it. |
 | `POST /v1/sessions` | `{"cwd": "<folder>"}`, and optionally `model`, `effort`, `speed` | `{"session": "<id>", "name": "<name>"}`: a new session, idle until its first input. |
 | `POST /v1/sessions/<id>/input` | `{"text": "…"}`, and optionally `model`, `effort`, `speed`, `from`, `request`, `images`, `skill` | `{"entry": <n>}` once the message is recorded. A message sent mid-turn reaches the agent before its next step. |
 | `GET /v1/sessions/<id>/events?after=<entry>` | | The session as JSON lines: `attached`, then every entry after that id, then each new line as it happens, until you close the connection. `--print=stream` prints exactly this. Entries leave out `native`, the model's own replay data, and a reply's `text` leaves out its suggested next message, given as `suggestion`; add `&native=true` for both as recorded. Add `&follow=true` to follow it as a view: it does not mark the session looked at or stop the person's finished-turn pushes. Add `&heartbeat=true` to get `{"kind":"heartbeat"}` after every 15 seconds without a line, so you can tell a quiet session from a dropped connection. |
@@ -118,6 +118,7 @@ The routes a script needs:
 | `GET /v1/agents?after=<session>` | | `{"agents": […], "next": "<session>"}`: this server's top-level sessions that have left the live list, newest first, at most 50 rows and 1 MiB to a page. Send `next` as `after` for the next page; it is `null` after the last. `view=<name>` keeps the ones that view puts under Earlier. |
 | `GET /v1/deliveries?limit=<n>` | | Your inbox, newest first: the files, links and notes agents sent you. 50 unless `limit` says otherwise, at most 256. `kind=note` lists notes only. |
 | `GET /v1/search?q=<words>` | | Past conversations holding every word, here and on paired servers ([Concepts](concepts.md#the-record)). |
+| `GET /v1/sessions/{id}/search?q=<words>&limit=<n>` | | This session's whole recorded transcript, newest matching occurrence first; `Found` with `partial: false`, tool hits at their Call entry. Default 20, clamped to 1–50 rows, no paging. Use 1–8 word prefixes in at most 200 UTF-8 bytes. |
 | `GET /v1/models` | | The models Razor can run, each one's efforts, and your defaults. |
 
 Four optional fields of an input are for programs:
@@ -135,12 +136,12 @@ receive `brand.avatars`, a map from name to base64 PNG bytes, on every `agents`
 snapshot. Without the flag this map is empty. Pool settings never travel. See [configuration](configuration.md#the-terminal-app) for selection,
 inheritance, reload and missing-picture rules.
 
-The status stream carries the agents of the live list: the always-on agents, every session at work, asking or stuck, an idle one with an unread delivery, your input in the last twelve hours, a terminal open on it or a reply you have not looked at, and their helpers. The rest stay on disk, read a page at a time with `GET /v1/agents`. After the first line, the stream sends:
+The status stream carries the agents of the live list: the always-on agents, every session at work, asking or stuck, an idle one with an unread delivery, your input in the last twelve hours, a terminal open on it or a reply you have not looked at, and their helpers. The rest stay on disk, read a page at a time with `GET /v1/agents`. An `agents` line's `config`, when present, is a settings error that keeps agents from starting; its `notices`, when present, list settings notices that stop nothing, such as a retired setting to remove ([Configuration](configuration.md#when-a-change-applies)). After the first line, the stream sends:
 
 - `agent`, one row, when an agent in the list changes or joins it;
 - `agents` again, whole, when one leaves the list: replace what you hold with it;
 - `delivery`, when an agent sends you something;
-- `server`, what this server or a paired one says of itself. Its `silent`, also on each server in the `agents` line's `servers`, is set while a server is not answering, to when it was last heard from, or after it said it was going to sleep: a Mac's server says so on this line a second before the Mac sleeps and clears it when it wakes, and its paired servers pass that on;
+- `server`, what this server or a paired one says of itself. Its `release_ready` names a downloaded version waiting for `razor restart`, and its `release_action` the message, as `razor doctor` prints it, saying what to do for a release that needs your action. Its `silent`, also on each server in the `agents` line's `servers`, is set while a server is not answering, to when it was last heard from, or after it said it was going to sleep: a Mac's server says so on this line a second before the Mac sleeps and clears it when it wakes, and its paired servers pass that on;
 - `tasks`, `{"kind":"tasks","project":"<folder>"}`, when a task in that project changes, here or in what a fetch of its shared list brought ([Memory](memory.md#tasks)); a paired server's adds its name as `server`. It carries no task, so read the project's tasks again.
 
 To answer a question, find it in `GET /v1/status`: each row's `asks` lists its open questions with their `text`, `options` and `id`, which is the session and the entry to put in the `asks` route. The always-on agents' routes are on [Always-on agents and schedules](always-on-agents.md#controlling-it-from-a-script), and the voice settings' on [Browser, voice and search](browser-voice-search.md#spoken-notes-from-agents). Every other route, the ones the terminal app and the phone client use, is described as it was designed in the [API design page](design/api.md).

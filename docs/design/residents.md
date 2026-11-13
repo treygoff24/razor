@@ -16,8 +16,8 @@ A resident is a session whose id is its name. Its config is `[residents.<name>]`
 // ---- src/config/residents.rs, read by this module -----------------------------------------
 // `[residents.<name>]`, `ask` and `notify` are fields of config's `Config`: `residents` (each
 // resident by name, its session's id), `ask` and `notify` (the programs that carry an ask and a
-// notification to the person). Every key is live: the schedule re-reads the config on every wake
-// (at least once a minute), and the rest are read at their next use.
+// notification to the person). Every key is live: a settings change wakes the schedule as soon
+// as the server's once-a-second read observes it, and the rest are read at their next use.
 
 /// One resident: plain config a pack can hold.
 #[derive(Clone, PartialEq, Deserialize)]
@@ -96,8 +96,8 @@ impl Residents {
     ///   `Busy`, it is skipped and nothing is recorded.
     /// - A night that came due since the last wake asks the controller to rebuild.
     ///
-    /// The task sleeps until the next due time, and at most 60 seconds. So a suspend, a clock
-    /// change or a config edit takes effect within a minute.
+    /// The task sleeps until the next due time, and at most 60 seconds, so a suspend or clock
+    /// change takes effect within a minute; a settings change wakes it within about a second.
     pub fn open(controller: Controller) -> Residents;
 
     /// Every resident in the config, by name.
@@ -129,14 +129,17 @@ pub struct Listed {
 /// resident. (2026-10-29: replaces `prompt`; the persona is now an entry in its startup list.)
 pub async fn identity(config: &Config, session: &SessionId, dir: &Path) -> Option<String>;
 
-/// Send the person a notification through the notify command. `Refused` when none is
-/// configured, with the sentence for the model.
-pub async fn notify(config: &Config, text: &str) -> Result<(), Error>;
+/// The sender's mail name, project and session id, from the caller's summary.
+pub fn environment(summary: &Summary) -> BTreeMap<&'static str, String>;
+
+/// Send the person a notification through the notify command, detached under the asks' bound.
+/// No configured command means nothing runs; failure, timeout or saturation is logged.
+pub fn notify(config: &Config, text: String, env: BTreeMap<&str, String>);
 
 /// Carry an ask to the person through the ask command, and return at once. The command runs
 /// detached, at most 16 at a time; when it exits 0 and prints an answer, Razor answers the ask
 /// with `Controller::answer`, which refuses an ask already answered from a client.
-pub fn ask(controller: &Controller, config: &Config, ask: &Ask);
+pub fn ask(controller: &Controller, config: &Config, ask: &Ask, summary: &Summary);
 
 /// Write and enable the service that runs `razor serve` and restarts it 60 seconds after a
 /// failure: a systemd user unit on Linux, which starts at boot when lingering is on and at login
@@ -264,7 +267,7 @@ Every write also carries `harness: razor`, `session_id` and the session's cwd, f
 
 1. `razor serve` makes one `Memory`, one `Deliveries` and, after `Controller::start`, `Residents::open`. The service `razor install` wrote starts it, and so does any client that finds no server.
 2. A resident's first wake creates or opens its session.
-3. The task sleeps until the next due time across all residents, and never more than 60 seconds. On each wake it reads the config and `Controller::scheduled`, and compares every due time with the wall clock.
+3. The task sleeps until the next due time across all residents, and never more than 60 seconds. A change to effective machine or pack settings wakes it within about a second. On each wake it reads the config and `Controller::scheduled`, and compares every due time with the wall clock.
 4. A heartbeat is admitted as `Origin::Heartbeat` with its own model and effort. `Busy` means skipped, and nothing is recorded.
 5. A schedule is admitted as `Origin::Schedule { name, due }`, with its own model and effort and its text plus the delivery sentence. The record holds it while the controller holds its turn, and the person can withdraw it until the turn starts.
 6. A night is `Controller::night(name, at)`, `at` being its tidy input's entry. When that input opened the turn (the home session was idle), the controller rebuilds once that turn ends, so the rebuilt startup page shows the tidying. When it waits behind a turn already running, that turn's current batch of tool calls settles as a handover's does, the context is rebuilt there with the latest note and the turn goes on in it, and the tidy input runs after the turn (Trey, 2026-11-04, agreeing to "the rebuild happens after the current round of tool calls. Otherwise a busy coordinator may never get its nightly reset"). Before, the rebuild waited for the running turn to end, which for a coordinator could be hours. No note is asked of the model, and a wait in the batch is not cut short. Any other rebuild while the night waits (a threshold the same batch reached, the person's handover) is that night's: it gives the fresh context, keeps its own trigger, and the night does not rebuild a second time.
@@ -272,6 +275,8 @@ Every write also carries `harness: razor`, `session_id` and the session's cwd, f
 8. `deliver` copies a file into the session's directory, appends one line to `deliveries.jsonl` and broadcasts it. The API lists, serves and announces deliveries from there.
 9. Each native conversation opens with `Memory::page` ahead of its first input. Each `memory` call is one socket connection.
 10. Nothing here keeps a session's state. The record holds every admitted input and every schedule's latest due. The index holds deliveries, and Memorum holds memory.
+
+The notify and ask commands get the text as their last argument and empty standard input, with no shell. One function builds `RAZOR_SESSION`, `RAZOR_NAME` and `RAZOR_PROJECT` from a summary, using the same name and project as mail; asks add `RAZOR_ASK`, the entry in the `/asks/<entry>` answer route. The launcher removes inherited values of these four variables before setting the sender's values. Agent messages reuse the summary already read; MCP and sign-in questions read one summary through the controller (the loaded fold when present). Failed schedules use their run's summary unchanged, so the environment points at the session holding the failure while the message names its resident. These commands retain the server's other environment variables.
 
 ## The hard decision: what holds the schedule and its pending inputs
 

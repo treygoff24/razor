@@ -1,10 +1,14 @@
 """The terminal app with another session's ask and its own: a
 digit inside 600 ms of a question taking the band is refused; the ask being answered in words
 holds the band when another arrives; once it closes, Enter only says so; an option click keeps
-the typed words. Before the asks: a handed skill draws one line, no row shows JSON, the status
-pane lists deliveries newest first and copies a file's absolute path, no control in a delivery
-reaches the terminal raw, the clock's octants go at phone width, a trailing backslash makes a
-new line, and a Finder-escaped path and a file URL each attach. Then, through a socket that
+the typed words; a program's input leaves three questions open, an answer settles its own, and
+the person's message the rest. Before the asks: a handed skill draws one line, no row shows JSON,
+the status pane lists deliveries newest first, a press on one reads it and marks it read, `y`
+copies a file's absolute path, no control in a delivery reaches the terminal raw, the clock's octants go
+at phone width, a trailing backslash makes a new line, and a Finder-escaped path and a file URL
+each attach. After them, the reader: refused with no session addressed; a text file verbatim
+whole across its ranges, a file over the cap cut with its bytes counted, a wrapped Markdown
+link one address. Then, through a socket that
 holds the app's stream back and inside tmux: a new session's first input and one held for a
 model change are never shown queued while their turns run, no octant is drawn, :codes: in code
 are sent as typed, and with a turn running Esc closes the floating pane, then unpins."""
@@ -35,7 +39,18 @@ replies = [turn("B_FIRST", "deliver", line="LINK_LINE", url="https://example.com
            turn("B_FIRST", "message", type="question", text="QUESTION_B", options=["b-one", "b-two"]),
            turn("B_FIRST", "b-waits"), turn("B_FIRST", "b-answered"),
            turn("A_ASK", "message", type="question", text=LONG, options=["a-one", "a-two"]),
-           turn("A_ASK", "a-waits"), turn("A_ASK", "a-answered")]
+           turn("A_ASK", "a-waits"), turn("A_ASK", "a-answered"),
+           turn("C_FILES", "deliver", line="BIG_LINE", path="big.md"),
+           turn("C_FILES", "deliver", line="WRAP_LINE", path="wrap.md"),
+           turn("C_FILES", "deliver", line="LONG_LINE", path="long.txt"), turn("C_FILES", "files-delivered")]
+CYAN = "3fd9f2"
+URL = "https://example.com/wrapped/" + "p" * 40
+WRAP = "[LINKA_47 " + "spans many words " * 8 + "LINKZ_47](" + URL + ")\n"  # wider than the reader
+BIG = ("big words " * 9 + "\n") * 3000  # over the reader's 256 KiB
+HEAD, SEAM = "**NOT_BOLD_47** _as typed_\n", "SEAM_47 " + "€" * 8 + " SEAM_END\n"
+LEAD = 65536 - len(HEAD) - len("SEAM_47 ") - 3 * 4 - 1  # the fifth € straddles the first 64 KiB range's end
+LONG = HEAD + ("." * 63 + "\n") * (LEAD // 64) + "." * (LEAD % 64 - 1) + "\n" * (LEAD % 64 > 0) + SEAM + "LONG_TAIL_47\n"
+assert LONG.encode()[65535:65538] == "€".encode(), "the seam moved"
 
 
 def band(t):
@@ -120,8 +135,9 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN + '[server]\nname="box"\nre
         assert octants(t), "no octant clock at 120 columns outside tmux:\n" + t.text()
         assert "SKILL_BODY_LINE" not in t.text() and '{"' not in t.text(), t.text()
         # The unread chip opens the pane at its inbox, which lists the file above the link delivered
-        # before it; a press on the file copies its absolute path; the controls in a name, line or
-        # link reach the terminal as nothing.
+        # before it; a press on the file reads it beside the inbox and marks it read; back in the
+        # inbox `y` copies its absolute path; the controls in a name, line or link reach the
+        # terminal as nothing.
         t.resize(20, 120)  # too short for the pane to show its inbox unscrolled
         t.until(lambda t: t.screen.display[4].startswith(" CONTEXT"))  # redrawn at 20 rows: the click lands there
         t.click("2 unread")
@@ -130,13 +146,18 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN + '[server]\nname="box"\nre
         top, left = find(t, "── INBOX · 2 unread")
         assert find(t, "HOSTILE_LINE", top, left) < find(t, "LINK_LINE", top, left), t.text()
         click(t, find(t, "HOSTILE_LINE", top, left))
+        t.shown("┌─ odd", "INBOX")
+        t.shown("INBOX · 1 unread")
+        t.send("\x1b")
+        t.until(lambda t: "┌─ odd" not in t.text())
         copies = lambda t: re.findall(rb"\x1b\]52;c;([A-Za-z0-9+/=]+)\x07", t.output)
-        t.until(copies)
+        before = len(copies(t))
+        t.send("y")
+        t.until(lambda t: len(copies(t)) > before)
+        assert ESCAPE.encode() not in t.output, "a delivery's control bytes reached the terminal"
         copied = base64.b64decode(copies(t)[-1]).decode()
         delivered = f.home / ".razor/sessions" / b / "delivered"
         assert copied == str(next(delivered.glob("*/" + HOSTILE))), copied
-        assert ESCAPE.encode() not in t.output, "a delivery's control bytes reached the terminal"
-        t.shown("INBOX · 1 unread")
         assert server.send(f,"DELETE",receipt+"/read").status == 200
         t.shown("INBOX · 2 unread")
         assert server.send(f,"PUT",receipt+"/archive").status == 200
@@ -150,12 +171,17 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN + '[server]\nname="box"\nre
         # top bar's highlights have passed the screen falls quiet: nothing turns each second.
         (f.home / ".razor/config.toml").open("a").write("[ui]\nmotion = false\n")
         assert t.quiet() and "<1m" in t.text(), t.text()
-        # At phone width the clock and the pane's picture draw in half blocks.
+        # At phone width the pane, which has the keys since the chip's press, fills the screen, its
+        # picture in half blocks; Esc gives the keys back and the top bar returns, its clock in half
+        # blocks too. At 120 columns Esc closes the pane the chip opened.
         t.resize(40, 40)
+        t.until(lambda t: t.screen.display[0].startswith("│  STATUS"))
+        assert not octants(t), t.text()
+        t.send("\x1b")
         t.until(lambda t: t.screen.display[0][39] == "┐")
         assert not octants(t), t.text()
         t.resize(40, 120)
-        t.send("\x14")
+        t.send("\x1b")
         t.until(lambda t: "INBOX" not in t.text())
         # Enter after a trailing backslash is a new line, not a send; each pasted path attaches.
         t.send("PASTED abc\\")
@@ -209,6 +235,77 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN + '[server]\nname="box"\nre
         # With words in the draft, Ctrl-C empties it; the two that quit follow.
         t.send("\x03")
         t.until(lambda t: "WORDS_FOR_A" not in t.text())
+
+    # A program's input leaves a session's three message questions open, an answer settles its own
+    # alone, and the person's next message settles the rest.
+    replies += [*(turn("B_FIRST", "message", type="question", text=f"QUESTION_B{n}") for n in (2, 3, 4)),
+                turn("B_FIRST", "b-asked"), turn("B_FIRST", "b-scripted"), turn("B_FIRST", "b-answered-2"),
+                turn("B_FIRST", "b-moved-on")]
+    ended = lambda text: lambda es: es[-1]["kind"] == "turn_end" and any(e.get("text") == text for e in es)
+    open_asks = lambda: {ask["text"]: ask["id"][1] for ask in server.agents(f)[b]["asks"]}
+    server.post(f, f"/sessions/{b}/input", {"text": "B_THRICE"})
+    server.until(f, b, ended("b-asked"))
+    server.post(f, f"/sessions/{b}/input", {"text": "B_SCRIPT", "from": "script"})
+    server.until(f, b, ended("b-scripted"))
+    assert list(asked := open_asks()) == ["QUESTION_B2", "QUESTION_B3", "QUESTION_B4"], "a program's input settled one"
+    server.post(f, f"/sessions/{b}/asks/{asked['QUESTION_B2']}", {"text": "B2_ANSWER"})
+    server.until(f, b, ended("b-answered-2"))
+    assert list(open_asks()) == ["QUESTION_B3", "QUESTION_B4"], "an answer settled another question"
+    server.post(f, f"/sessions/{b}/input", {"text": "B_NEVER_MIND"})
+    server.until(f, b, ended("b-moved-on"))
+    assert not open_asks(), "the person's message left a question open"
+
+    # A third session delivers a file over the cap, a wrapped Markdown link and a text file over
+    # one range.
+    for name, words in (("big.md", BIG), ("wrap.md", WRAP), ("long.txt", LONG)):
+        (f.cwd / name).write_text(words)
+    c = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    server.post(f, f"/sessions/{c}/input", {"text": "C_FILES"})
+    server.until(f, c, lambda es: es[-1]["kind"] == "turn_end")
+    cell = lambda t, at: t.screen.buffer[at[0]][at[1]]
+    inbox = lambda t, words: find(t, words, *find(t, "── INBOX"))
+    with Terminal(f, "--resume", c) as t:
+        t.shown("files-delivered", "● 4 unread")  # every delivery has arrived
+        # Ctrl-T selects the newest delivery; Enter reads it in the conversation's place, beside the
+        # inbox, its frame cyan while it has the keys and the composer's not. A text file is drawn
+        # as typed, its Markdown syntax kept.
+        t.send("\x14")
+        t.shown("INBOX")
+        t.send("\r")
+        t.shown("┌─ long.txt", HEAD.strip(), "INBOX")
+        assert cell(t, find(t, "┌─ long.txt")).fg == CYAN and cell(t, find(t, "╭─ YOU")).fg != CYAN, t.text()
+        # Its 64 KiB ranges join in order: its end holds the last range's words and the character
+        # the first range cut, whole.
+        t.until(lambda t: "┌─ long.txt" in t.text() and "Reading…" not in t.text())
+        t.send("G")
+        t.shown(SEAM.strip(), "LONG_TAIL_47")
+        # A press on another delivery reads it; a file over 256 KiB names the bytes left out. Esc
+        # gives the inbox back the keys with that delivery selected.
+        t.send("\x1b")
+        t.until(lambda t: "┌─ long.txt" not in t.text())
+        click(t, inbox(t, "BIG_LINE"))
+        t.shown("┌─ big.md", f"{len(BIG) - (256 << 10)} bytes not shown", "INBOX")
+        t.send("\x1b")
+        t.until(lambda t: "┌─ big.md" not in t.text() and cell(t, inbox(t, "BIG_LINE")).bg == CYAN)
+        # A Markdown link wrapped over rows links each of its rows to the whole address.
+        click(t, inbox(t, "WRAP_LINE"))
+        linked = lambda t: [(url.decode(), re.sub(rb"\x1b\[[0-9;]*[mH]", b"", words).decode()) for url, words in
+                            re.findall(rb"\x1b\]8;;([^\x1b]+)\x1b\\(.*?)\x1b\]8;;\x1b\\", t.output, re.S)]
+        to = lambda t, word: any(word in words and url == URL for url, words in linked(t))
+        t.until(lambda t: "LINKZ_47" in t.text() and to(t, "LINKA_47") and to(t, "LINKZ_47"))
+        assert find(t, "LINKA_47")[0] != find(t, "LINKZ_47")[0], t.text()
+        assert all(url == URL for url, words in linked(t) if "wrapped" in url or "https://" in words), linked(t)
+
+    # With no session addressed, Enter on a delivery is refused, since no reader would be drawn,
+    # and the next letter types into the draft.
+    with Terminal(f) as t:
+        t.shown("Message the agent", "unread")  # the deliveries have arrived
+        t.send("\x14")
+        t.shown("INBOX")
+        t.send("\r")
+        t.shown("ADDRESS A SESSION BEFORE OPENING A DELIVERY.")
+        t.send("TYPED_47")
+        t.shown("TYPED_47")
 
 # Each bash call runs until the flow makes its file, so the checks between run mid-turn.
 until = "until [ -e {} ]; do sleep 0.05; done".format

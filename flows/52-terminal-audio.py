@@ -141,7 +141,8 @@ with flow([reply(text='printed remotely'), reply(text='heard here'), reply(text=
 
 # A dropped/paired-style answer re-asks one id/file, while drafts and quit stay responsive.
 hold.touch()
-# Ctrl-C quits with words in the draft, which it would empty were the clear key bound.
+# Ctrl-C quits with words in the draft, which it would empty were the clear key bound. The unbinding
+# reaches a terminal with the server's first status, as Voice does: until then Ctrl-C still clears.
 with flow([reply(text='late note admitted'), reply(text='typed admitted'), reply(text='held admitted')], config=config() + '\n[ui.keys.composer]\nclear = []\n') as f:
     server.start(f)
     session = server.post(f, '/sessions', {'cwd': str(f.cwd)})['session']
@@ -174,7 +175,7 @@ with flow([reply(text='late note admitted'), reply(text='typed admitted'), reply
         # typed since, send that request again, and the server admits it once.
         proxy.inputs.clear()
         with Terminal(f, '--resume', session) as t:
-            t.shown('before latest')
+            t.shown('before latest', 'Voice')
             t.send('\x01\x7ftyped once\r')
             t.shown('answer is invalid', 'Enter tries again')
             t.click('Send ⏎')
@@ -190,7 +191,7 @@ with flow([reply(text='late note admitted'), reply(text='typed admitted'), reply
         # of those typed since, though the server took them and cleared the draft.
         proxy.inputs.clear()
         with Terminal(f, '--resume', session) as t:
-            t.shown('❯ later')
+            t.shown('❯ later', 'Voice')
             t.send('\x01\x7fheld twice\r')
             t.shown('answer is invalid', 'Enter tries again')
             t.click('Send ⏎')

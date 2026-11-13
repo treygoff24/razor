@@ -11,16 +11,22 @@ static OFFERS: Mutex<BTreeMap<PathBuf, bool>> = Mutex::const_new(BTreeMap::new()
 impl Memory {
     /// Reads keep the last fetched files when the remote is unavailable.
     pub(super) async fn memory_fresh(&self, p: &Project) {
-        let _lock = self.lock.lock().await;
-        let dir = &p.memory.current[0];
-        if let Ok(Some(name)) = &p.memory_remote
-            && share::stale(dir).await
-        {
-            let who = share::person(&p.root).await;
-            if let Err(e) = share::fresh(&p.root, dir, name, true, REFERENCE, who.as_ref()).await {
-                eprintln!("razor: refreshing memory: {e}");
+        let (lock, p) = (self.lock.clone(), p.clone());
+        let _ = tokio::spawn(async move {
+            let _lock = lock.lock().await;
+            let dir = &p.memory.current[0];
+            if let Ok(Some(name)) = &p.memory_remote
+                && share::stale(dir).await
+            {
+                let who = share::person(&p.root).await;
+                if let Err(e) =
+                    share::fresh(&p.root, dir, name, true, REFERENCE, who.as_ref()).await
+                {
+                    eprintln!("razor: refreshing memory: {e}");
+                }
             }
-        }
+        })
+        .await;
     }
 
     /// One memory change, `op` on `p`'s memory or, with `layer`, that resident's own layer, is on
@@ -36,13 +42,18 @@ impl Memory {
     where
         F: Fn(&Folders) -> Answer + Send + Sync + 'static,
     {
-        let _lock = self.lock.lock().await;
-        let remote = if all { &Ok(None) } else { &p.memory_remote };
-        let memory = owned(p.clone()).await.memory.layer(layer);
-        let (dir, op) = (&p.memory.current[0], Some(move || op(&memory)));
-        let subject = |_: &_| "memory changed".into();
-        let (answer, _) = share::change(&p.root, dir, remote, REFERENCE, op, subject).await;
-        answer
+        let (lock, p, layer) = (self.lock.clone(), p.clone(), layer.map(str::to_owned));
+        tokio::spawn(async move {
+            let _lock = lock.lock().await;
+            let remote = if all { &Ok(None) } else { &p.memory_remote };
+            let memory = owned(p.clone()).await.memory.layer(layer.as_deref());
+            let (dir, op) = (&p.memory.current[0], Some(move || op(&memory)));
+            let subject = |_: &_| "memory changed".into();
+            let (answer, _) = share::change(&p.root, dir, remote, REFERENCE, op, subject).await;
+            answer
+        })
+        .await
+        .map_err(super::other("waiting for the memory write"))?
     }
 }
 

@@ -18,7 +18,7 @@ impl App {
             || self.goto.is_some()
             || self.grid.is_some()
             || self.list.overview.is_some()
-            || self.list.keys
+            || self.keys == crate::terminal::keys::Pane::Agents
             || self.selected.is_some()
             || self.answering.is_some()
         {

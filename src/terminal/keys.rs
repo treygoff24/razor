@@ -10,6 +10,27 @@ use composer::{completion, emoji, shortcodes};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers as Mods};
 use reqwest::Method;
 
+/// The part receiving navigation keys; one owner even when several parts are visible.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Pane {
+    Agents,
+    #[default]
+    Conversation,
+    Status,
+}
+
+fn cycle(app: &mut App, forward: bool) {
+    let panes = [Pane::Agents, Pane::Conversation, Pane::Status];
+    let at = panes.iter().position(|p| *p == app.keys).unwrap_or(1);
+    match panes[(at + [2, 1][usize::from(forward)]) % 3] {
+        Pane::Agents => {
+            super::agents::choose(app);
+        }
+        Pane::Conversation => app.keys = Pane::Conversation,
+        Pane::Status => super::status::focus(app),
+    }
+}
+
 /// One terminal event; true for a second Ctrl-C in a row, which quits without stopping a session
 /// or its jobs, unless `[ui] quit` is `end`: then the addressed session is ended first. An open
 /// picker, panel or new-agent chooser takes every key and drops pastes, as the emoji grid drops
@@ -69,6 +90,7 @@ pub fn event(app: &mut App, event: super::tty::Event) -> bool {
             if !modal && app.grid.is_none() && app.list.overview.is_none() {
                 app.dismiss_suggestion();
                 app.unselect();
+                app.keys = Pane::Conversation;
                 composer::paste(app, text);
             }
         }
@@ -112,7 +134,22 @@ fn key(app: &mut App, k: KeyEvent, context: &str, action: &str, quits: bool) {
     if app.goto.is_some() {
         return super::goto::key(app, k, action);
     }
-    if app.panel.is_some() {
+    if action == "list.open" {
+        return super::agents::toggle(app);
+    }
+    if action == "global.status" {
+        return super::status::focus(app);
+    }
+    if context == "panes" {
+        return cycle(app, action == "panes.next");
+    }
+    if context == "prefix" {
+        return prefixed(app, action);
+    }
+    if context == "status" {
+        return super::status::key(app, action);
+    }
+    if app.panel.is_some() && app.keys == Pane::Conversation {
         return if matches!(context, "panel" | "mcp") {
             panel::key(app, k)
         };
@@ -123,16 +160,13 @@ fn key(app: &mut App, k: KeyEvent, context: &str, action: &str, quits: bool) {
             picker::key(app, k)
         };
     }
-    if context == "prefix" {
-        return prefixed(app, action);
-    }
     if action == "global.new" {
         return super::start::open(app);
     }
     // The keys move to the list with the addressed agent selected, or back to the conversation.
     if action == "composer.switch" {
-        return match app.list.open && app.list.keys {
-            true => app.list.keys = false,
+        return match app.list.open && app.keys == Pane::Agents {
+            true => app.keys = Pane::Conversation,
             false => super::agents::choose(app),
         };
     }
@@ -190,7 +224,7 @@ fn key(app: &mut App, k: KeyEvent, context: &str, action: &str, quits: bool) {
 fn prefixed(app: &mut App, action: &str) {
     let typed = |app: &mut App, command: &str| {
         app.composer.replace(command.into());
-        app.list.keys = false;
+        app.keys = Pane::Conversation;
         app.edited();
     };
     match action.trim_start_matches("prefix.") {
@@ -205,10 +239,9 @@ fn prefixed(app: &mut App, action: &str) {
         }
         "close_split" if app.split() => focus(app, None),
         "close_split" => app.say("No child's split is open."),
-        "right" => app.list.keys = false,
-        "switch" if app.list.open && app.list.keys => app.list.keys = false,
-        "left" | "switch" | "wider" | "narrower" if !app.list.open => super::agents::toggle(app),
-        "left" | "switch" => app.list.keys = true,
+        "left" => cycle(app, false),
+        "right" | "switch" => cycle(app, true),
+        "wider" | "narrower" if !app.list.open => super::agents::toggle(app),
         "wider" | "narrower" => super::agents::widen(app, action == "prefix.wider"),
         // The oldest question waiting for the person, which the status chip names; else what a
         // press on the chip opens.
@@ -298,7 +331,6 @@ fn browse(app: &mut App, k: KeyEvent) {
                 }
             }
         }
-        KeyCode::Char('t') if ctrl => act(app, Action::Status),
         // Alt and a digit opens that lamp's skill card, never typing the digit.
         KeyCode::Char(c @ '1'..='9') if k.modifiers == Mods::ALT => {
             let slot = usize::from(c as u8 - b'1');
@@ -443,7 +475,10 @@ pub(super) fn replied(a: &Action) -> Option<(&SessionId, EntryId)> {
 }
 
 fn edit(app: &mut App, k: KeyEvent, context: &str, action: &str) {
-    app.list.keys = false;
+    if app.keys != Pane::Conversation {
+        app.panel = None;
+    }
+    app.keys = Pane::Conversation;
     match context {
         // A digit past the ask's options is the draft's.
         "question" => match k.code {
@@ -630,6 +665,9 @@ pub(super) fn focus(app: &mut App, next: Option<SessionId>) {
 }
 
 fn refocus(app: &mut App, next: Option<SessionId>) {
+    if app.keys == Pane::Status {
+        app.keys = Pane::Conversation;
+    }
     recap::leave(app);
     let old = app.focus.clone();
     if let (true, Some(old)) = (app.split(), app.focus.clone()) {

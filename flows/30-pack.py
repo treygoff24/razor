@@ -5,6 +5,7 @@ the `skills` key's folders are omitted, `skill` reads from the last of them, and
 again when they change, and keeps the last good ones when the pack goes missing
 (docs/design/packs.md). The starter's avatar script makes a sheet its own checker accepts."""
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -19,7 +20,7 @@ from server import post, send, start as start_server, stop, until, wait
 ask, body = "Read the lore skill.", "Tell the flow's old story."
 done = (REPLIES / "done.sse").read_bytes()
 replies = [reply(("toolu_pack_skill", "mcp__razor__skill", {"name": "lore"}), match=ask),
-           Reply(done), Reply(done, match="Scout, report.")]
+           Reply(done), Reply(done, match="Scout, report."), Reply(done, match="Scout, tick.")]
 with tempfile.TemporaryDirectory() as scratch:
     pack = Path(scratch) / "pack"
     (pack / "work").mkdir(parents=True)
@@ -84,10 +85,24 @@ with tempfile.TemporaryDirectory() as scratch:
             # 5. A missing pack is refused by name, and the whole last good config stays.
             person = f.home / ".razor/config.toml"
             missing = Path(scratch) / "gone"
+            pid = json.loads((f.home / ".razor/server.json").read_text())["pid"]
+            cpu = lambda: sum(map(int, Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[11:13]))
+            before, inputs = cpu(), len([e for e in f.record("scout") if e["kind"] == "input"])
             person.write_text(person.read_text().replace(str(pack), str(missing)))
             line = snapshot(lambda l: str(missing) in (l["config"] or ""),
                             "the missing pack was not named within 3 s")
             assert line["brand"] == {"name": "Mine", "colours": {"violet": "#993366"}, "avatars": {}, "resident_avatars": {}}, line["brand"]
+            # 6. The refused file, read again every second, changes nothing and so never wakes the
+            # residents loop, while a change to the pack still held does: a schedule set a few
+            # seconds on is admitted then, and until it is the server stays idle.
+            due = time.strftime("%H:%M:%S", time.localtime(time.time() + 3))
+            (pack / "config.toml").write_text(config.replace("#336699", "#993366") +
+                                              f'[residents.scout.schedules.tick]\nat = ["{due}"]\ntext = "Scout, tick."\n')
+            entries = until(f, "scout", lambda es: any(e.get("text") == "Scout, tick." for e in es), timeout=6)
+            assert len([e for e in entries if e["kind"] == "input"]) == inputs + 1, entries[-3:]
+            assert (cpu() - before) / os.sysconf("SC_CLK_TCK") < .5, ("the server spun on the refused pack", before, cpu())
+            tick = next(e["id"] for e in entries if e.get("text") == "Scout, tick.")
+            until(f, "scout", lambda es: any(e["kind"] == "turn_end" and tick in e["inputs"] for e in es))
 
 # A missing picture cannot prevent startup; it is omitted and reported.
 with flow([]) as f:
@@ -104,7 +119,8 @@ with flow([]) as f:
     with send(f, "GET", "/status?avatars=true") as stream:
         line = json.loads(stream.readline())
         assert line["brand"]["avatars"] == {}, line
-        assert "brand.avatars.owl.file does not load" in line["config"] and "missing.png" not in line["config"], line
+        said = " ".join(line["notices"])
+        assert line["config"] is None and "brand.avatars.owl.file does not load" in said and "missing.png" not in said, line
 
 # Avatar pictures are opt-in; reloads carry them only to clients that ask.
 with flow([]) as f:
@@ -141,10 +157,10 @@ with flow([]) as f:
                 (config + "".join(f'a{n} = {{file="owl.png"}}\n' for n in range(16)), 16, "at most 16"),
                 *((config.replace("owl.png", f"bad{n}.png"), 0, "2 KiB" if n == 3 else "brand.avatars.owl.file") for n in range(len(broken)))):
             person.write_text(invalid)
-            bad = changed(lambda l: bool(l["config"]))
-            assert len(bad["brand"]["avatars"]) == count and notice in bad["config"], bad
+            bad = changed(lambda l: "notices" in l)
+            assert len(bad["brand"]["avatars"]) == count and notice in " ".join(bad["notices"]) and bad["config"] is None, bad
             person.write_text(config.replace("owl =", "bird ="))
-            changed(lambda l: l["config"] is None)
+            changed(lambda l: "notices" not in l)
     person.write_text(config)
     for key, value in (("brand.avatars.owl.file", "owl.png"), ("brand.avatars.owl.pool", "false")):
         result = f.run("config", "set", key, value)

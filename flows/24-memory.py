@@ -1,34 +1,70 @@
 """Memory in Razor's own files: a write is searchable by whole words, a replacement or an expiry
 retires the old file, a fact needs a description, a new session's first request holds the state
 note and each ruling, and a helper's worktree shares the main checkout's memory. Tasks shared by two
-homes through a git remote named or given by URL; a list of one task's steps."""
+homes through a git remote named or given by URL; a list of one task's steps; a task write whose
+git stalls or is stopped leaves no lock, and one that fails leaves nothing of itself."""
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import replace
 import json
 import os
 import queue
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import threading
 from claude import reply
+from clock import wall_clock
 from driver import flow
 from model import tool
 from responses import PLAIN, call as response_call, done, response
-from server import post, send, stop, until
+from server import post, send, stop, until, wait
+
+# Git, except the task-store commands the flow arms with lines of "<mode> <command>", each in turn,
+# which say so in `held` and stall with a child of their own in their group, as a hook or SSH is;
+# each notes TERM. `hold` holds the index lock through a real git, which removes it when asked to
+# end, or runs the command once released; `late` runs it, then holds; `deaf` takes the lock itself
+# and outlives TERM; `leak` leaves a child in a session of its own holding git's output, then runs
+# the command; `fail` fails it; `stray` makes an untracked `a[1].md`, then runs it.
+STALL = """#!/bin/sh
+here=${{0%/bin/git}}
+case "$PWD" in */.razor/tasks/*) [ -f "$here/arm" ] || exec {git} "$@" ;; *) exec {git} "$@" ;; esac
+read -r mode command < "$here/arm"
+case " $* " in *" $command "*) sed -i 1d "$here/arm"; [ -s "$here/arm" ] || rm "$here/arm" ;; *) exec {git} "$@" ;; esac
+case $mode in
+leak) setsid sleep 60 & echo $! > "$here/leak"; exec {git} "$@" ;;
+fail) echo "Stand-in failure." >&2; exit 1 ;;
+stray) : > 'a[1].md'; exec {git} "$@" ;;
+esac
+trap 'echo TERM >> "$here/signals"; [ "$mode" = deaf ] || exit 143' TERM
+trap '' PIPE  # A stopped server's closed pipe must not end the shell before its TERM is noted.
+(trap 'echo hook >> "$here/signals"; exit' TERM; while :; do sleep 1; done) > /dev/null 2>&1 &
+hook=$!
+case $mode in
+deaf) set -C; : > .git/index.lock; : > "$here/held"; while :; do sleep 1; done ;;
+hold|late) [ $mode = hold ] || {git} "$@"; : > "$here/held"; until [ -e "$here/release" ]; do sleep 0.05; done | {git} update-index --index-info ;;
+esac
+kill -9 $hook; rm "$here/release"; exec {git} "$@"
+"""
 
 def task_events(f):
     stream = send(f, "GET", "/status")
     stream.readline()
     found = queue.Queue()
-    def collect():
-        for line in stream:
-            event = json.loads(line)
-            if event.get("kind") == "tasks": found.put(event)
+    def collect():  # until the stream has been quiet for its socket's ten seconds
+        with suppress(TimeoutError):
+            for line in stream:
+                event = json.loads(line)
+                if event.get("kind") == "tasks": found.put(event)
     threading.Thread(target=collect, daemon=True).start()
     return found
 
 replies = []
-with flow(replies) as f:
+with wall_clock(still=False) as (stall, clock, advance), flow(replies, env={**clock, "PATH": f"{stall}/bin:{os.environ['PATH']}"}) as f:
+    (stall / "bin").mkdir()
+    (stall / "bin/git").write_text(STALL.format(git=shutil.which("git")))
+    (stall / "bin/git").chmod(0o755)
     f.base()
     session = None
 
@@ -224,10 +260,163 @@ with flow(replies) as f:
     use("task", action="list")
     assert json.loads(use("task", b, theirs, action="write", id=3, claim=True)[1]["output"])["claimed"]
     assert "is claimed by" in (late := use("task", action="write", id=3, claim=True)[1])["output"] and there("show", "refs/razor/tasks:3.md").count("claim:") == 1, late
+    store = next((f.home / ".razor/tasks").rglob("FETCH_HEAD")).parent.parent
+    here = lambda *a, at=store: subprocess.run(["git", "-C", at, *a], capture_output=True, text=True).stdout.strip()
     (f.cwd / ".razor/config.local.toml").write_text(f'[tasks]\nremote = "{remote}-gone"\n')
+    head = here("rev-parse", "HEAD")
     gone = use("task", action="write", title="Unpushed")[1]
-    assert "did not answer" in gone["output"] and not there("show", "refs/razor/tasks:4.md"), gone
+    assert "nothing was written" in gone["output"] and (here("rev-parse", "HEAD"), here("status", "--porcelain")) == (head, "") and not there("show", "refs/razor/tasks:4.md"), gone
+    # A read whose refresh failed says its copy may be behind.
+    os.utime(store / ".git/FETCH_HEAD", (0, 0))
+    behind = use("task", action="list")[1]
+    assert behind["outcome"] == "success" and "behind" in behind["output"], behind
     stop(b)
+
+    # A task write whose git stalls past its 120 seconds, which pass on the server's monotonic
+    # clock: git's group, its hook included, is asked to end (TERM), git removes its lock before
+    # the write answers, and the next write lands.
+    shared = f'[tasks]\nremote = "{os.path.relpath(remote, f.cwd)}"\n'
+    (f.cwd / ".razor/config.local.toml").write_text(shared)
+    lock, signals, ahead, background = store / ".git/index.lock", stall / "signals", 0, ThreadPoolExecutor(2)
+
+    def stalled(arm, comment, **more):
+        """A comment on task 2 written in the background, once its git armed with `arm` stalls."""
+        (stall / "arm").write_text(arm)
+        write = background.submit(use, "task", action="write", id=2, comment=comment, **more)
+        holding(write.done)
+        return write
+
+    def holding(done=lambda: False):
+        wait(lambda: (stall / "held").exists() and lock.exists() or done(), 30, "the armed git never stalled")
+        (stall / "held").unlink(missing_ok=True)
+
+    def jump(seconds):
+        global ahead
+        ahead += seconds
+        advance(ahead * 1000, monotonic=True)
+
+    def heard():
+        """The TERMs noted since last asked."""
+        noted = signals.exists() and sorted(signals.read_text().split())
+        signals.unlink(missing_ok=True)
+        return noted
+
+    write = stalled("hold add", "Stalled once.")
+    jump(121)
+    timed_out = write.result(30)[1]
+    ended = (lock.exists(), heard())
+    after = use("task", action="write", id=2, comment="Written after.")[1]
+    assert ended == (False, ["TERM", "hook"]) and (timed_out["outcome"], after["outcome"]) == ("error", "success"), (ended, timed_out, after)
+    # A stopped turn ends at once; the write it started finishes on its own and lets go of the lock.
+    replies.append(reply((None, "mcp__razor__task", {"action": "write", "id": 2, "comment": "Kept through a stop."})))
+    (stall / "arm").write_text("hold add")
+    stopped = post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    post(f, f"/sessions/{stopped}/input", {"text": "Comment on task 2."})
+    holding()
+    post(f, f"/sessions/{stopped}/stop", {})
+    until(f, stopped, lambda es: any(e["kind"] == "turn_end" and e["end"] == "stopped" for e in es))
+    assert lock.exists(), "the stopped turn waited for its write's git"
+    (stall / "release").touch()
+    kept = lambda: "Kept through a stop." in there("grep", "-h", "Kept through", "refs/razor/tasks")
+    wait(kept, 30, "the stopped turn's write did not finish")
+    assert not lock.exists(), "the stopped turn's write left its lock"
+    # A lock another live git holds refuses a write that must bring in the remote's new commit, and
+    # the refusal names the page on such a lock.
+    holder = subprocess.Popen(["git", "update-index", "--index-info"], cwd=store, stdin=subprocess.PIPE)
+    wait(lock.exists, 10, "the live git did not take the lock")
+    moved = there("-c", "user.name=Flow", "-c", "user.email=flow@example.invalid", "commit-tree",
+                  "refs/razor/tasks^{tree}", "-p", "refs/razor/tasks", "-m", "Moved").strip()
+    there("update-ref", "refs/razor/tasks", moved)
+    os.utime(store / ".git/FETCH_HEAD", (0, 0))
+    blocked = use("task", action="write", id=2, comment="Refused while held.")[1]
+    holder.communicate(b"")
+    assert blocked["outcome"] == "error" and "git-locks" in blocked["output"], blocked
+    # A git that outlives TERM is killed five seconds later and leaves its lock; the next write
+    # says so and names the page on clearing one, which once followed lets a write land.
+    heard()
+    write = stalled("deaf add", "Stalled twice.")
+    jump(121)
+    wait(signals.exists, 10, "the deaf git was not asked to end")
+    jump(6)
+    killed = write.result(30)[1]
+    assert killed["outcome"] == "error" and lock.exists(), killed
+    refused = use("task", action="write", id=2, comment="Refused after the kill.")[1]
+    assert refused["outcome"] == "error" and "git-locks" in refused["output"], refused
+    lock.unlink()
+    assert use("task", action="write", id=2, comment="Written once cleared.")[1]["outcome"] == "success"
+    # A refresh whose HEAD check passes its limit refuses the write and keeps an unsent commit.
+    for name in ("unsent.md", "a1.md"): (store / name).write_text(name)
+    here("add", "-A")
+    here("-c", "user.name=Flow", "-c", "user.email=flow@example.invalid", "commit", "-qm", "Unsent")
+    unsent = here("rev-parse", "HEAD")
+    write = stalled("hold rev-parse -q --verify HEAD", "Refreshed too slowly.")
+    jump(121)
+    kept = (write.result(30)[1]["outcome"], here("rev-parse", "HEAD") == unsent, (store / "unsent.md").exists())
+    assert kept == ("error", True, True), kept
+    # A commit past its limit after the write's edits puts back what the write touched: its claim
+    # and comment go, the unsent commit and a file made meanwhile stay, and a retry comments once.
+    comments = lambda text: sum(text in p.read_text() for p in store.glob("comments/2/*.md"))
+    write = stalled("hold commit", "Committed too slowly.", claim=True)
+    (store / "stray.md").write_text("Made meanwhile.")
+    jump(121)
+    left = (write.result(30)[1]["outcome"], here("status", "--porcelain"), unsent in here("log", "--format=%H"))
+    use("task", action="write", id=2, comment="Committed too slowly.")
+    left += (comments("Committed too slowly."), "claim:" in (store / "2.md").read_text())
+    assert left == ("error", "?? stray.md", True, 1, False), left
+    # A commit made whose answer is lost is undone to the write's base; a retry comments once.
+    base = here("rev-parse", "HEAD")
+    write = stalled("late commit", "Answer lost.")
+    jump(121)
+    lost = (write.result(30)[1]["outcome"], here("rev-parse", "HEAD") == base, here("status", "--porcelain"))
+    use("task", action="write", id=2, comment="Answer lost.")
+    lost += (comments("Answer lost."),)
+    assert lost == ("error", True, "", 1), lost
+    # A push past its limit leaves the store at its base and says the remote's outcome is unknown;
+    # the next read brings in, once, a push the remote took.
+    for arm, comment, took in [("late push", "Pushed late.", True), ("hold push", "Never pushed.", False)]:
+        base, tip = here("rev-parse", "HEAD"), there("rev-parse", "refs/razor/tasks")
+        write = stalled(arm, comment)
+        jump(61)
+        pushed = write.result(30)[1]
+        local = (here("rev-parse", "HEAD") == base, here("status", "--porcelain"), there("rev-parse", "refs/razor/tasks") != tip)
+        os.utime(store / ".git/FETCH_HEAD", (0, 0))
+        use("task", action="get", id=2)
+        assert "unknown" in pushed["output"] and local + (comments(comment),) == (True, "", took, took), (pushed, local)
+    # The roll-back takes a path literally: removing a stray `a[1].md` leaves the tracked `a1.md`.
+    (stall / "arm").write_text("stray status --porcelain -z\nfail commit")
+    use("task", action="write", id=2, comment="Failed beside a stray.")
+    assert not (stall / "arm").exists() and (store / "a1.md").exists(), "the roll-back removed a1.md"
+    # The first write to a store with no commit, failing at its commit or its push, leaves none.
+    first = replace(f, cwd=f.cwd / "first")
+    (first.cwd / ".razor").mkdir(parents=True)
+    first.base()
+    first.git("config", "user.name", "Flow")
+    first.git("config", "user.email", "flow@example.invalid")
+    here("init", "-q", "--bare", f"{remote}-first")
+    (first.cwd / ".razor/config.local.toml").write_text(f'[tasks]\nremote = "{remote}-first"\n')
+    empty, left = f.home / ".razor/tasks" / str(first.cwd.resolve()).lstrip("/") / "%", []
+    for arm in ("fail commit", "fail push"):
+        (stall / "arm").write_text(arm)
+        outcome = use("task", first, action="write", title="Never written.")[1]["outcome"]
+        left.append((outcome, here("rev-parse", "-q", "--verify", "HEAD", at=empty), here("ls-files", at=empty), sorted(p.name for p in empty.iterdir())))
+    assert left == [("error", "", "", [".git"])] * 2, left
+    # A git whose output a child in another session keeps open still answers once past its limit.
+    (stall / "arm").write_text("leak add")
+    write = background.submit(use, "task", action="write", id=2, comment="Answered past a leak.")
+    wait(lambda: (stall / "leak").exists(), 30, "the leaking git never ran")
+    jump(126)
+    try: write.result(30)
+    finally: os.kill(int((stall / "leak").read_text()), signal.SIGKILL)
+    # A server stopped during a slow git step asks git to end, and git removes its lock.
+    heard()
+    replies.append(reply((None, "mcp__razor__task", {"action": "write", "id": 2, "comment": "Stopped with the server."})))
+    (stall / "arm").write_text("hold add")
+    post(f, f"/sessions/{post(f, '/sessions', {'cwd': str(f.cwd)})['session']}/input", {"text": "Comment on task 2."})
+    holding()
+    stop(f)
+    wait(lambda: not lock.exists(), 10, "the stopped server left git's lock")
+    wait(lambda: signals.exists() and len(signals.read_text().split()) == 2, 10, "git's group was not asked to end")
+    assert heard() == ["TERM", "hook"], "the stopped server did not ask git's group to end"
 
 # A helper claims for itself, comments, releases and reclaims; settlement releases that claim
 # and records its report. Forbidden fields are refused before any part of a write applies.

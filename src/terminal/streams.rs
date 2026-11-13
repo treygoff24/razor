@@ -187,6 +187,7 @@ impl App {
             Live::Agents {
                 agents,
                 config,
+                notices,
                 brand,
                 ui,
                 server,
@@ -204,6 +205,7 @@ impl App {
                 }
                 let keys_changed = self.ui.keys != ui.keys;
                 (self.config, self.brand, self.ui) = (config, brand::read(*brand), *ui);
+                self.notices = notices;
                 if keys_changed {
                     bindings::reload(self);
                 }
@@ -226,17 +228,20 @@ impl App {
         }
         super::agents::earlier::sync(self);
         let ready = |s: &crate::protocol::Server| {
+            if let Some(notice) = &s.release_action {
+                return Some(format!("{}: {notice}", s.machine));
+            }
             let version = s.release_ready.as_ref()?;
             let machine = &s.machine;
             Some(format!(
                 "Razor {version} is ready on {machine}; run razor restart to use it"
             ))
         };
-        if !self.release_noticed
-            && let Some(sentence) = self.servers.iter().find_map(ready)
+        if let Some(sentence) = self.servers.iter().find_map(ready)
+            && self.release_noticed.as_ref() != Some(&sentence)
         {
-            self.release_noticed = true;
             self.say(&sentence);
+            self.release_noticed = Some(sentence);
         }
     }
 

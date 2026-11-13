@@ -41,24 +41,6 @@ fn chips(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
     out
 }
 
-// The last row of a reply the turn never recorded: `UNSAVED`, then the longest note that fits.
-pub(super) fn unsaved(columns: usize, rows: &mut Rows) {
-    let notes = [
-        "the turn ended before this reply was recorded; the record has no copy of it",
-        "the turn ended before it was recorded; the record has no copy",
-        "not in the record",
-    ];
-    let room = columns.saturating_sub(13);
-    let note = notes.into_iter().find(|n| width(n) <= room).unwrap_or("");
-    let mark = bold(AMBER, AGENT_BG);
-    let line = Line::from(vec![
-        Span::styled("  ▌ ", style(VIOLET, AGENT_BG)),
-        Span::styled("UNSAVED  ", mark),
-        Span::styled(note, style(GRAY, AGENT_BG)),
-    ]);
-    rows.push(Row::on(line, AGENT_BG));
-}
-
 pub(super) fn limit_words(
     at: Option<u64>,
     now: u64,

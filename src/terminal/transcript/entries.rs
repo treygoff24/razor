@@ -11,7 +11,6 @@ impl Transcript {
         if self.entries.contains_key(&entry.id) {
             return true;
         }
-        let mut words = String::new();
         match &entry.body {
             Body::TurnEnd { inputs, end, .. } => {
                 self.take(inputs, None);
@@ -20,7 +19,7 @@ impl Transcript {
                 }
                 if self.live && entry.id > consumed {
                     self.ended = Some(end.clone());
-                    words = std::mem::take(&mut self.partial);
+                    self.partial.clear();
                 }
             }
             Body::Withdrawn { inputs } => self.withdraw(inputs),
@@ -53,7 +52,7 @@ impl Transcript {
             self.dirty = true;
             return true;
         }
-        let n = serde_json::to_vec(&entry).map_or(api::BYTES + 1, |s| s.len()) + words.len();
+        let n = serde_json::to_vec(&entry).map_or(api::BYTES + 1, |s| s.len());
         if n > 64 << 20 {
             return false;
         }
@@ -96,9 +95,6 @@ impl Transcript {
         if self.held.is_some() && last.is_none_or(|last| entry.id > last) && item(&entry) {
             self.mounted = (self.mounted.max(MOUNT) + 1).min(ITEMS);
         }
-        if !words.is_empty() {
-            self.unsaved.insert(entry.id, words);
-        }
         if let Body::Call { name, input, .. } = &entry.body
             && let Some(command) = tools::command(tools::kind(name), input)
         {
@@ -140,7 +136,6 @@ impl Transcript {
         let old = id.and_then(|id| self.entries.remove_entry(&id));
         let Some((id, old)) = old else { return };
         self.sizes.remove(&id);
-        self.unsaved.remove(&id);
         self.commands.remove(&id);
         self.opened = self.opened.filter(|opened| *opened != id);
         self.queued.remove(&id);

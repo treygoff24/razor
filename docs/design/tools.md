@@ -47,7 +47,7 @@ pub struct Schema { pub description: String, pub input: serde_json::Value }
 #[derive(Clone, PartialEq)]
 pub struct Config {
     /// Refuse deleting a path made before `since` (SPEC "Trust"). Key `guards.delete`:
-    /// true by default.
+    /// false by default.
     pub delete_guard: bool,
     /// The directories searched, in order, for `<name>/SKILL.md`: the pack's `skills/`.
     pub skills: Vec<PathBuf>,
@@ -197,18 +197,20 @@ The guards check the text of a `bash` command, and the `*** Delete File:` lines 
 
 This is a check of the text: nothing follows a value from one command to another.
 
-**Deletion: refused while `delete_guard` is on.** The targets are:
+**Deletion: refused while `delete_guard` is on (off by default).** The targets are:
 - the operands of `rm`, `rmdir`, `unlink` and `shred`;
 - the start paths of a `find` that has `-delete` or `-exec rm` (`.` when it names none);
 - the paths of a `git clean` without `-n` (the working directory when it names none);
 - a patch's deleted files.
 
-Each target is resolved against the call's `cwd` alone. Then:
-- A target the text cannot name literally is refused: a word with a substitution, a `$`, an unquoted `*`, `?`, `[` or `{`, or a leading `~`.
+The lexer expands an unquoted `~` or `~/` to the server user's home; quoted or escaped tildes stay literal, and `~user` stays unresolved. If the command text contains `HOME=`, unquoted tildes stay unresolved too. Each target is then resolved against the call's `cwd`. Then:
+- A target the text cannot name literally is refused: a word with a substitution, a `$`, an unquoted `*`, `?`, `[` or `{`, or an unresolved tilde prefix.
 - A target that does not exist is allowed.
 - A target whose birth time is before `since` is refused, and so is one on a filesystem that keeps no birth time.
 
-The refusal is one sentence that names the path and says what would work: "`rm` would delete src/old.rs, which existed before this session started; ask the person to delete it."
+The refusal is one sentence that names the path and says what would work: "`rm` would delete src/old.rs, which existed before this session started; tell the person they can delete it, or turn this guard off with `razor config set guards.delete false`."
+
+For an unresolved path, the refusal says only to write the path in full.
 
 ### The spill
 

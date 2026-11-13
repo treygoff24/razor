@@ -237,7 +237,7 @@ class Conversation {
     const answered = new Promise<Answer>((resolve) => this.runs.set(call, resolve));
     await this.send({ type: 'run', call, tool: name, input: input ?? {} });
     const answer = await answered;
-    let value: { images?: Image[]; structured?: unknown; is_error?: boolean } = {};
+    let value: { images?: Image[]; is_error?: boolean } = {};
     try { value = JSON.parse(answer.output) ?? {}; } catch { /* Most native results are text. */ }
     // A result's own images, then those its cell's nested calls named, each after its path.
     const images = (await Promise.all([...(value.images ?? []), ...(answer.images ?? [])].map(({ path, media_type }) => base64(path).then(
@@ -248,8 +248,7 @@ class Conversation {
     // A settling result ends the CLI's turn itself: the hook's stop would leave a note after it,
     // which the resume just after cuts and every later one puts back, rewriting the cache.
     return { content: [{ type: 'text' as const, text: answer.output }, ...images],
-      ...(this.settle ? { _meta: { 'claude/endTurn': true } } : {}),
-      ...(value.structured == null ? {} : { structuredContent: value.structured }), isError: answer.error || value.is_error === true };
+      ...(this.settle ? { _meta: { 'claude/endTurn': true } } : {}), isError: answer.error || value.is_error === true };
   }
   async input(inputs: Input[]) {
     const last = inputs.at(-1);

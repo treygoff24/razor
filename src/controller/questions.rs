@@ -24,6 +24,7 @@ pub(super) async fn ask(
     options: Vec<String>,
     redirect: bool,
 ) -> Result<EntryId, Error> {
+    let summary = c.summary(id).await?;
     let body = Body::Question {
         text: text.clone(),
         options: options.clone(),
@@ -35,8 +36,9 @@ pub(super) async fn ask(
         text,
         options,
         at: crate::protocol::now(),
+        waited: true,
     };
-    crate::residents::ask(c, &c.config().await, &ask);
+    crate::residents::ask(c, &c.config().await, &ask, &summary);
     Ok(entry)
 }
 

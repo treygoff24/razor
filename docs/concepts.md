@@ -29,6 +29,8 @@ Each session's record is an append-only log, `~/.razor/sessions/<id>/record.json
 
 Your past conversations can be searched by words, by any agent with its `recall` tool or by a program through the API (`GET /v1/search?q=`): every session you started here and on each paired server, by what you wrote, what the agent replied, mail and helpers' reports, and the session's name. Beside its record, each session keeps a small file of the text that is searched, which Razor rebuilds from the record if it is deleted.
 
+The terminal's `/search <words>` searches the whole recorded transcript of the session you are addressing, including its tool calls, results and displayed Thinking summaries. It opens the chosen transcript row. It reads only that session, including when you address a helper; it does not search other sessions or attached files. Tool arguments are searched in full, even where their card shows only a preview.
+
 ## When the context fills
 
 When a session's context, what its model can hold at once, fills up, Razor starts a fresh one built from the record, with no summary written by a model. At the threshold (by default 80% of the context, or 450,000 tokens on a model that holds 500,000 or more), Razor asks the agent for a continuation note: a few lines on the work in hand and the decisions behind it. The fresh context then holds:
@@ -85,7 +87,7 @@ An agent, its children and theirs share one channel: a group conversation in whi
 
 ## Questions, notes and deliveries
 
-An agent can ask you a question that waits for your answer; it appears in a band under the conversation, and the number keys answer it. Agents also deliver things to your inbox: a file, a link, or a note. Questions and notes from the sessions you started yourself, as opposed to their children, also go to the programs named in the `ask` and `notify` settings. In a new install those show desktop notifications; they can reach your phone instead ([Configuration](configuration.md#notifications)).
+An agent can ask you a question that waits for your answer; it appears in a band under the conversation, and the number keys answer it. Questions an agent asks you clear when you write to its session or close it yourself; MCP and sign-in questions still need an answer. A session that closes on its own keeps its question. Agents also deliver things to your inbox: a file, a link, or a note. In the terminal app, Ctrl-T opens the inbox in the status pane, and Enter there reads a delivered file in the conversation ([Deliveries](configuration.md#deliveries)). Questions and notes from the sessions you started yourself, as opposed to their children, also go to the programs named in the `ask` and `notify` settings. The programs receive the sender's session id, name and project, and a question's entry number, as environment variables. In a new install those show desktop notifications; they can reach your phone instead ([Configuration](configuration.md#notifications)).
 
 ## Always-on agents
 

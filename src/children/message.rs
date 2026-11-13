@@ -139,7 +139,8 @@ impl Children {
                     .note(controller, caller, at, &input.text, spoken)
                     .await;
                 note.map_err(other("keeping the note"))?;
-                residents::notify(&controller.config().await, input.text);
+                let config = controller.config().await;
+                residents::notify(&config, input.text, residents::environment(&summary));
             }
             (None, MailKind::Question) => {
                 let config = controller.config().await;
@@ -149,8 +150,9 @@ impl Children {
                     text,
                     options,
                     at: now(),
+                    waited: false,
                 };
-                residents::ask(controller, &config, &ask);
+                residents::ask(controller, &config, &ask, &summary);
             }
             (None, _) => {
                 return refuse("The person asked nothing; an answer goes to the child that asked.");
@@ -416,7 +418,7 @@ pub(crate) fn name(first: &str, second: &str, taken: &[&str]) -> String {
 
 /// The name `s` signs its mail with: its own, or while it has none its id, which the reader
 /// can answer.
-pub(super) fn sender(s: &Summary) -> String {
+pub(crate) fn sender(s: &Summary) -> String {
     match s.name.as_str() {
         "" => s.session.to_string(),
         name => name.to_owned(),

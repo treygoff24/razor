@@ -1,10 +1,11 @@
 """The Responses stream's failure transitions, each in its own session of one home: a reply split
 at any byte parses the same; malformed arguments get an error result and no side effect; an early
-EOF or a missing done item admits no response and executes no calls."""
+EOF or a missing done item admits no response and executes no calls, and a turn failing after
+its retries keeps its last attempt's words alone."""
 import json
 
 from driver import Reply, flow
-from responses import PLAIN, call, done, response
+from responses import PLAIN, call, done, message, response
 import server
 
 # Splitting UTF-8, JSON escapes and SSE framing never changes an admitted call.
@@ -18,13 +19,15 @@ cuts = sorted({1, 6, feather + 1, feather + 2, feather + 3, escape + 1, escape +
 malformed = '{"command":"printf changed > must-not-exist.txt"}broken'
 # JSON text inside JSON text stays a string.
 question = json.dumps({"type": "question", "to": "parent", "text": "Double?", "options": ["a", "b"]})
-# GPT early EOF and missing done item admit no response and execute no calls.
+# GPT early EOF and missing done item admit no response and execute no calls; each early
+# attempt's words differ.
 items = [call("bash", json.dumps({"command": "printf first > first.txt"}), "call_first"),
          call("bash", json.dumps({"command": "printf second > second.txt"}), "call_second")]
 replies = [reply for cut in cuts for reply in (Reply(read.body, (cut,)), done())]
 replies += [response([call("bash", malformed)]), done()]
 replies += [response([call("bash", '{"command":"true"}', "valid"), call("message", json.dumps(question), "double")]), done()]
-replies += [response(items, completed=False)] * 6 + [response(items, missing=(1,)), done()]
+replies += [response([message(f"Try {n}."), *items], completed=False) for n in range(6)]
+replies += [response(items, missing=(1,)), done()]
 with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
     (f.cwd / name).write_text("payload 🪶\n")
     seen = []
@@ -75,6 +78,8 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
         if case == "early":
             assert isinstance(ends[0]["end"], dict) and "error" in ends[0]["end"], entries
             assert not [e for e in entries if e.get("kind") in ("call", "result", "response")], entries
+            # The failed turn keeps the words its last attempt streamed, once; retries void the others'.
+            assert [e["text"] for e in entries if e.get("kind") == "text"] == ["Try 5."], entries
         else:
             assert ends[0]["end"] == "done", entries
             assert not [e for e in entries if e.get("kind") in ("call", "result")], entries

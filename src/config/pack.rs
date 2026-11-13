@@ -65,6 +65,7 @@ pub(crate) struct Settings {
     /// Why the merged values do not make a Config, when each file alone does.
     invalid: Option<String>,
     pub(crate) notices: Vec<String>,
+    old_key: bool,
 }
 
 #[derive(Clone)]
@@ -164,6 +165,8 @@ impl Settings {
             .chain(&settings.invalid)
             .next()
         {
+            let notices = settings.notices.iter();
+            notices.for_each(|n| eprintln!("razor: {n}"));
             return Err(Error::Invalid(error.clone()));
         }
         Ok(settings)
@@ -182,6 +185,7 @@ impl Settings {
             values: Table::new(),
             invalid: None,
             notices: Vec::new(),
+            old_key: false,
         };
         settings.read();
         Ok(settings)
@@ -238,9 +242,11 @@ impl Settings {
     }
 
     /// Reads each changed file and merges again if a table changed; an invalid edit keeps that
-    /// file's last good table and reports its error. True when a table changed.
+    /// file's last good table and reports its error. True when the effective values changed.
     pub(crate) fn read(&mut self) -> bool {
-        let mut changed = false;
+        let old_key = self.person.path.with_file_name("key").exists();
+        let mut changed = self.old_key != old_key;
+        self.old_key = old_key;
         if let Some(old) = self.person.read() {
             changed = true;
             match self.named_pack() {
@@ -258,7 +264,9 @@ impl Settings {
             changed |= file.read().is_some();
         }
         if changed {
+            let previous = self.values.clone();
             self.merge();
+            changed = self.values != previous;
         }
         let files = self.pack.iter().chain([&self.person]).chain(&self.local);
         let errors = files.filter_map(|file| file.error.as_ref());
@@ -307,9 +315,26 @@ impl Settings {
                 sources.extend(names);
             }
         }
+        self.notices.clear();
+        if self.old_key {
+            let old = self.person.path.with_file_name("key");
+            self.notices.push(format!("Key file: {} is no longer read; save its key as OPENAI_API_KEY in keys.toml, name the model openai/<id>, then delete the file.", old.display()));
+        }
         self.invalid = match Config::parse(values.clone()).and_then(Config::check) {
             Ok(mut config) => {
-                self.notices = config.brand.load();
+                self.notices.extend(config.brand.load());
+                if let Some(path) = sources.get("server.address") {
+                    self.notices.push(format!(
+                        "server.address is no longer used; remove address under [server] in {}.",
+                        path.display()
+                    ));
+                }
+                if config.remote.as_ref().is_some_and(|r| {
+                    crate::devices::valid_name(&r.server)
+                        && (r._address.is_some() || r._key.is_some())
+                }) {
+                    self.notices.push("[remote] address and key are no longer used; remove them and keep server, the name in razor devices.".into());
+                }
                 config.pack = self
                     .pack
                     .as_ref()

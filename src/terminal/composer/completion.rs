@@ -19,6 +19,11 @@ use reqwest::Method;
 /// Each command: its name, what it is for, and its arguments when it takes any.
 const COMMANDS: [(&str, &str, Option<&str>); 37] = [
     ("agents", "all agents beside a session", None),
+    (
+        "search",
+        "find words in this session’s recorded transcript",
+        Some("[words]"),
+    ),
     ("goto", "find any agent or past conversation", None),
     (
         "name",
@@ -65,7 +70,6 @@ const COMMANDS: [(&str, &str, Option<&str>); 37] = [
     ),
     ("fast", "pick the speed", Some("[on|off|fast|ultrafast]")),
     ("ultrafast", "use Ultrafast for the next input", None),
-    ("status", "the session's status card", None),
     ("tasks", "this project's tasks", Some("[number]")),
     ("resume", "the sessions list, to open another", None),
     ("pin", "pin the newest reply, or unpin it", None),

@@ -1,5 +1,5 @@
 """Project files and live MCP management (the CLI lists and previews in plain text), PKCE/rotation,
-native search, rich results and questions.
+native search, rich results and questions, which the person's message and `/quit` leave open.
 Only external MCP/OAuth/model servers are stand-ins; the installed Razor and Claude SDK are real.
 New checks need a mutation red-proof before they are claimed proven.
 """
@@ -256,6 +256,15 @@ def oauth_case():
         assert api(f, f"/sessions/{session}/input", sent={"text": redirect}) == {"signed_in": True}
         assert next(r for r in operation(f, "list") if r["name"] == "dynamic")["signed_in"]
         assert draft.read_text() == "" and redirect not in json.dumps(list(f.record(session)))
+        # A sign-in question outlives the person's `/quit`, and its callback still answers it.
+        cli(f, "sign-out", "dynamic")
+        closer = create(f)
+        authorization = operation(f, "sign_in", closer, name="dynamic")["url"]
+        question = next(e["id"] for e in f.record(closer) if e["kind"] == "question" and authorization in e["text"])
+        post(f, f"/sessions/{closer}/quit", {})
+        until(f, closer, lambda es: es[-1].get("close_reason") == "person")
+        assert [a["id"][1] for a in api(f, f"/sessions/{closer}/agent")["asks"]] == [question], "the close settled a sign-in"
+        assert api(f, "/mcp/callback?" + urlsplit(external.authorize(authorization)).query, authenticated=False)["signed_in"] is True
         # Under an HTTPS address spelt another way, with sign-ins open in two sessions, each
         # landed address answers the ask of the session that began it, though both are pasted
         # into the first.
@@ -329,6 +338,14 @@ def native_case(code):
     with mcp.serve() as external, flow(replies, model="gpt-6.1-sol" if code else "opus",
             config='[tools.mcp_search]\ncommand="printf shadowed"\ndescription="Wrong search"\ninput={type="object"}',
             env={"MCP_FLOW_ENV": "ENV_HEADER_SECRET", "EXA_API_KEY": "EXA_HEADER_SECRET"}) as f:
+        # The ask command logs its text with the four variables Razor sets and prints nothing, so
+        # each question waits; the flow answers it through the session and entry logged.
+        command, log = f.home / "ask", f.home / "asked.jsonl"
+        command.write_text(f"#!{sys.executable}\nimport json, os, sys\nwith open({str(log)!r}, 'a') as log:\n    print(json.dumps("
+                           "[sys.argv[1], *map(os.environ.get, ('RAZOR_SESSION', 'RAZOR_NAME', 'RAZOR_PROJECT', 'RAZOR_ASK'))]), file=log)\n")
+        command.chmod(0o755)
+        settings = f.home / ".razor/config.toml"
+        settings.write_text(f"ask = [{json.dumps(str(command))}]\n" + settings.read_text())
         start(f)
         (f.cwd / ".razor").mkdir()
         (f.cwd / ".razor/header").write_text("FILE_HEADER_SECRET\n")
@@ -338,6 +355,8 @@ def native_case(code):
         if code: config["search"] = True
         operation(f, "add", name="remote", scope="project", config=config)
         session = create(f)
+        name = 'Ada\'s "remote" desk'  # A name with a space and quotes reaches the ask command intact.
+        assert send(f, "PUT", f"/sessions/{session}/name", name).status == 200
         row = connected(f, session, "remote")
         assert len(row["tools"]) == 3 and row["file"] == str(f.cwd / ".razor/config.toml"), row
         shell = "exec_command" if code else "Bash"
@@ -356,8 +375,14 @@ def native_case(code):
             questions = [e for e in entries if e["kind"] == "question"]
             assert len(questions) == number, [e for e in entries if e["kind"] == "result"]
             question = questions[-1]
+            # The person's message leaves a question a tool waits on open, for the answer below.
+            post(f, f"/sessions/{session}/input", {"text": f"Meanwhile, {word}."})
+            until(f, session, lambda es: any(e.get("text") == f"Meanwhile, {word}." for e in es))
             check_question(f, session, question, word, external.url)
-            post(f, f"/sessions/{session}/asks/{question['id']}", {"text": answer})
+            asked = wait(lambda: log.exists() and log.read_text().splitlines()[number - 1:number], 10, "no ask command ran")
+            text, *sender = json.loads(asked[0])
+            assert word in text and sender == [session, name, f.cwd.name, str(question["id"])], (text, sender)
+            post(f, f"/sessions/{sender[0]}/asks/{sender[3]}", {"text": answer})
         entries = until(f, session, lambda es: any(e["kind"] == "turn_end" for e in es), timeout=60)
         outputs = {e["call"]: e for e in entries if e["kind"] == "result"}
         search = outputs["search37"]["output"]

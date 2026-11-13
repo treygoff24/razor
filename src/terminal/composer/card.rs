@@ -1,7 +1,7 @@
 //! The composer's full card: its border label with who speaks, the agent's mood and the next
 //! input's choice, the words, and the dock of chips and the send button.
 use super::super::view::{self, Action, Hit};
-use super::super::{App, audio, bindings, status, text::*};
+use super::super::{App, audio, bindings, keys::Pane, status, text::*};
 use super::{Composer, chosen, emoji_chip, speaks_as};
 use crate::protocol::{Body, State, UsageWindow};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
@@ -30,6 +30,8 @@ impl Composer {
         }
         let (x, right, bottom) = (r.x + 1, r.right() - 2, r.bottom() - 1);
         let inner = right - x - 1;
+        let focused = app.keys == Pane::Conversation && app.panel.is_none();
+        let edge = [GRAY, CYAN][usize::from(focused)];
         let agent = app.row();
         let working = agent.is_some_and(|a| a.state == State::Working);
         put(
@@ -38,12 +40,12 @@ impl Composer {
             bottom,
             &format!("╰{}╯", "─".repeat(inner as usize)),
             r.width - 2,
-            style(CYAN, RECESS),
+            style(edge, RECESS),
         );
         for y in r.y + 1..bottom {
             fill(b, Rect::new(x + 1, y, inner, 1), style(WHITE, BEZEL));
-            put(b, x, y, "│", 1, style(CYAN, BEZEL));
-            put(b, right, y, "│", 1, style(CYAN, BEZEL));
+            put(b, x, y, "│", 1, style(edge, BEZEL));
+            put(b, right, y, "│", 1, style(edge, BEZEL));
         }
         let dock = Rect::new(x, bottom - 1, right - x + 1, 1);
         self.dock(app, b, dock, working, hits);
@@ -56,8 +58,8 @@ impl Composer {
         let cursor = self.content(b, words, app);
         // After the words, so the edge counts the rows this frame scrolled off.
         let above = self.window.borrow().first;
-        // A click on the status summary opens the pane, as Ctrl-T does.
-        if let Some(tail) = header(app, b, r, now, above) {
+        // A click on the status summary toggles the pane.
+        if let Some(tail) = header(app, b, r, now, above, focused) {
             hits.push((tail, Action::Status));
         }
         put(
@@ -66,7 +68,7 @@ impl Composer {
             r.y + 1,
             if above > 0 { "↑ " } else { "❯ " },
             2,
-            style(CYAN, BEZEL),
+            style(edge, BEZEL),
         );
         cursor
     }
@@ -175,7 +177,7 @@ fn summary(app: &App, now: u64) -> String {
 }
 
 // A split's card speaks to its child: `╭─ YOU · talking to heron · as you ── Esc back ─╮`.
-fn speaker(app: &App, b: &mut Buffer, r: Rect) {
+fn speaker(app: &App, b: &mut Buffer, r: Rect, focused: bool) {
     let agent = app.row();
     let name = agent.map_or("you", |a| a.name.as_str());
     let (x, right) = (r.x + 1, r.right() - 2);
@@ -185,7 +187,8 @@ fn speaker(app: &App, b: &mut Buffer, r: Rect) {
     let rule = "─".repeat(inner.saturating_sub(width(&words) + 16));
     let back = bindings::text(app, "<composer.back> back");
     let border = format!("╭─ YOU{words}{rule} {back} ─╮");
-    put(b, x, r.y, &border, r.width - 2, style(CYAN, RECESS));
+    let border_style = style([GRAY, CYAN][usize::from(focused)], RECESS);
+    put(b, x, r.y, &border, r.width - 2, border_style);
     let at = put(b, x + 2, r.y, " YOU", 4, bold(CYAN, RECESS));
     put(
         b,
@@ -251,9 +254,16 @@ fn ends(
 // right end one of `ends`. The end keeps its longest form that fits, the mood its short form when
 // that keeps a longer end, and the choice the longest of model, effort and name, model and
 // effort, or model that leaves three rule columns.
-fn header(app: &App, b: &mut Buffer, r: Rect, now: u64, above: usize) -> Option<Rect> {
+fn header(
+    app: &App,
+    b: &mut Buffer,
+    r: Rect,
+    now: u64,
+    above: usize,
+    focused: bool,
+) -> Option<Rect> {
     if app.split_view() {
-        speaker(app, b, r);
+        speaker(app, b, r, focused);
         return None;
     }
     let agent = app.row();
@@ -294,7 +304,8 @@ fn header(app: &App, b: &mut Buffer, r: Rect, now: u64, above: usize) -> Option<
     let rule = "─".repeat(inner.saturating_sub(width(&label) + edge));
     let label = clip(&label, inner.saturating_sub(1));
     let border = format!("╭─{label}{rule}{tail}{join}╮");
-    put(b, x, r.y, &border, r.width - 2, style(CYAN, RECESS));
+    let border_style = style([GRAY, CYAN][usize::from(focused)], RECESS);
+    put(b, x, r.y, &border, r.width - 2, border_style);
     let at = right.saturating_sub(width(&tail) as u16 + 1);
     put(b, at, r.y, &tail, width(&tail) as u16, style(GRAY, RECESS));
     let flagged = caution.filter(|_| above == 0);
@@ -307,7 +318,8 @@ fn header(app: &App, b: &mut Buffer, r: Rect, now: u64, above: usize) -> Option<
     let typed = !app.composer.text.is_empty();
     let summary = !tail.is_empty() && above == 0 && (!typed || flagged.is_some()) && !pane;
     let summary = summary.then(|| Rect::new(at, r.y, width(&tail) as u16, 1));
-    let mut at = put(b, x + 2, r.y, " YOU", inner as u16, bold(CYAN, RECESS));
+    let tab_style = [bold(CYAN, RECESS), bold(GLASS, CYAN)][usize::from(focused)];
+    let mut at = put(b, x + 2, r.y, " YOU", inner as u16, tab_style);
     let looks = [
         bold(CYAN, RECESS),
         style(CYAN, RECESS),

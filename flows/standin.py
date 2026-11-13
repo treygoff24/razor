@@ -22,6 +22,7 @@ class Reply:
     headers: tuple[tuple[str, str], ...] = ()  # actual model response headers, e.g. plan windows
     status: int = 200
     method: str = "POST"  # a GET reply's `match` is held by the request's path
+    hold: bool = False  # sent with no length and left open until the client drops it, as a stopped reply
 
 
 def put(path, data):
@@ -72,13 +73,16 @@ def serve(replies: list[Reply], requests: Path):
             reply = replies[index]
             self.send_response(reply.status)
             self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Content-Length", str(len(reply.body)))
+            if not reply.hold:
+                self.send_header("Content-Length", str(len(reply.body)))
             for key, value in reply.headers:
                 self.send_header(key, value)
             self.end_headers()
             for start, end in zip((0, *reply.cuts), (*reply.cuts, None)):
                 time.sleep(reply.pause if start else 0)
                 self.wfile.write(reply.body[start:end])
+            if reply.hold:  # until the client closes; a reply never dropped fails at the 10 s timeout
+                return self.connection.recv(1)
             meta["sent"] = time.monotonic()
             put(name.with_suffix(".json"), json.dumps(meta).encode())
 

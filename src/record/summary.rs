@@ -437,6 +437,9 @@ impl Summary {
                 self.reported = report.as_ref().map(|_| entry.id).or(self.reported);
                 self.turn_end(inputs, end, usage, *closed);
                 self.close_reason = *close_reason;
+                if *closed && *close_reason == Some(CloseReason::Person) {
+                    self.questions.retain(|q| q.waited);
+                }
                 if !self.idle_handover && !closed {
                     self.idle_since = Some(entry.at);
                 }
@@ -494,6 +497,7 @@ impl Summary {
                 text: text.clone(),
                 options: options.clone(),
                 at: entry.at,
+                waited: true,
             }),
         }
         // A reply whose only line is its suggestion leaves the preview before it.
@@ -683,6 +687,7 @@ impl Summary {
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect(),
             at,
+            waited: false,
         });
     }
 
@@ -732,6 +737,7 @@ impl Summary {
         }
         match &input.from {
             Origin::Person => {
+                self.questions.retain(|q| q.waited);
                 self.person_input_at = Some(self.at);
                 if self.title_input == EntryId(0) {
                     self.title = input.text.lines().next().unwrap_or_default().into();

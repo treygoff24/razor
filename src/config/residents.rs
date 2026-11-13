@@ -1,6 +1,6 @@
 //! `[residents.<name>]` (docs/design/residents.md): each resident's home, heartbeat, schedules
-//! and night. Every key is live: the schedule re-reads the config on every wake (at least once a
-//! minute), and the rest are read at their next use.
+//! and night. Every key is live: a settings change wakes the schedule as soon as the server's
+//! once-a-second read observes it, and the rest are read at their next use.
 
 use super::Error;
 use crate::protocol::Effort;

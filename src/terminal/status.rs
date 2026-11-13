@@ -1,6 +1,7 @@
-//! The status pane and the `/status` card: the next input's model, alerts, usage, the addressed
+//! The status pane: the next input's model, alerts, usage, the addressed
 //! session's children as cards with their descendants, the inbox, and its contexts.
 
+use super::keys::Pane;
 use super::{
     App,
     cards::{self, Card, Size},
@@ -133,32 +134,6 @@ impl Status<'_> {
         lines.into_iter().for_each(|l| self.push(l));
     }
 
-    // The addressed session's id, state and context, and its last turn's tokens.
-    fn facts(&mut self) {
-        let (app, now) = (self.app, self.now);
-        if let Some(agent) = app.row() {
-            self.text(&format!("session {}", agent.session), GRAY);
-            self.text(&format!("state {}", Card::of(app, agent, now).word), WHITE);
-            let reading = agent.context.zip(agent.window).zip(percent(agent));
-            let reading = reading.map_or("not measured".into(), |((c, w), p)| {
-                format!("{} of {} · {p}%", kilo(c), kilo(w))
-            });
-            self.text(&format!("context {reading}"), GRAY);
-        }
-        let mut entries = app
-            .transcript()
-            .into_iter()
-            .flat_map(|t| t.entries.values().rev());
-        let usage = entries.find_map(|e| match &e.body {
-            Body::TurnEnd { usage, .. } => Some(usage),
-            _ => None,
-        });
-        if let Some(u) = usage {
-            let (input, output) = (kilo(u.input), kilo(u.output));
-            self.text(&format!("last turn {input} in · {output} out"), GRAY);
-        }
-    }
-
     fn model(&mut self) {
         let (name, level) = self.app.choice();
         let level = level.map_or("effort pending", effort);
@@ -179,8 +154,8 @@ impl Status<'_> {
         }
     }
 
-    // A configuration error, the context past its rebuild line, reached limits, then each child
-    // that may be stuck.
+    // Configuration errors and notices, the context past its rebuild line, reached limits,
+    // then each child that may be stuck.
     fn alerts(&mut self) {
         let app = self.app;
         let agent = app.row();
@@ -196,12 +171,22 @@ impl Status<'_> {
             (pct >= line).then(|| format!("Context {pct}%, past the automatic rebuild at {line}%."))
         });
         let rejected = windows.iter().any(|w| w.rejected);
-        if app.config.is_none() && past.is_none() && stuck.is_empty() && !rejected {
+        let actions = app.servers.iter().filter_map(|s| {
+            s.release_action
+                .as_ref()
+                .map(|notice| format!("{}: {notice}", s.machine))
+        });
+        let quiet =
+            app.config.is_none() && app.notices.is_empty() && actions.clone().next().is_none();
+        if quiet && past.is_none() && stuck.is_empty() && !rejected {
             return;
         }
         self.rule("ALERTS", None);
         for words in [app.config.as_ref(), past.as_ref()].into_iter().flatten() {
             self.wrapped(words, RED);
+        }
+        for words in app.notices.iter().cloned().chain(actions) {
+            self.wrapped(&words, AMBER);
         }
         for window in windows.iter().filter(|w| w.rejected) {
             let reset = window
@@ -512,15 +497,8 @@ pub fn elapsed(ms: u64) -> String {
     }
 }
 
-/// The `/status` card's rows: the pane's sections with the addressed session's own facts.
-pub fn rows(app: &App, width: usize, now: u64) -> Vec<Line<'static>> {
-    let rows = sections(app, width, now, true).0;
-    rows.into_iter().map(|(line, _)| line).collect()
-}
-
-/// The pane's rows at `width`, with the `/status` card's facts of the addressed session after
-/// the model when `card`; and the row the inbox starts on.
-fn sections(app: &App, width: usize, now: u64, card: bool) -> (Rows, usize) {
+// The pane's rows and the row where its inbox begins.
+fn sections(app: &App, width: usize, now: u64) -> (Rows, usize) {
     let mut status = Status {
         app,
         width,
@@ -528,9 +506,6 @@ fn sections(app: &App, width: usize, now: u64, card: bool) -> (Rows, usize) {
         rows: Vec::new(),
     };
     status.model();
-    if card {
-        status.facts();
-    }
     status.alerts();
     status.usage();
     status.children();
@@ -543,6 +518,53 @@ fn sections(app: &App, width: usize, now: u64, card: bool) -> (Rows, usize) {
     (status.rows, inbox)
 }
 
+/// Gives the inbox the keys, or returns them to the conversation on a second press.
+pub(super) fn focus(app: &mut App) {
+    if app.keys == Pane::Status {
+        app.keys = Pane::Conversation;
+        return;
+    }
+    app.keys = Pane::Status;
+    app.to_inbox = true;
+    app.status_selected =
+        app.delivered.iter().rev().find(|d| !d.archived).map(|d| {
+            Action::Delivery(d.session.clone(), d.entry, d.url.as_deref().map(Into::into))
+        });
+}
+
+/// Status navigation uses the same rows and actions as clicks.
+pub(super) fn key(app: &mut App, action: &str) {
+    let chosen = app.status_selected.clone();
+    match action {
+        "status.cancel" => app.keys = Pane::Conversation,
+        "status.toggle" => super::clicks::act(app, Action::Status),
+        "status.accept" => chosen.into_iter().for_each(|a| super::clicks::act(app, a)),
+        "status.copy" => {
+            if let Some(Action::Delivery(session, entry, _)) = chosen {
+                super::reader::copy(app, &session, entry);
+            }
+        }
+        _ => {
+            let width = app.status_area.map_or(40, |r| r.width.saturating_sub(4)) as usize;
+            let (rows, _) = sections(app, width, crate::protocol::now());
+            let mut actions: Vec<_> = rows.into_iter().filter_map(|(_, a)| a).collect();
+            actions.dedup();
+            if actions.is_empty() {
+                return;
+            }
+            let at = actions.iter().position(|a| Some(a) == chosen.as_ref());
+            let next = at.map_or(0, |at| {
+                if action == "status.down" {
+                    (at + 1).min(actions.len() - 1)
+                } else {
+                    at.saturating_sub(1)
+                }
+            });
+            app.status_selected = Some(actions[next].clone());
+        }
+    }
+}
+
 /// The pane: its tab, the scrolled rows with their presses, and a scrollbar while they overflow;
 /// the stage stands at its foot.
 pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit>) {
@@ -551,14 +573,17 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit
     if r.width < 6 || r.height < 2 {
         return;
     }
+    let focused = app.keys == Pane::Status;
+    let edge = [BEZEL_HI, CYAN][usize::from(focused)];
     for y in r.y..r.bottom() {
-        put(b, r.x, y, "│", 1, style(BEZEL_HI, GLASS));
+        put(b, r.x, y, "│", 1, style(edge, GLASS));
     }
-    put(b, r.x + 2, r.y, "STATUS", r.width - 2, bold(WHITE, GLASS));
+    let tab_style = [bold(WHITE, GLASS), bold(GLASS, CYAN)][usize::from(focused)];
+    put(b, r.x + 2, r.y, " STATUS ", r.width - 2, tab_style);
     let tab = Rect::new(r.x + 1, r.y, 8.min(r.width - 1), 1);
     hits.push((tab, Action::Status));
     let foot = super::stage::draw(app, b, r, now);
-    let (rows, inbox) = sections(app, r.width.saturating_sub(4) as usize, now, false);
+    let (rows, inbox) = sections(app, r.width.saturating_sub(4) as usize, now);
     let (visible, total) = (
         r.height.saturating_sub(1 + foot + u16::from(foot > 0)) as usize,
         rows.len(),
@@ -566,12 +591,30 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<Hit
     if std::mem::take(&mut app.to_inbox) {
         app.status_scroll = inbox;
     }
+    let selected = rows
+        .iter()
+        .position(|(_, a)| a.is_some() && *a == app.status_selected)
+        .filter(|_| focused);
+    if let Some(at) = selected {
+        app.status_scroll = app
+            .status_scroll
+            .min(at)
+            .max(at.saturating_sub(visible.saturating_sub(1)));
+    }
     app.status_scroll = app.status_scroll.min(total.saturating_sub(visible));
     let shown = rows.into_iter().skip(app.status_scroll).take(visible);
-    for (y, (words, action)) in (r.y + 1..).zip(shown) {
+    for (y, (mut words, action)) in (r.y + 1..).zip(shown) {
         let x = r.x + 2 - u16::from(matches!(action, Some(Action::Child(_))));
         let row = Rect::new(x, y, r.right().saturating_sub(x + 1), 1);
-        line(b, row, y, &words, style(WHITE, GLASS));
+        let selected = selected == Some(app.status_scroll + usize::from(y - r.y - 1));
+        let base = [style(WHITE, GLASS), style(GLASS, CYAN)][usize::from(selected)];
+        if selected {
+            for span in &mut words.spans {
+                span.style = base;
+            }
+            fill(b, row, base);
+        }
+        line(b, row, y, &words, base);
         hits.extend(action.map(|a| (row, a)));
     }
     scrollbar(b, r.right() - 1, r.y + 1, visible, total, app.status_scroll);

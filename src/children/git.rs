@@ -2,7 +2,7 @@
 //! rest is read and dropped, so git never waits on a full pipe. The names settle moves stay bytes.
 
 use super::{Error, other};
-use crate::{protocol::Worktree, shell::Group};
+use crate::protocol::Worktree;
 use std::{
     ffi::OsStr,
     os::unix::ffi::OsStrExt,
@@ -17,6 +17,25 @@ use tokio::{
 };
 
 const KEPT: u64 = 64 * 1024;
+pub(crate) const DEADLINE: &str = "Git did not finish within ";
+
+/// Runtime shutdown cannot await cleanup; even then git must get a chance to release its locks.
+struct GitGroup(Option<u32>);
+
+impl GitGroup {
+    fn signal(&self, signal: i32) {
+        if let Some(pid) = self.0 {
+            // SAFETY: the child owns the process group made by process_group(0).
+            unsafe { libc::killpg(pid as libc::pid_t, signal) };
+        }
+    }
+}
+
+impl Drop for GitGroup {
+    fn drop(&mut self) {
+        self.signal(libc::SIGTERM);
+    }
+}
 
 struct Git {
     code: Option<i32>,
@@ -45,16 +64,53 @@ fn git(cwd: &Path) -> Command {
     command
 }
 
-/// Git run to its end; dropped first, it kills git's process group, so an SSH or credential
-/// program git started cannot outlive it.
+/// Git run to its end, with the same cancellation cleanup as a timed command.
 async fn run(command: &mut Command) -> Result<Git, Error> {
+    running(command, u32::MAX.into()).await
+}
+
+/// The task owns git until it exits, even when the caller goes away. TERM lets git remove its
+/// locks; only a group that has not finished after five seconds is killed. A timeout answers
+/// after cleanup, so the caller keeps its store lock until git has gone.
+async fn running(command: &mut Command, secs: u64) -> Result<Git, Error> {
     let mut child = command.spawn().map_err(other("starting git"))?;
-    let mut group = Group(child.id());
-    let (out, err) = tokio::join!(kept(child.stdout.take()), kept(child.stderr.take()));
-    let code = child.wait().await.map_err(other("running git"))?.code();
-    group.0 = None;
-    let text = String::from_utf8_lossy(&out).into_owned() + &String::from_utf8_lossy(&err);
-    Ok(Git { code, out, text })
+    let mut group = GitGroup(child.id());
+    let (caller, cancelled) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        let (out, err) = (child.stdout.take(), child.stderr.take());
+        let collect = async {
+            // Reap after the pipes close, keeping the group id owned throughout cleanup.
+            let (out, err) = tokio::join!(kept(out), kept(err));
+            let code = child.wait().await.map_err(other("running git"))?.code();
+            let text = String::from_utf8_lossy(&out).into_owned() + &String::from_utf8_lossy(&err);
+            Ok(Git { code, out, text })
+        };
+        tokio::pin!(collect);
+        let mut result = tokio::select! {
+            biased;
+            result = &mut collect => Ok(result),
+            _ = cancelled => Err("Git was stopped.".to_owned()),
+            _ = tokio::time::sleep(Duration::from_secs(secs)) =>
+                Err(format!("{DEADLINE}{secs} seconds.")),
+        };
+        if let Err(why) = &mut result {
+            group.signal(libc::SIGTERM);
+            if tokio::time::timeout(Duration::from_secs(5), &mut collect)
+                .await
+                .is_err()
+            {
+                group.signal(libc::SIGKILL);
+                let _ = tokio::time::timeout(Duration::from_secs(5), &mut collect).await;
+                *why += " Git had to be killed; a lock may remain.";
+            }
+        }
+        group.0 = None;
+        drop(group);
+        result.unwrap_or_else(|why| Err(Error::Refused(why)))
+    });
+    let result = task.await.map_err(other("waiting for git"))?;
+    drop(caller);
+    result
 }
 
 /// Git in `cwd` with `args`, never prompting and stopped after `secs` seconds: its standard
@@ -62,10 +118,18 @@ async fn run(command: &mut Command) -> Result<Git, Error> {
 pub(crate) async fn timed(cwd: &Path, secs: u64, args: &[&str]) -> Result<String, Error> {
     let mut command = git(cwd);
     command.env("GIT_TERMINAL_PROMPT", "0").args(args);
-    let ran = tokio::time::timeout(Duration::from_secs(secs), run(&mut command)).await;
-    let late = || Error::Refused(format!("Git did not finish within {secs} seconds."));
-    let out = ran.map_err(|_| late())??.success()?;
+    let out = running(&mut command, secs).await?.success()?;
     Ok(String::from_utf8_lossy(&out).trim_end().into())
+}
+
+/// A verified revision, absent only when git exits 1 silently; an ended or failed check is an error.
+pub(crate) async fn revision(cwd: &Path, secs: u64, name: &str) -> Result<Option<String>, Error> {
+    let ran = running(git(cwd).args(["rev-parse", "-q", "--verify", name]), secs).await?;
+    if ran.code == Some(1) && ran.text.is_empty() {
+        return Ok(None);
+    }
+    let out = ran.success()?;
+    Ok(Some(String::from_utf8_lossy(&out).trim_end().into()))
 }
 
 async fn kept(pipe: Option<impl AsyncRead + Unpin>) -> Vec<u8> {

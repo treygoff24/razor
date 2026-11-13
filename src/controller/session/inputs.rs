@@ -43,16 +43,6 @@ impl Session {
         if self.full() {
             return Err(Error::Full(self.id.clone()));
         }
-        // A call's hand-off answers the agent's newest open ask; a server's question stays open.
-        for ask in self.record.summary().questions.iter().rev() {
-            if input.voice_call.is_some()
-                && let Body::Call { .. } = self.record.entry(ask.id.1).await?.body
-            {
-                input.from = Origin::Answer { ask: ask.id.1 };
-                break;
-            }
-        }
-        let s = self.record.summary();
         // A plugin's change is what is recorded, so the size check below applies to it.
         let (from, text) = (&input.from, &mut input.text);
         let event = Before::Input { from, text };

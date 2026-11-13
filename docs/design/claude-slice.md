@@ -263,7 +263,7 @@ razor --version
 - The current directory: a new session's `cwd`, and the directory in which `--continue` looks for the newest session.
 
 **Does.**
-- With neither `--resume` nor `--continue`, it creates a session with the message. `--resume ID` admits the message to that session. `--continue` lists sessions with this `cwd`, limit 1, then admits the message to that one. `--model` or `--effort` with either is refused in the slice.
+- With neither `--resume` nor `--continue`, it creates a session with the message. `--resume ID` admits the message to that session. `--continue` lists sessions with this `cwd`, `skip_dreams=true`, limit 1, then admits the message to that one. `--model` or `--effort` with either is refused in the slice.
 - Before admitting input, it subscribes with a cursor beyond the record, skipping previous turns. In `stream` mode it prints `attached`, then lines from its own `input` onward; any lines arriving between subscription and admission are skipped.
 - It reads until the first `turn_end` whose `inputs` holds its input's id. That turn is the one that answered it, whether the input opened it, was taken at a tool boundary of a turn already running, or was carried by a rebuild.
 

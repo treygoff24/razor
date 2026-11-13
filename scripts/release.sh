@@ -5,10 +5,18 @@ cd "$(dirname "$0")/.."
 version=${1:?version required} out=${2:?output directory required} base=${3:?base URL required}
 case "$version" in *[!a-zA-Z0-9._-]*|'') echo 'Invalid version' >&2; exit 1;; esac
 case "$base" in *[!a-zA-Z0-9._:/~-]*|'') echo 'Invalid base URL' >&2; exit 1;; esac
+python3 - "$version" <<'PY'
+import os, re, sys
+mark = os.environ.get('RAZOR_ACTION', '')
+if mark:
+    match = re.fullmatch(r'((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)) ([^"\\$`\r\n]+)', mark)
+    if not match or not match[2].strip() or len(match[2]) > 200 or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', sys.argv[1]) or tuple(map(int, match[1].split('.'))) > tuple(map(int, sys.argv[1].split('.'))):
+        sys.exit('Invalid RAZOR_ACTION: use a stable version no newer than the release and one sentence of at most 200 characters without double quotes, backslashes, dollars, backticks or newlines.')
+PY
 case "${RAZOR_PLATFORM:-$(uname -s)-$(uname -m)}" in
-  Linux-x86_64|linux-x64) platform=linux-x64; target=x86_64-unknown-linux-gnu; cua=linux-x86_64-binary; cua_sha=fb1f51e052a07e478a3c4f2f132017a4fe619c847ded69c5184c1066a64b844e; browser=b69e0f5ea76dcb51f8f75da6bcb87c7f4d81f79b5738f1f08bd121b51cb3dc57; rg=x86_64-unknown-linux-musl; rg_sha=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c; jq=linux-amd64; jq_sha=b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f ;;
-  Linux-aarch64|linux-arm64) platform=linux-arm64; target=aarch64-unknown-linux-gnu; cua=linux-arm64-binary; cua_sha=72bd94a3eebd41986b3968088fd44212cbea2b02176296b0fc44bac94199a988; browser=a219b10251ecd85e5787d1126dc969d926ac8d2dea325f9d94413907a8856f40; rg=aarch64-unknown-linux-musl; rg_sha=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915; jq=linux-arm64; jq_sha=8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309 ;;
-  Darwin-arm64|darwin-arm64) platform=darwin-arm64; target=aarch64-apple-darwin; cua=darwin-universal-binary; cua_sha=217a50849637091f0d864c02b8e187ebf209b1a899290dadee37b41fc6816cc7; browser=b1b2946c95d218b035262483f2c6193e0f216c155c903bcc532ce47e29d8e72d; rg=aarch64-apple-darwin; rg_sha=3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4; jq=macos-arm64; jq_sha=2d75340ba57a4b4b4c8708a21c2dc8e958a48aaa8bba13b27f77f6e4c0eca07e ;;
+  Linux-x86_64|linux-x64) platform=linux-x64; target=x86_64-unknown-linux-gnu; cua=linux-x86_64-binary; cua_sha=123444e4a96652e5e0d115a37e3b969d346c985ec995a17f6145fd4c9992a0b8; browser=8e69c9fb662514c9cf36e4911e94e913742ba066e55102486350e049dd847612; rg=x86_64-unknown-linux-musl; rg_sha=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c; jq=linux-amd64; jq_sha=b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f ;;
+  Linux-aarch64|linux-arm64) platform=linux-arm64; target=aarch64-unknown-linux-gnu; cua=linux-arm64-binary; cua_sha=3d2473ef4dd0917390a8ca4de9954e74d53cb372dd32b2d658a9d1c19d1650ea; browser=34be55c2b92d8d199fb9d1d62a905ee5b6ac5b1f3e8c24e5b20597f370d905e5; rg=aarch64-unknown-linux-musl; rg_sha=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915; jq=linux-arm64; jq_sha=8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309 ;;
+  Darwin-arm64|darwin-arm64) platform=darwin-arm64; target=aarch64-apple-darwin; cua=darwin-universal-binary; cua_sha=5943218adaa1cb1aac00442bad9012e26384324f43dc6e766e367a55fa3ba70f; browser=05338a8eeddf0b3f9ebf0c87a6c21aedc10685608c68618e1a8483c43eae9c3f; rg=aarch64-apple-darwin; rg_sha=3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4; jq=macos-arm64; jq_sha=2d75340ba57a4b4b4c8708a21c2dc8e958a48aaa8bba13b27f77f6e4c0eca07e ;;
   *) echo 'Unsupported platform; use Linux x86_64 or aarch64, or macOS arm64.' >&2; exit 1 ;;
 esac
 stage=$(mktemp -d)
@@ -40,8 +48,8 @@ python3 scripts/notices.py "$target" > "$stage/THIRD-PARTY-NOTICES.md"
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
 # Downloads $1 to $2, which must match the pinned SHA-256 $3.
 fetch() { curl -fsSL "$1" -o "$2" && [ "$(sha256 "$2" | cut -d ' ' -f 1)" = "$3" ] || { echo "Download or checksum failed: $1" >&2; exit 1; }; }
-fetch "https://github.com/vercel-labs/agent-browser/releases/download/v0.42.0/agent-browser-$platform" "$stage/agent-browser" "$browser"
-fetch "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.47.18/cua-driver-rs-0.47.18-$cua.tar.gz" "$stage.cua" "$cua_sha"
+fetch "https://github.com/vercel-labs/agent-browser/releases/download/v0.43.0/agent-browser-$platform" "$stage/agent-browser" "$browser"
+fetch "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.49.1/cua-driver-rs-0.49.1-$cua.tar.gz" "$stage.cua" "$cua_sha"
 tar -xzf "$stage.cua" -C "$stage" cua-driver
 # ripgrep and jq for agents' shells, in tools/, which serve puts last on PATH so the person's own copies win.
 fetch "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-$rg.tar.gz" "$stage.rg" "$rg_sha"
@@ -73,5 +81,5 @@ archive="razor-$version-$platform.tar.gz"
 # shellcheck disable=SC2046 # release-files.txt holds plain paths, one a line.
 COPYFILE_DISABLE=1 tar --no-xattrs -czf "$out/$archive" -C "$stage" . -C "$PWD" $(grep -v '^#' scripts/release-files.txt)
 (cd "$out" && sha256 "$archive" > "$archive.sha256")
-{ head -n 2 scripts/install-release.sh; printf 'RAZOR_BASE_URL=%s\nRAZOR_VERSION=%s\n' "\${RAZOR_BASE_URL:-$base}" "\${RAZOR_VERSION:-$version}"; tail -n +3 scripts/install-release.sh; } > "$out/install.sh"
+{ head -n 2 scripts/install-release.sh; printf 'RAZOR_BASE_URL=%s\nRAZOR_VERSION=%s\n' "\${RAZOR_BASE_URL:-$base}" "\${RAZOR_VERSION:-$version}"; if [ -n "${RAZOR_ACTION:-}" ]; then printf 'RAZOR_ACTION="%s"\n' "$RAZOR_ACTION"; fi; tail -n +3 scripts/install-release.sh; } > "$out/install.sh"
 chmod +x "$out/install.sh"

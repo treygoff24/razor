@@ -1,5 +1,7 @@
 """Installed service uses server.wrapper; residents start unprompted, skip busy heartbeats, and
-hold busy schedules for the next turn (docs/design/residents.md)."""
+hold busy schedules for the next turn; a settings change wakes the residents loop; a dream
+ending itself keeps its question until the person closes it
+(docs/design/residents.md)."""
 import json
 import plistlib
 import subprocess
@@ -10,7 +12,7 @@ import time
 from pathlib import Path
 import claude
 from driver import BINARY, REPLIES, Reply, flow
-from server import post, until
+from server import post, send, until, wait
 
 
 def at(seconds):
@@ -21,7 +23,8 @@ def at(seconds):
 done = Reply((REPLIES / "done.sse").read_bytes())
 held = claude.reply((None, "Bash", {"command": "until [ -e release21 ]; do sleep .05; done"}), match="Heartbeat.")
 with tempfile.TemporaryDirectory() as fake, flow(
-        [done, held, done, done, done, claude.reply((None, "Bash", {"command": "printf daylight > daylight21"})), done],
+        [done, held, done, done, claude.reply((None, "mcp__razor__message", {"type": "question", "text": "Which ruling?"})),
+         done, claude.reply((None, "Bash", {"command": "printf daylight > daylight21"})), done],
         env={"PATH": f"{fake}:{os.environ['PATH']}"},
         config='[server]\nwrapper = ["/usr/bin/env", \'FLOW=<a&b"c%d$e\\f>\', "/x/.razor", '
                '"RAZOR_HOME=/x/.razor", "L=1\\n2"]') as f:
@@ -52,6 +55,7 @@ with tempfile.TemporaryDirectory() as fake, flow(
     assert taken.returncode == 1 and "another Razor home" in taken.stderr and service.read_text() == unit, taken
     service.unlink()  # Uninstalled: the manager here starts nothing, so the flow's own server must.
     (f.cwd / "persona.md").write_text("You are Ember, this flow's resident.")
+    beats = time.time()
     with (f.home / ".razor/config.toml").open("a") as config:
         config.write(f"\n[residents.ember]\ncwd = {json.dumps(str(f.cwd))}\n"
                      f"startup = [{json.dumps(str(f.cwd / 'persona.md'))}, \"razor\"]\n"
@@ -61,11 +65,14 @@ with tempfile.TemporaryDirectory() as fake, flow(
     # Only the service's own server asks macOS for permissions; a request from one a client
     # started would put the person's terminal, not Razor, in System Settings.
     assert post(f, "/permissions", None) is None
-    # The schedule comes due during the call, however long the turn took to reach it.
+    # The schedule comes due during the call, however long the turn took to reach it. It is set
+    # once the second heartbeat has found the turn busy, when the residents loop has nothing due
+    # for a minute: the settings change itself wakes the loop, which admits it within a second.
     until(f, "ember", lambda es: any(e["kind"] == "call" for e in es))
+    wait(lambda: time.time() >= int(beats + 7) + 1)
     with (f.home / ".razor/config.toml").open("a") as config:
-        config.write(f'[residents.ember.schedules.mid]\nat = ["{at(3)}"]\ntext = "Mid-turn schedule."\n')
-    until(f, "ember", lambda es: any(e["kind"] == "input" and "schedule" in e["from"] for e in es))
+        config.write(f'[residents.ember.schedules.mid]\nat = ["{at(0)}"]\ntext = "Mid-turn schedule."\n')
+    until(f, "ember", lambda es: any(e["kind"] == "input" and "schedule" in e["from"] for e in es), timeout=5)
     (f.cwd / "release21").touch()
     entries = until(f, "ember", lambda es: sum(e["kind"] == "turn_end" for e in es) >= 2, timeout=40)
     ends = [e for e in entries if e["kind"] == "turn_end"]
@@ -88,13 +95,18 @@ with tempfile.TemporaryDirectory() as fake, flow(
     assert "(From your schedule mid, not from the person.)\\nMid-turn schedule." in (f.requests / "004.body").read_text()
     assert [i["text"] for i in inputs] == ["Heartbeat.", "Mid-turn schedule."], inputs
     # A dream is a fresh thread; its home keeps its shell and stays open after the next turn.
-    until(f, f.run("dream", str(f.cwd)).stdout.strip(), lambda es: any(e.get("closed") for e in es))
+    # Ending itself, the dream keeps its question; the person's /quit of it is the person's close.
+    dream = f.run("dream", str(f.cwd)).stdout.strip()
+    until(f, dream, lambda es: any(e.get("closed") for e in es))
+    assert json.loads(send(f, "GET", f"/sessions/{dream}/agent").read())["asks"], "the dream dropped its question"
+    post(f, f"/sessions/{dream}/quit", {})
+    until(f, dream, lambda es: es[-1].get("close_reason") == "person")
     wake = post(f, "/sessions/ember/input", {"text": "Daylight wake.", "from": "daylight"})["entry"]
     entries = until(f, "ember", lambda es: any(e["kind"] == "turn_end" and wake in e["inputs"] for e in es))
     assert (f.cwd / "daylight21").read_text() == "daylight", "the home lost its shell after its dream"
     assert not next(e for e in entries if e.get("inputs") == [wake]).get("closed"), "the home closed after its dream"
     label = "(From the program daylight, not from the person.)\\nDaylight wake."
-    assert label in (f.requests / "006.body").read_text(), "the program's input has no label"
+    assert label in (f.requests / "007.body").read_text(), "the program's input has no label"
     assert (f.home / ".razor/sessions/ember/identity.toml").is_file()
 
 # A busy night's rebuild waits for the complete current batch, then precedes the next call.

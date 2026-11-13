@@ -23,9 +23,9 @@ for p in sorted(packages, key=lambda p: (p['name'], p['version'])):
     for file in files:
         text = file.read_text(encoding='utf-8', errors='replace').strip()
         notices.setdefault(text, set()).add(name)
-for url, name in [('vercel-labs/agent-browser/v0.42.0/LICENSE', 'agent-browser 0.42.0 (Apache-2.0)'),
-                  ('trycua/cua/cua-driver-rs-v0.47.18/LICENSE.md', 'Cua Driver 0.47.18 (MIT)'),
-                  ('trycua/cua/cua-driver-rs-v0.47.18/libs/cua-driver/rust/THIRD_PARTY_NOTICES.md', 'Cua Driver 0.47.18, its third-party notices'),
+for url, name in [('vercel-labs/agent-browser/v0.43.0/LICENSE', 'agent-browser 0.43.0 (Apache-2.0)'),
+                  ('trycua/cua/cua-driver-rs-v0.49.1/LICENSE.md', 'Cua Driver 0.49.1 (MIT)'),
+                  ('trycua/cua/cua-driver-rs-v0.49.1/libs/cua-driver/rust/THIRD_PARTY_NOTICES.md', 'Cua Driver 0.49.1, its third-party notices'),
                   ('BurntSushi/ripgrep/15.2.0/LICENSE-MIT', 'ripgrep 15.2.0 (MIT or Unlicense)'),
                   ('PCRE2Project/pcre2/pcre2-10.45/LICENCE.md', 'PCRE2 10.45, built into ripgrep 15.2.0 (BSD-3-Clause)'),
                   ('jemalloc/jemalloc/81034ce1f1373e37dc865038e1bc8eeecf559ce8/COPYING', 'jemalloc 5.3.1, built into ripgrep 15.2.0 on Linux (BSD-2-Clause)'),

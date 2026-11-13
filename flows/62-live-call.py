@@ -1,5 +1,6 @@
-"""A complete call, progress during real work, a correction GPT-Live never hands off in time, the
-person's stop holding the voice, and the agent's bounded view of a long call; then refusals after
+"""A complete call whose hand-off is the person's message, progress during real work, a correction
+GPT-Live never hands off in time, the person's stop holding the voice, and the agent's bounded
+view of a long call; then refusals after
 upgrade, a model and effort chosen during a call, unmetered loss, server stop and a phone
 streaming through closure."""
 import asyncio
@@ -81,7 +82,8 @@ quick = response([call("bash", json.dumps({"command": "sleep 1"}), "call_quick")
 logs, config = (response([call("bash", json.dumps({"command": f"until [ -e {release}-{n} ]; do sleep .2; done",
     "wait_ms": 60000, "description": f"Read the {n}"}), f"call_{n}")]) for n in ("logs", "config"))
 said = lambda text: response([{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}])
-replies = [done(), slow, check, done(), done(), quick, done(), done(), logs, done(), config, done(),
+ask = response([call("message", json.dumps({"type": "question", "text": "Which work?"}), "call_ask")])
+replies = [ask, done(), slow, check, done(), done(), quick, done(), done(), logs, done(), config, done(),
            done(), said("Checked."), said("Fast."), done(), response([call("bash", '{"command": "until [ -e go ]; do sleep .05; done"}')]), done()]
 with wall_clock(still=False) as (_, env, advance), flow(replies, model="sol", env=env, config=PLAIN + '\n[providers.slow]\nbase_url="{standin}"') as f:
     capture = f.cwd / "live"
@@ -132,6 +134,8 @@ with wall_clock(still=False) as (_, env, advance), flow(replies, model="sol", en
         handed = [e for e in entries if e.get("voice_call")]
         assert [(e["text"], e["voice_call"]) for e in handed] == [(facts[n]["text"], {"id": facts[0]["call"], "lines": [facts[n]["id"]]})
             for n in (1, 3)], "spoken request or correction was lost, duplicated, or detached from its record"
+        # A hand-off is the person's message, though the seed's question is open: not its answer.
+        assert [e["from"] for e in handed] == ["person"] * 2, handed
         assert json.loads(server.send(f, "GET", "/voice").read())["call_used_today"] == 2 / 1200, "usage update and final usage charged the call twice"
 
         # A second call has more utterances than the agent's view holds. The record keeps all of them.
@@ -144,7 +148,7 @@ with wall_clock(still=False) as (_, env, advance), flow(replies, model="sol", en
         assert [e["text"] for e in long_call if e["event"] == "line"] == [f"line{n:03d}." for n in range(300)], "long call lost record lines"
         server.post(f, f"/sessions/{session}/input", {"text": "Continue by message."})
         server.until(f, session, lambda es: sum(e["kind"] == "turn_end" for e in es) == 3)
-        users = [i for i in f.request(5)["input"] if i.get("role") == "user"]
+        users = [i for i in f.request(6)["input"] if i.get("role") == "user"]
         view = "\n".join(p.get("text", "") for p in users[-1]["content"])
         shown = re.findall(r"line(\d{3})\.", view)
         omitted = re.findall(r"\b\d+\b", view)

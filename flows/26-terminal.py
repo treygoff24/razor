@@ -28,6 +28,9 @@ for blocks in ("half", "octant"):
         config.write_text(config.read_text() + '\n[brand.avatars]\nowl={file="owl.png"}\nsoft={file="soft.png"}\n')
         config.write_text(config.read_text() + f'\n[residents.scout]\ncwd={json.dumps(str(f.cwd))}\n')
         session = "scout"
+        # The resident's home exists once the server has started and made it; resuming it sooner finds no session.
+        server.start(f)
+        server.until(f, session, lambda es: bool(es))
         f.ask("--resume", session, "Show a face.")
         with Terminal(f, "--resume", session, rows=48, columns=160) as t:
             t.shown("face ready")
@@ -104,6 +107,16 @@ def opened(f, session, want):
     server.wait(lambda: server.agents(f)[session]["terminal"] is want, 10, f"terminal open never became {want}")
 
 
+CYAN, GRAY = "3fd9f2", "7d8993"
+
+
+def ink(t, words, ground=False):
+    """The colour, or with `ground` the background, of the first cell of `words` on screen."""
+    y, x = t.find(words)
+    cell = t.screen.buffer[y][x]
+    return cell.bg if ground else cell.fg
+
+
 # A skill is available on the very first input, before a session has been made.
 with flow([claude.reply(text="first skill received")]) as f:
     f.cwd /= "project & skills"
@@ -166,7 +179,10 @@ replies = [agent(ROOT, "start", name="oak", brief="Read the brief and reply."),
            *(reply(f"ROOT_{n}", text=f"{n.lower()}-visible\n\n{'x' * 36}{m}[link](https://example.com/w26)") for n, m in (("V26", "ﾞ"), ("W26", "a"))),
            reply("TITLE_ROOT", text="title-turn-visible\n\n1. LIST_26 with:\n   - NESTED_26\n2. after"),
            # One turn of 140 calls: a session longer than the terminal's first page (256 entries).
-           claude.reply(*[(None, "mcp__razor__status", {})] * 140, match="LONG_ROOT"),
+           claude.reply((None, "Bash", {"command": "true\n" * 13 + "# distantargumentsearch\nprintf 'result\\167ordssearch'"}),
+                        *[(None, "mcp__razor__status", {})] * 140,
+                        text="Ancient Próspera deploymentsearch " + "z" * 66000,
+                        thinking="Thoughtsummarysearch", match="LONG_ROOT"),
            reply("LONG_ROOT", text="long-turn-visible"), reply("LONG_AGAIN", text="again-visible"),
            reply("SENT_FROM_APP", text="sent-visible"),
            reply("PROSE_ROOT", text=" ".join(f"W{i:04}" for i in range(3000))),
@@ -284,18 +300,30 @@ with flow(replies, config=local + '[server]\nname="box"\nrealm="work"\n') as f:
         t.until(lambda t: "root-transcript-visible" not in t.text() and "oak finished" in t.text())
         t.send("\x1b")
         t.shown("root-transcript-visible", "oak finished · child-card-visible")
-        t.send("/status\r")
-        t.shown("┌─ status", "state", "context", "last turn", "Esc back")
+        # A report belongs to the parent row; the child's own transcript stays on the child.
+        t.send("/search child card visible\r")
+        t.until(lambda t: any("❯   oak" in line and "child-card-visible" in line for line in t.screen.display))
+        t.send("\r")
+        t.until(lambda t: "Search this session" not in t.text() and "root-transcript-visible" not in t.text())
         t.send("\x1b")
-        t.shown("root-transcript-visible", "YOUR CALL", "Message the agent")
+        t.shown("root-transcript-visible")
         # Prefix ? lists the keys; / keeps the rows holding every typed word; Esc ends the
         # search, then closes the list.
         t.send("`?/close split")
         t.until(lambda t: "prefix.close_split" in t.text() and "list.close" not in t.text())
+        # The open panel has the keys, so its frame is cyan and the composer's grey until it closes.
+        assert ink(t, "┌─ keys") == CYAN and ink(t, "╭─ YOU") == GRAY, t.text()
         t.send("\x1b")
         t.shown("attached_images.focus")
+        # Space pages the panel, and a notch of the wheel scrolls it three rows.
+        t.send(" ")
+        t.until(lambda t: "attached_images.focus" not in t.text())
+        top, left = t.find("┌─ keys")
+        below = t.screen.display[top + 4][left:]
+        t.send("\x1b[<65;60;20M")
+        t.until(lambda t: t.screen.display[top + 1][left:] == below)
         t.send("\x1b")
-        t.until(lambda t: "┌─ keys" not in t.text())
+        t.until(lambda t: "┌─ keys" not in t.text() and ink(t, "╭─ YOU") == CYAN)
         # With words in the draft, Ctrl-C empties it and Ctrl-Z brings them back. Ctrl-S sets the
         # draft aside and, with the box empty, brings it back; a second is refused, never lost.
         t.send("CLEAR_26\x03")
@@ -383,12 +411,37 @@ with flow(replies, config=local + '[server]\nname="box"\nrealm="work"\n') as f:
         t.shown("AGENTS ·")
         t.until(lambda t: edge(t) == wide)  # the kept width, read at start
         t.until(lambda t: any("title-turn-visible" in line[t.screen.display[0].find("╮") + 1:] for line in t.screen.display))
+    # The child is the addressed record, even though its parent remains in the tree.
+    with Terminal(f, "--resume", oak) as t:
+        t.shown("child-card-visible")
+        t.send("/search child card visible\r")
+        t.until(lambda t: any("❯   agent" in line and "child-card-visible" in line for line in t.screen.display))
+        t.send("\x1b")
     # Reopened from another folder, a long session still names its own folder.
     (f.cwd / "elsewhere").mkdir()
     long = server.post(f, "/sessions", {"cwd": str(f.cwd / "elsewhere")})["session"]
     server.post(f, f"/sessions/{long}/input", {"text": "LONG_ROOT"})
     server.until(f, long, lambda es: es[-1]["kind"] == "turn_end")
     assert len(list(f.record(long))) > 256
+    # The oldest words, tool argument beyond its card preview, output, and Thinking all
+    # land on their own rows; selection never sends the command to the model.
+    requests_before_search = len(f.sent())
+    with Terminal(f, "--resume", long) as t:
+        t.shown("long-turn-visible")
+        for query, visible in (("prosp deploy", "Ancient Próspera"), ("thoughtsummarysearch", "Thoughtsummarysearch"),
+                                    ("distantargumentsearch", "resultwordssearch"), ("resultwordssearch", "resultwordssearch")):
+            t.send(f"/search {query}\r")
+            t.shown("/ " + query)
+            t.until(lambda t: "Searching…" not in t.text())
+            t.send("\r")
+            t.until(lambda t: "Search this session" not in t.text() and visible in t.text())
+        t.send("/search\r")
+        t.shown("resultwordssearch")
+        t.send("/" + "\x7f" * len("resultwordssearch") + "missingsearch\r")
+        t.shown("No matches in this session.")
+        t.send("\x1b")
+        t.until(lambda t: "Search this session" not in t.text())
+    assert len(f.sent()) == requests_before_search and server.agents(f)[long]["session"] == long
     with Terminal(f, "--resume", long) as t:
         t.shown("long-turn-visible")
         # Not every call of the reopened turn is mounted, so its closing line counts none.
@@ -562,7 +615,7 @@ with flow(replies, model="gpt-6.1-sol", config='[server]\nname="box"\nrealm="wor
         t.until(lambda t: "x /plan" not in t.text())
         t.send(f"/attach {peer}\r")
         t.shown("peer · peer-branch")
-        t.send("/status\r")
+        t.send("\x14")
         t.shown("91%", "100%")
         bars(t, [("5-hour", 91, "ffb319"), ("7-day", 100, "ff3d32")])
         f.git("-C", "peer", "switch", "-c", "after-turn")
@@ -571,8 +624,8 @@ with flow(replies, model="gpt-6.1-sol", config='[server]\nname="box"\nrealm="wor
         server.post(f, f"/sessions/{peer}/input", {"text": "USAGE_AGAIN"})
         t.shown("peer · after-turn", "20%", "30%")
         t.shown("awaiting a reading", "reset time passed", timeout=15)
-        t.send("\x1b")
-        t.until(lambda t: "┌─ status" not in t.text())
+        t.send("\x1b")  # the attached peer is a split, so the pane leaves with the keys
+        t.until(lambda t: "STATUS" not in t.text())
         t.send("/unattach\r")
         t.shown("cwd · main", "14%", "81%", "idle")
         bars(t, [("5-hour", 14, "3ee56d"), ("7-day", 81, "ffb319")])
@@ -592,8 +645,9 @@ with flow(replies, model="gpt-6.1-sol", config='[server]\nname="box"\nrealm="wor
 
 # The agents list: settled and stopped children leave; finished children with branch work past
 # the newest three fold into a line under their own parent, each child takes one line, ← and Space fold
-# a parent, the bar follows the addressed agent, Ctrl-T opens the pane beside it, Esc stops the
-# addressed agent at any width, which stays addressed, and another session's ask takes its digit.
+# a parent, the bar follows the addressed agent, Ctrl-T gives the pane beside it or over a split the
+# keys, Esc there gives them back and a second stops the addressed agent at any width, which stays
+# addressed, and another session's ask takes its digit.
 kids, grand = [f"kid{n}" for n in (1, 3, 4, 5, 6)], [f"g{n}" for n in range(4)]
 start = lambda match, names: claude.reply(*[(None, "mcp__razor__agent", {"action": "start", "name": n, "brief": "Go.", "placement": "worktree", "effort": "high"}) for n in names], match=match)
 poll = 'until [ $(grep -l \'"turn_end"\' "$RAZOR_HOME"/sessions/*/record.jsonl | wc -l) -ge 10 ]; do sleep .1; done'
@@ -648,12 +702,36 @@ with flow(replies, config='[ui.keys.goto]\nsearch = ["s"]\n[ui.keys.panel]\nsear
         t.until(lambda t: len(kid(t)) == 5)
         t.send("\r")  # Enter opens the selected agent, the addressed one here, closing the list
         t.until(lambda t: not t.screen.display[0].startswith("╭─ RAZOR"))
+        # In a child's split the status pane shows while it has the keys, and leaves with them.
+        t.send("`v")
+        t.shown("main · paused")
+        t.send("\x14")
+        t.shown(" STATUS ", "main · paused")
+        t.send("\x14")
+        t.until(lambda t: "STATUS" not in t.text() and "main · paused" in t.text())
+        t.send("`x")
+        t.until(lambda t: "main · paused" not in t.text())
         t.send("\x1bOQ")
         t.until(lambda t: len(kid(t)) == 5 and t.screen.display[0][52] == "╮")
         t.send("\x14")
         t.shown(" STATUS ")
-        t.send(f"\x1b[<0;6;{y + 1}M\x1b[<0;6;{y + 1}m\x14")  # the click hands the keys back
+        # Ctrl-T gave the pane the keys: from no selection j selects its first row, kid2's card,
+        # and types nothing, and the composer's frame is grey meanwhile.
+        t.send("j")
+        t.until(lambda t: "kid2 · awaiting" in t.text() and ink(t, "kid2 · awaiting", True) == CYAN)
+        assert ink(t, "g0 · Opus", True) != CYAN and ink(t, "╭─ YOU") == GRAY, t.text()
+        assert "❯ Message the agent" in t.text(), t.text()
+        # The click hands the keys back, and Ctrl-T gives them to the pane again.
+        t.send(f"\x1b[<0;6;{y + 1}M\x1b[<0;6;{y + 1}m\x14")
         t.resize(40, 60)
+        # Below 80 columns the pane with the keys fills the screen; Esc gives the keys back without
+        # stopping the turn, and a second Esc stops it.
+        t.until(lambda t: t.screen.display[0].startswith("│  STATUS"))
+        stopped = lambda: sum(e.get("end") == "stopped" for e in f.record(root))
+        before = stopped()
+        t.send("\x1b")
+        t.until(lambda t: "STATUS" not in t.text() and "Esc stops it" in t.text())
+        assert stopped() == before, f.record(root)
         t.send("\x1b")
         server.until(f, root, lambda es: es[-1].get("end") == "done" and any(e.get("end") == "stopped" for e in es))  # kid2's report wakes it
         t.resize(40, 160)
@@ -700,3 +778,4 @@ with flow(replies, config='[ui.keys.goto]\nsearch = ["s"]\n[ui.keys.panel]\nsear
     row = next(c for c in json.loads(server.send(f, "GET", f"/sessions/{root}/agent").read())["children"] if c["name"] == "kid1")
     header = next(f.record(row["session"]))
     assert row["settled"] == "discard" and (row["model"], row["effort"]) == (header["model"], header["effort"]) and row["effort"] == "high", row
+    assert not server.listed(f, row["session"]), "a settled helper is listed after a restart"

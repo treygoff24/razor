@@ -97,6 +97,8 @@ razor --continue
 
 To start with the agents list open beside the conversation you last wrote in (or a fresh conversation if there is none), run `razor --agents`. Left at the empty composer opens the same list after startup, as F2 and `/agents` do, and Left there again opens the overview: every agent on the whole screen, with what it is for, what it is doing now and its helpers. There Up and Down choose an agent, and Right, Enter or a click opens it beside the list; Right at the empty composer then closes the list and leaves the session on the whole screen, as F2, `/agents` or a click on the ‹ at the list's top right does. In a helper's conversation, Left goes back to its parent. F3, or the ⤢ at the list's top right, also opens the overview, and F3 or Esc goes back. To move between agents and type to each one with the list staying open, you can bind a second set of keys instead: Shift-Tab or Left to give the list the keys, Up and Down passing over helpers, and Enter or Right opening an agent beside the list ([Moving between agents](configuration.md#moving-between-agents)). Many actions also sit behind a prefix, as in tmux: with an empty draft, press backtick or Ctrl-B, then a key; the prefix and `?` list every key ([Terminal keys](configuration.md#terminal-keys)). To jump to any agent instead, `/goto` (or the prefix, then `g`) opens Go to: every agent on every connected machine by project, children under their parents. Press `/` and type part of a name, a topic or a state such as `working`; the same words also search your past conversations, listed underneath. Arrows or j/k choose, Enter opens it, Esc closes.
 
+To find words in the conversation you are addressing, use `/search <words>`. Words can appear in any order, and each may be the start of a word. Arrows or j/k select a result; Enter opens its place in the transcript. Press `/` in the list to refine the words and Enter to search again. `/search` alone returns to the last list. Esc closes the list, and Ctrl-End returns the transcript to its newest entries. The list holds at most 50 rows; add a word to narrow a full list.
+
 To ask one question without opening the terminal app, use `razor --print`: it sends the message, prints the answer and exits, which also suits scripts:
 
 ```sh
@@ -112,5 +114,12 @@ Next: [Concepts](concepts.md) explains sessions, helpers and memory; [Configurat
 ## Update Razor
 
 Run `razor update` to install the latest release, then `razor restart` when you want the server to use it. A release install also checks at server startup and about once a day. It downloads a newer release while your sessions keep running, and the terminal shows a one-line notice when it is ready. Restarting is your choice.
+
+If the release is marked as needing you to act, the background check holds off downloading
+it and keeps your current version selected, so a restart or reboot still uses that
+version. The terminal and your notify command say what to do once; the action stays
+in the terminal's status pane and `razor doctor`. Run `razor update` to download and select the latest
+release and print the action again, then `razor restart`. Servers on 0.6.0 and earlier,
+or any server sharing their install folder, still select the next release automatically.
 
 Run `razor config set release_updates false` to stop future background checks; `razor update` still works. Source builds update from their checkout. On v0.1.0, run the [install command](#1-install) once more and restart to get these update commands.

@@ -51,7 +51,7 @@ pub struct Brand<T = String> {
 }
 pub enum Live {
     /// Every `agents` snapshot carries the brand of the last good config.
-    Agents { agents: Vec<AgentView>, config: Option<String>, limit: Option<Limit>, brand: Brand },
+    Agents { agents: Vec<AgentView>, config: Option<String>, notices: Vec<String>, brand: Brand },
     // ...unchanged
 }
 
@@ -67,6 +67,17 @@ impl Tools {
 The controller's status snapshot starts with the brand of the config `Controller::start` read, and sends `agents` again whenever a read changes the brand, beside the config notice. The skill list goes after the startup page, in the first input of each native conversation, never in the `skill` declaration, so a changed skill never changes the cached prefix.
 
 **For clients.** `{"kind":"agents",…,"brand":{"name":"Acme","colours":{"violet":"#336699"}}}`. A status stream's first line is always `agents`. A client draws each named colour, keeps its own for every name left out, ignores what it cannot use, derives blends from the result (using the theme colours), and shows `name` wherever it names the product.
+
+`config` carries errors alone. `notices` is a list of nonblocking settings notices,
+empty by default and omitted when empty; clients that do not know it ignore it.
+Settings owns this list: ignored avatar pictures, the retired `key` file,
+`server.address`, and old `remote.address` or `remote.key` beside a valid paired
+server name. Doctor prints the same list, the controller logs changes and sends
+it in the agents snapshot, and the terminal draws it in amber. Keeping notices
+separate means an older client never calls an ignored setting a startup error.
+Removing the old key file refreshes notices on the next settings read without
+reading its contents. An old remote without a valid server name still refuses
+session commands: ignoring the destination would run work on the wrong machine.
 
 **When a change takes effect.** Every key is live as today: read once a second and at each admitted turn. A pack's skills, connections and brand follow at once. Residents keep their own timing: `cwd` is fixed when the resident's session is made; its startup list is read when a conversation opens; a removed resident's running turn finishes. Nothing restarts because a pack changed.
 

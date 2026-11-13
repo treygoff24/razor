@@ -104,7 +104,7 @@ pub(crate) struct ChannelEntry {
     pub(crate) text: String,
 }
 
-/// A person-facing question, identified by the asking session's recorded Call.
+/// A person-facing question, identified by its recorded Call or Question.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Ask {
     pub(crate) id: (SessionId, EntryId),
@@ -113,6 +113,9 @@ pub(crate) struct Ask {
     /// When it was asked; 0 from a server before it said.
     #[serde(default)]
     pub(crate) at: Millis,
+    /// A recorded Question, whose waiting tool needs an explicit answer; fold-only.
+    #[serde(skip)]
+    pub(crate) waited: bool,
 }
 
 /// One peer operation; ids are native and the authenticated enrollment supplies the server.

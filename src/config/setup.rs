@@ -23,16 +23,8 @@ static SAVED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
 /// Sets each variable home/keys.toml lists that the environment lacks, so an exported value wins,
 /// and keeps the file's names for `environment`. Main calls it before any thread starts. An error
-/// never holds a value. A leftover key file, which Razor no longer reads, is named on standard
-/// error: doctor's terminal, serve's log.
+/// never holds a value.
 pub fn load(home: &Path) -> Result<(), Error> {
-    let old = home.join("key");
-    if old.exists() {
-        let old = old.display();
-        eprintln!(
-            "Key file: {old} is no longer read; save its key as OPENAI_API_KEY in keys.toml, name the model openai/<id>, then delete the file."
-        );
-    }
     let keys = saved(&home.join("keys.toml"))?.1;
     for (name, key) in keys
         .iter()

@@ -30,7 +30,7 @@ This downloads the latest release, checks its checksum, and installs it under `~
 curl -fsSL https://github.com/treygoff24/razor/releases/latest/download/install.sh | sh
 ```
 
-The first install starts setup in your terminal. Without a terminal, it prints the command to run later. If your shell cannot find `razor`, run the PATH command the installer prints. To update, run `razor update`, then `razor restart` when you are ready. Release installs also check when the server starts and about once a day, download newer releases in the background, and show a one-line restart notice in the terminal. Your running server keeps its old version until you restart. To turn off background updates, run `razor config set release_updates false`; manual updates still work. Source builds update from their checkout.
+The first install starts setup in your terminal. Without a terminal, it prints the command to run later. If your shell cannot find `razor`, run the PATH command the installer prints. To update, run `razor update`, then `razor restart` when you are ready. Release installs also check when the server starts and about once a day, download newer releases in the background, and show a one-line restart notice in the terminal. A release that needs you to do something first is not downloaded: the terminal and `razor doctor` say what to do. Your running server keeps its old version until you restart. To turn off background updates, run `razor config set release_updates false`; manual updates still work. Source builds update from their checkout.
 
 If you have v0.1.0, run the install command above once, then `razor restart`, to get `razor update` and background updates.
 

@@ -5,6 +5,7 @@
 scripts/install.sh [--link]
 /// Build the current platform's archive, checksum, and versioned installer in DIR.
 scripts/release.sh VERSION DIR BASE
+/// RAZOR_ACTION="MAJOR.MINOR.PATCH One sentence saying what to do." marks a release needing action.
 /// Install the release named in the script; environment overrides select a different one.
 /// On creating ~/.local/bin/razor in a terminal, run setup; otherwise print its next command.
 /// Preserve stdout's installed binary path for callers that capture it.
@@ -32,13 +33,28 @@ A source build without `--link` requests an unselected candidate from the common
 
 ## Updating an installed release
 
+A release never makes a settings file that loaded on the previous release refuse
+startup. A retired key loads ignored, with a notice, for at least one release.
+A change that code cannot carry over is marked as needing action and called out in
+the changelog's "To update" steps. Set `RAZOR_ACTION="0.7.0 One sentence saying what
+to do."` when running `scripts/release.sh`; it writes that literal line in `install.sh`.
+A mark is never dropped, only superseded. Its version is when the newest need began.
+For a second need, raise that version and retain each need in the sentence with its
+version: "Updating from before 0.7.0: … From before 0.9.0: …". This holds servers
+between the two needs too. The sentence is at most 200 characters on one line,
+without double quotes, backslashes, dollar signs or backticks.
+Razor never rewrites a person's settings during an update: it tells them what
+changed and what to do.
+
 ```rust
-/// Install a newer stable release from this install's source, selecting it only after success.
-/// Returns a sentence naming the ready version or saying the selected version is current.
+/// Install a newer stable release; a background caller supplies its notification settings.
+/// Background updates hold releases needing action; the person's update selects them.
 /// Source installations and concurrent updates are refused without changing the installation.
-pub async fn update_release() -> Result<String, Error>;
+pub async fn update_release(config: Option<&Config>) -> Result<String, Error>;
 /// The newer selected release awaiting this process's restart; absent on source installs.
 pub(crate) async fn release_ready() -> Option<String>;
+/// A pending action and update commands, read from the install root.
+pub(crate) async fn release_action() -> Option<String>;
 /// The selected release binary for starting a server; source installs keep their own binary.
 pub async fn selected_executable() -> std::io::Result<PathBuf>;
 ```
@@ -47,8 +63,19 @@ A release lives directly under the canonical data directory as `MAJOR.MINOR.PATC
 with `current/razor` present; source builds use git SHA folders or live outside this root.
 A release check reads the generated installer's stable `MAJOR.MINOR.PATCH` declaration.
 Only a version newer than both the running and selected versions is installed.
-The installed binary embeds the installer and runs it with selection enabled under one
-per-install lock. The downloaded installer supplies only the version and download URL.
+The installed binary embeds the installer and runs it under one per-install lock.
+The downloaded installer supplies only the version, download URL and optional action mark.
+Versions compare numerically as three unsigned numbers; leading zeroes, prereleases
+and build suffixes are not stable release versions. The action line must match
+`RAZOR_ACTION="…"` and begin with a stable version and a nonempty sentence. A malformed
+mark holds the release and shows its text as it is; it never permits automatic selection.
+When the newer of the running and selected versions predates the mark, a background
+check neither downloads nor selects the release. It saves the mark in one small
+`release-action` file under the install root. `current` stays unchanged: a restart,
+reboot or crash still starts the selected old version. A typed `razor update` downloads
+and selects the latest release and prints the action. After that successful install
+it removes the file. If another install has already met the mark, the next update
+check removes the file before contacting the release server; status hides it meanwhile.
 Installer improvements reach an existing installation one release later; downloaded shell
 code is never executed. Every release archive must install correctly with the previous
 release's installer.
@@ -56,7 +83,18 @@ Its checksum, dependency installation, atomic selection and retention stay autho
 A failed check or install leaves the running server and selected version available.
 The residents loop starts checks on its first wake and daily, using its existing clock.
 `release_updates = false` prevents future automatic checks; a running check finishes.
-The existing server status line carries `release_ready`; the terminal shows a restart notice.
+The server status line keeps `release_ready` for a selected version awaiting restart.
+An optional `release_action` carries the pending action's full sentence; older clients
+ignore it. The terminal announces a new sentence and retains it with the machine's
+name in the status pane; doctor reads the same sentence from the file, even offline.
+The notify command gets it when the file is first written or its sentence changes,
+without a session's environment. Daily checks and server restarts reuse the file
+without another notification. No release bundles accumulate while action is pending.
+
+Servers on 0.6.0 and earlier ignore the action mark and still select releases
+automatically, as does any server sharing their install folder. The hold protects
+updates only from releases containing this code; it cannot protect a 0.6.0 server's
+first update to one of those releases.
 
 The hard decision is selecting `current` while a server runs. The server already freezes its
 canonical install folder before starting its runtime, and the installer retains folders with

@@ -2,6 +2,7 @@
 Closing sessions stay closed, expired turns stay held, and unread deliveries retain old owners.
 The systemd unit preserves jobs; bridge cleanup survives SIGKILL with a wedged SDK."""
 from contextlib import suppress
+from dataclasses import replace
 import json
 import os
 import signal
@@ -262,6 +263,52 @@ with flow([turn(None, "bash", command="until [ -e go ]; do sleep 0.05; done", wa
     end = lambda es: [e for e in es if e["kind"] == "turn_end" and done in e["inputs"]]
     assert end(server.until(f, sid, end))[0].get("closed"), "the crash lost the closing intent"
     server.until(f, sid, lambda es: json.load(server.send(f, "GET", f"/sessions/{sid}/agent"))["state"] == "done")
+
+
+# A finished helper whose report waits for room behind its parent's 64 unread inputs has its row
+# dropped once its task unloads. When the report lands, and after a restart, the row comes from the
+# helper's own record: it keeps its branch, model and last activity and reads as awaiting merge, not
+# finished.
+root = "HELD_ROOT_19"
+commit = "touch {0} && git add {0} && git -c user.name=Flow -c user.email=flow@example.invalid commit -qm {0}"
+start = lambda name: [turn(root, "agent", action="start", name=name, brief="Commit, then finish."),
+                      turn(root, "bash", command=f"until [ -e go-{name} ]; do sleep 0.05; done")]
+replies = [*start("fir19"), turn(root, "Holding."), turn(root, "fir19 reported.")]
+replies += [part for name in ("fir19",) for part in (
+    turn(f"You are {name},", "bash", command=f"until [ -e \"$HOME/../cwd/{name}\" ]; do sleep 0.05; done; {commit.format(name)}"),
+    replace(turn(f"You are {name},", "agent", action="finish", status="finished", report=f"{name} committed."),
+            headers=(("x-codex-primary-window-minutes", "300"), ("x-codex-primary-used-percent", "5"))))]
+with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
+    f.base()
+    server.start(f)
+    parent = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+
+    def held(name):
+        """Starts `name`, which finishes behind 64 unread inputs; its session, once its row is dropped."""
+        server.post(f, f"/sessions/{parent}/input", {"text": f"{root}: start {name}."})
+        entries = server.until(f, parent, lambda es: any(f"go-{name}" in json.dumps(e) for e in es if e["kind"] == "call"))
+        sid = [e["session"] for e in entries if e["kind"] == "child"][-1]
+        for i in range(64):
+            server.post(f, f"/sessions/{parent}/input", {"text": f"{root}: hold {i}."})
+        (f.cwd / name).touch()
+        server.until(f, sid, lambda es: any(e["kind"] == "turn_end" for e in es))
+        # Its plan reading lives only in its stored row, which a publish drops once its task unloads.
+        server.wait(lambda: not json.load(server.send(f, "GET", f"/sessions/{sid}/agent"))["usage"], 10, "the row stayed")
+        return sid
+
+    def awaiting(sid):
+        """The row a terminal draws as awaiting merge, with the helper's own readings."""
+        row = server.wait(lambda: (r := server.agents(f).get(sid)) and r["report"] and r, 10, "no reported row")
+        assert (row["state"], row["branch"], row["settled"], row["model"]) == ("done", f"child/{sid}", None, "gpt-6.1-sol") and row["last_activity"], row
+
+    fir = held("fir19")
+    (f.cwd / "go-fir19").touch()
+    server.until(f, parent, lambda es: sum(e["kind"] == "turn_end" for e in es) == 2)
+    awaiting(fir)
+    assert server.listed(f, fir), "the helper awaiting merge left the agents list"
+    server.stop(f)
+    server.start(f)
+    awaiting(fir)
 
 
 # The unit `razor install` writes, run by the user's systemd: its stop signals the server alone, so

@@ -16,6 +16,8 @@ use tokio::fs;
 const SEEN: &str = "refs/razor/remote";
 /// Seconds a fetch or a push may take: about three times the slowest GitHub took on 2026-11-03.
 const NET: u64 = 60;
+/// Local git may be starved on a busy machine; bound each step without borrowing network time.
+const LOCAL: u64 = 120;
 
 /// Fetch, apply and push under the caller's lock. A raced push or a refusal on an older view
 /// retries against a new fetch, at most twice more. Without an operation this only refreshes.
@@ -54,17 +56,24 @@ where
                 Err(why) => return Err(refuse(&fill(&TEXT.settings, &[("why", why)]))),
             };
             let Some(op) = op.clone() else { break };
-            match (url, blocking(move || op()).await) {
-                (Some(_), Err(_)) if !fetch => {}
-                (Some(url), Ok(done)) => {
-                    last = push(dir, &url, &subject(&done), reference, who.as_ref())
-                        .await?
-                        .map(|()| done);
-                    if last.is_ok() {
-                        break;
-                    }
-                }
-                (_, done) => return done,
+            let Some(url) = url else {
+                return blocking(move || op()).await;
+            };
+            let base = rev(dir, "HEAD").await?;
+            let done = blocking(move || op()).await;
+            let refused;
+            (last, refused) = finish(
+                dir,
+                &url,
+                reference,
+                who.as_ref(),
+                base.as_deref(),
+                done,
+                &subject,
+            )
+            .await?;
+            if last.is_ok() || (refused && fetch) {
+                break;
             }
         }
         last
@@ -76,10 +85,16 @@ where
 /// Git in the task folder `dir` for at most `secs` seconds, with no hooks and no signing, and
 /// credentials sent with the first request instead of after its refusal.
 async fn git(dir: &Path, secs: u64, args: &[&str]) -> Result<String, Error> {
-    let fixed = "-c core.hooksPath=/dev/null -c commit.gpgSign=false -c http.proactiveAuth=basic";
+    let fixed = "--literal-pathspecs -c core.hooksPath=/dev/null -c commit.gpgSign=false -c http.proactiveAuth=basic";
     let args: Vec<&str> = fixed.split(' ').chain(args.iter().copied()).collect();
     let ran = crate::children::git::timed(dir, secs, &args).await;
-    ran.map_err(|e| refuse(&e.to_string()))
+    ran.map_err(|e| {
+        let mut why = e.to_string();
+        if why.contains(".lock") && why.contains("File exists") {
+            why += &TEXT.git_lock;
+        }
+        refuse(&why)
+    })
 }
 
 /// Git in `dir` running a command that commits, as `who`, the person, when known.
@@ -87,7 +102,7 @@ async fn authored(dir: &Path, who: Who<'_>, args: &[&str]) -> Result<String, Err
     let set = who.map(|(name, email)| [format!("user.name={name}"), format!("user.email={email}")]);
     let flags = set.iter().flatten().flat_map(|s| ["-c", s.as_str()]);
     let args: Vec<&str> = flags.chain(args.iter().copied()).collect();
-    git(dir, 10, &args).await
+    git(dir, LOCAL, &args).await
 }
 
 /// The person a shared change is committed as, their name and email.
@@ -96,7 +111,7 @@ type Who<'a> = Option<&'a (String, String)>;
 /// Git's `user.name` and `user.email` in the project's checkout at `root`, included files and
 /// all; none when either is unset.
 pub(super) async fn person(root: &Path) -> Option<(String, String)> {
-    let get = async |key| git(root, 10, &["config", key]).await.ok();
+    let get = async |key| git(root, LOCAL, &["config", key]).await.ok();
     let (name, email) = (get("user.name").await?, get("user.email").await?);
     (!name.is_empty() && !email.is_empty()).then_some((name, email))
 }
@@ -107,9 +122,8 @@ pub(super) async fn person(root: &Path) -> Option<(String, String)> {
 /// file, the latest counts.
 pub(super) async fn owners(root: &Path, dir: &Path) -> Owners {
     let me = person(root).await.map(|(_, email)| email);
-    let log =
-        "log --no-renames --diff-filter=A --name-only --format=%x00%an%x00%ae -- *ruling-*.md";
-    let log = git(dir, 10, &log.split(' ').collect::<Vec<_>>()).await;
+    let log = "--no-literal-pathspecs log --no-renames --diff-filter=A --name-only --format=%x00%an%x00%ae -- *ruling-*.md";
+    let log = git(dir, LOCAL, &log.split(' ').collect::<Vec<_>>()).await;
     let (mut owners, mut author) = (Owners::new(), None);
     for line in log.unwrap_or_default().lines() {
         if let Some((name, email)) = line.strip_prefix('\0').and_then(|l| l.split_once('\0')) {
@@ -124,7 +138,7 @@ pub(super) async fn owners(root: &Path, dir: &Path) -> Owners {
 
 /// Everyone who has committed to the shared folder `dir`, each by name and email.
 pub(super) async fn people(dir: &Path) -> Vec<(String, String)> {
-    let log = git(dir, 10, &["log", "--format=%an%x00%ae"]).await;
+    let log = git(dir, LOCAL, &["log", "--format=%an%x00%ae"]).await;
     let log = log.unwrap_or_default();
     let people: BTreeSet<_> = log.lines().filter_map(|l| l.split_once('\0')).collect();
     let owned = |(name, email): (&str, &str)| (name.to_owned(), email.to_owned());
@@ -133,7 +147,7 @@ pub(super) async fn people(dir: &Path) -> Vec<(String, String)> {
 
 /// The first commit of the shared folder `dir`, which every folder joined to its remote holds.
 pub(super) async fn first(dir: &Path) -> Option<String> {
-    let roots = git(dir, 10, &["rev-list", "--max-parents=0", "HEAD"])
+    let roots = git(dir, LOCAL, &["rev-list", "--max-parents=0", "HEAD"])
         .await
         .ok()?;
     roots.lines().last().map(str::to_owned)
@@ -161,7 +175,7 @@ pub(super) async fn fresh(
     reference: &str,
     who: Who<'_>,
 ) -> Result<(String, bool), Error> {
-    let url = git(root, 10, &["remote", "get-url", "--", name]).await;
+    let url = git(root, LOCAL, &["remote", "get-url", "--", name]).await;
     let url = url.unwrap_or_else(|_| name.to_owned());
     // A path, no `:` before any `/`, is the checkout's; git would read it from `dir`, where it runs.
     // One under `~` is git's to expand from the home folder.
@@ -171,67 +185,141 @@ pub(super) async fn fresh(
     if fs::metadata(dir.join(".git")).await.is_err() {
         let made = fs::create_dir_all(dir).await;
         made.map_err(other("making a tasks folder"))?;
-        git(dir, 10, &["init", "-q"]).await?;
+        git(dir, LOCAL, &["init", "-q"]).await?;
     }
-    let rev = async |name| {
-        git(dir, 10, &["rev-parse", "-q", "--verify", name])
-            .await
-            .ok()
+    let seen = if get { rev(dir, SEEN).await? } else { None };
+    let tree = if get {
+        rev(dir, "HEAD^{tree}").await?
+    } else {
+        None
     };
-    let seen = if get { rev(SEEN).await } else { None };
-    let tree = if get { rev("HEAD^{tree}").await } else { None };
     // The pattern matches nothing on a remote with no tasks yet, rather than failing.
     let refs = format!("+{reference}*:{SEEN}*");
     if get {
         let fetched = git(dir, NET, &["fetch", "-q", "--no-tags", &url, &refs]).await;
         fetched.map_err(|e| refuse(&fill(&TEXT.offline, &[("why", &e)])))?;
     }
-    if !git(dir, 10, &["status", "--porcelain"]).await?.is_empty() {
-        git(dir, 10, &["add", "-A"]).await?;
+    let status = git(dir, LOCAL, &["status", "--porcelain"]).await?;
+    if !status.is_empty() {
+        git(dir, LOCAL, &["add", "-A"]).await?;
         authored(dir, who, &["commit", "-q", "-m", "edited by hand"]).await?;
     }
-    match (rev(SEEN).await.is_some(), rev("HEAD").await.is_some()) {
+    match (
+        rev(dir, SEEN).await?.is_some(),
+        rev(dir, "HEAD").await?.is_some(),
+    ) {
         (false, _) => Ok(()),
         // Nothing here yet, not even an untracked file, so taking the remote's loses nothing.
-        (true, false) => git(dir, 10, &["reset", "-q", "--hard", SEEN])
+        (true, false) => git(dir, LOCAL, &["reset", "-q", "--hard", SEEN])
             .await
             .map(|_| ()),
-        (true, true) if authored(dir, who, &["rebase", "-q", SEEN]).await.is_ok() => Ok(()),
-        (true, true) => {
-            let _ = git(dir, 10, &["rebase", "--abort"]).await;
-            Err(refuse(&fill(&TEXT.conflict, &[("dir", &dir.display())])))
-        }
+        (true, true) => match authored(dir, who, &["rebase", "-q", SEEN]).await {
+            Ok(_) => Ok(()),
+            Err(why) => {
+                let _ = git(dir, LOCAL, &["rebase", "--abort"]).await;
+                Err(unfinished(dir, &why, &TEXT.rebase))
+            }
+        },
     }?;
-    let now = if get { rev(SEEN).await } else { None };
-    let changed = now.is_some() && now != seen && tree != rev("HEAD^{tree}").await;
+    let now = if get { rev(dir, SEEN).await? } else { None };
+    let changed = now.is_some() && now != seen && tree != rev(dir, "HEAD^{tree}").await?;
     Ok((url, changed))
 }
 
-/// Commits the change just applied with `subject` and pushes it. A failed push drops the commit
-/// again, leaving the folder as the remote had it; when the remote moved meanwhile, the answer is
-/// git's words inside `Ok`, so the write may run again from a fetch, and otherwise it is the
-/// remote out of reach. When a file the commit changed was edited meanwhile, the commit stays,
-/// nothing is pushed, and the answer is the refusal that says what to do.
-pub(super) async fn push(
+/// Applies no further edits after a refusal. Failed edits or commits restore the changed paths;
+/// a completed commit is undone against the captured base, with git refusing later outside edits.
+async fn finish(
     dir: &Path,
     url: &str,
-    subject: &str,
     reference: &str,
     who: Who<'_>,
-) -> Result<Result<(), Error>, Error> {
-    git(dir, 10, &["add", "-A"]).await?;
-    authored(dir, who, &["commit", "-q", "--allow-empty", "-m", subject]).await?;
-    let pushed = git(dir, NET, &["push", "-q", url, &format!("HEAD:{reference}")]).await;
-    let Err(e) = pushed else { return Ok(Ok(())) };
-    let kept = git(dir, 10, &["reset", "-q", "--keep", "HEAD~1"]).await;
-    kept.map_err(|_| refuse(&fill(&TEXT.conflict, &[("dir", &dir.display())])))?;
-    // Git's marks for a push that lost to another: the remote holds commits this folder lacks,
-    // or took them while this push was arriving.
-    let lost = e.to_string();
-    match lost.contains("[rejected]") || lost.contains("cannot lock ref") {
-        true => Ok(Err(e)),
-        false => Err(refuse(&fill(&TEXT.offline, &[("why", &e)]))),
+    base: Option<&str>,
+    done: Answer,
+    subject: &impl Fn(&Value) -> String,
+) -> Result<(Answer, bool), Error> {
+    let status = git(
+        dir,
+        LOCAL,
+        &["status", "--porcelain", "-z", "--no-renames", "-uall"],
+    )
+    .await
+    .map_err(|why| unfinished(dir, &why, &TEXT.rollback))?;
+    let refused = done.is_err();
+    let mut pushing = false;
+    let result = async {
+        let done = done?;
+        git(dir, LOCAL, &["add", "-A"]).await?;
+        let subject = subject(&done);
+        authored(dir, who, &["commit", "-q", "--allow-empty", "-m", &subject]).await?;
+        pushing = true;
+        git(dir, NET, &["push", "-q", url, &format!("HEAD:{reference}")]).await?;
+        Ok(done)
     }
+    .await;
+    let Err(e) = result else {
+        return Ok((result, refused));
+    };
+    let why = e.to_string();
+    let unknown = pushing && why.starts_with(crate::children::git::DEADLINE);
+    let why = if unknown {
+        fill(&TEXT.push_unknown, &[("why", &e)])
+    } else {
+        why
+    };
+    rollback(dir, base, &status).await.map_err(|rollback| {
+        unfinished(dir, &refuse(&format!("{why}; {rollback}")), &TEXT.rollback)
+    })?;
+    if refused || pushing && (why.contains("[rejected]") || why.contains("cannot lock ref")) {
+        return Ok((Err(e), refused));
+    }
+    Err(refuse(&if unknown {
+        why
+    } else {
+        fill(&TEXT.not_written, &[("why", &e)])
+    }))
+}
+
+async fn rev(dir: &Path, name: &str) -> Result<Option<String>, Error> {
+    crate::children::git::revision(dir, LOCAL, name)
+        .await
+        .map_err(|why| refuse(&why.to_string()))
+}
+
+/// Restore the pre-write revision, including an unborn branch. No whole-tree reset for edits
+/// that never committed; status names every changed path, with renames split into two entries.
+async fn rollback(dir: &Path, base: Option<&str>, status: &str) -> Result<(), Error> {
+    let head = rev(dir, "HEAD").await?;
+    if let Some(base) = base.filter(|base| head.as_deref() != Some(base)) {
+        git(dir, LOCAL, &["reset", "-q", "--keep", base]).await?;
+        return Ok(());
+    }
+    if status.len() >= 64 * 1024 || (!status.is_empty() && !status.ends_with('\0')) {
+        return Err(refuse(&TEXT.paths_incomplete));
+    }
+    for entry in status.split_terminator('\0') {
+        let path = &entry[3..];
+        if let Some(base) = base.filter(|_| !entry.starts_with("??")) {
+            git(dir, LOCAL, &["restore", "-s", base, "-SW", "--", path]).await?;
+        } else {
+            // An unborn store whose commit finished keeps git's check for later outside edits.
+            let remove = if head.as_deref() == base { "-f" } else { "-q" };
+            let args = ["rm", "--ignore-unmatch", remove, "--", path];
+            git(dir, LOCAL, &args).await?;
+            match fs::remove_file(dir.join(path)).await {
+                Ok(()) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(other("removing a refused write")(e)),
+            }
+        }
+    }
+    if let Some(head) = head.filter(|_| base.is_none()) {
+        git(dir, LOCAL, &["update-ref", "-d", "HEAD", &head]).await?;
+    }
+    Ok(())
+}
+
+fn unfinished(dir: &Path, why: &Error, sentence: &str) -> Error {
+    refuse(&fill(sentence, &[("dir", &dir.display()), ("why", why)]))
 }
 
 /// Whether the last fetch is over 30 seconds old.

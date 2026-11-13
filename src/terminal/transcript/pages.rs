@@ -145,10 +145,10 @@ fn paged(
     if let Some(t) = app.transcripts.get_mut(&id) {
         t.read_past_metadata();
         if let Direction::At(at, card) = direction {
-            (t.wanted, t.held) = (Some(Direction::Older), Some((at, 0)));
             if card {
-                t.toggle(at);
+                t.open(at);
             }
+            (t.wanted, t.held) = (Some(Direction::Older), Some((at, 0)));
         }
     }
 }
@@ -164,10 +164,12 @@ pub(in crate::terminal) fn jump(
         return;
     };
     match t.entries.contains_key(&id) {
-        true if card => t.toggle(id),
         true => {
             let after = t.entries.range(id..).filter(|(_, e)| item(e)).count();
             t.mounted = t.mounted.max(after).min(ITEMS);
+            if card {
+                t.open(id);
+            }
             (t.held, t.wanted, t.dirty) = (Some((id, 0)), Some(Direction::Older), true);
         }
         false => {

@@ -55,15 +55,19 @@ with flow([reply] * 4 + [done()], model="Claude Fable", config='[models.fable]\n
     assert not any(e["kind"] == "rebuild" for e in entries), entries
     with Terminal(f, "--resume", session) as t:
         t.shown("FAMILY_28")
-        t.send("/status\r")
+        t.send("\x14")
         t.shown("served", served)
         t.send("\x1b")
-        t.shown("FAMILY_28")
+        t.until(lambda t: "STATUS" not in t.text())
         t.send("/model\r")
-        t.shown("▸ Fable", "Opus")
+        t.shown("▸ Fable", "Opus", "the model you pick")  # read, so it takes keys
         assert served not in t.text(), t.text()
+        # Over the model picker Ctrl-T leaves it the keys: j still moves its mark.
+        t.send("\x14j")
+        t.until(lambda t: "▸ Opus" in t.text())
+        assert "STATUS" not in t.text(), t.text()
         t.send("\x1b")
-        t.until(lambda t: "▸ Fable" not in t.text())
+        t.until(lambda t: "▸ Opus" not in t.text())
         t.send("/model GPT 6.1 Sol\rTYPED_FAMILY_28\r")
         t.shown("flow done")
     entries = list(f.record(session))

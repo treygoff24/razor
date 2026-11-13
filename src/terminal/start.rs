@@ -144,7 +144,7 @@ pub fn open(app: &mut App) {
             }
         });
     }
-    (app.start, app.list.keys) = (Some(start), false);
+    (app.start, app.keys) = (Some(start), super::keys::Pane::Conversation);
 }
 
 /// Takes every key while open: typing filters, Up and Down choose the project, Left and Right

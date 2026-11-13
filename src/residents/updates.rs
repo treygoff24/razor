@@ -1,6 +1,9 @@
 //! Installed release maintenance, using the generated installer's selection and retention.
 use super::{Error, other};
-use crate::{config::INSTALL_DIR, shell::Group};
+use crate::{
+    config::{Config, INSTALL_DIR},
+    shell::Group,
+};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -53,6 +56,28 @@ pub(crate) async fn release_ready() -> Option<String> {
     (version(&tag)? > version(&running)?).then_some(tag)
 }
 
+fn action(mark: &str) -> Option<([u64; 3], &str)> {
+    let (since, sentence) = mark.split_once(' ')?;
+    (!sentence.trim().is_empty()).then_some((version(since)?, sentence))
+}
+
+fn held(mark: &str) -> String {
+    let sentence = action(mark).map_or(mark, |(_, sentence)| sentence);
+    format!(
+        "Razor needs your action: {sentence} Run razor update to install the latest release, then razor restart."
+    )
+}
+
+/// A pending action, retained offline and hidden once the selected version meets its mark.
+pub(crate) async fn release_action() -> Option<String> {
+    let (root, running) = installation().await?;
+    let floor = version(&running).max(selected(&root).await.as_deref().and_then(version));
+    let mark = fs::read_to_string(root.join("release-action")).await.ok()?;
+    action(&mark)
+        .is_none_or(|(since, _)| Some(since) > floor)
+        .then(|| held(&mark))
+}
+
 /// The selected release binary when starting a server; source installs keep their own binary.
 pub async fn selected_executable() -> io::Result<PathBuf> {
     installation()
@@ -62,10 +87,12 @@ pub async fn selected_executable() -> io::Result<PathBuf> {
         })
 }
 
-/// Install a newer stable release through its complete generated installer, never restarting.
+/// Install a newer stable release through the embedded installer, never restarting.
 /// Selection and retention belong to the installer; concurrent updates are refused.
-pub async fn update_release() -> Result<String, Error> {
-    tokio::time::timeout(Duration::from_secs(600), update())
+/// A background caller supplies its notification settings. None selects a release
+/// at the person's request.
+pub async fn update_release(config: Option<&Config>) -> Result<String, Error> {
+    tokio::time::timeout(Duration::from_secs(600), update(config))
         .await
         .map_err(|_| {
             Error::Refused(
@@ -74,7 +101,7 @@ pub async fn update_release() -> Result<String, Error> {
         })?
 }
 
-async fn update() -> Result<String, Error> {
+async fn update(config: Option<&Config>) -> Result<String, Error> {
     let (root, running) = installation().await.ok_or_else(|| Error::Refused(
         "This is a source installation; update from its checkout or install a published release.".into()
     ))?;
@@ -92,20 +119,48 @@ async fn update() -> Result<String, Error> {
             "Another release update is running; try razor update again when it finishes.".into(),
         )
     })?;
-    let (latest, base) = latest().await?;
+    let pending = root.join("release-action");
+    if release_action().await.is_none() {
+        let _ = fs::remove_file(&pending).await;
+    }
+    let (latest, base, mark) = latest().await?;
     let selected = selected(&root).await;
-    if version(&latest) <= version(&running).max(selected.as_deref().and_then(version)) {
+    let floor = version(&running).max(selected.as_deref().and_then(version));
+    if version(&latest) <= floor {
         let installed = selected.as_deref().unwrap_or(&running);
         return Ok(format!(
             "Razor {installed}, the latest release, is installed; run razor restart if your server started before it."
         ));
     }
+    let needed = mark
+        .as_deref()
+        .filter(|mark| action(mark).is_none_or(|(since, _)| Some(since) > floor));
+    if let Some(mark) = needed
+        && let Some(config) = config
+    {
+        let notice = held(mark);
+        let previous = fs::read_to_string(&pending).await.ok();
+        fs::write(&pending, mark)
+            .await
+            .map_err(other("saving the release action"))?;
+        if previous.as_deref().map(held).as_ref() != Some(&notice) {
+            super::notify(config, notice.clone(), Default::default());
+        }
+        return Ok(notice);
+    }
     install(&latest, &base).await?;
+    let _ = fs::remove_file(&pending).await;
+    if let Some(mark) = needed {
+        return Ok(format!(
+            "Razor {latest} is ready. {}",
+            action(mark).map_or(mark, |(_, sentence)| sentence)
+        ));
+    }
     // The installer prints the restart instruction once on stderr.
     Ok(format!("Razor {latest} is ready."))
 }
 
-async fn latest() -> Result<(String, String), Error> {
+async fn latest() -> Result<(String, String, Option<String>), Error> {
     let base = std::env::var("RAZOR_RELEASE_URL")
         .unwrap_or_else(|_| "https://github.com/treygoff24/razor/releases/latest/download".into());
     let client = reqwest::Client::builder()
@@ -140,10 +195,18 @@ async fn latest() -> Result<(String, String), Error> {
         text.lines()
             .find_map(|line| line.strip_prefix(&prefix)?.strip_suffix('}'))
     };
+    let mark = text.lines().find(|line| line.starts_with("RAZOR_ACTION="));
+    let mark = mark.map(|line| {
+        line.strip_prefix("RAZOR_ACTION=\"")
+            .and_then(|s| s.strip_suffix('"'))
+            .filter(|s| action(s).is_some())
+            .unwrap_or(line)
+            .to_string()
+    });
     declared("RAZOR_VERSION")
         .filter(|tag| version(tag).is_some())
         .zip(declared("RAZOR_BASE_URL").filter(|base| base.starts_with("https://") || base.starts_with("http://")))
-        .map(|(version, base)| (version.to_string(), base.to_string()))
+        .map(|(version, base)| (version.to_string(), base.to_string(), mark))
         .ok_or_else(|| Error::Refused(
             "The release installer has no stable version or download URL; reinstall from the release page.".into()
         ))

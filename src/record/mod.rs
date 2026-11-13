@@ -10,14 +10,16 @@ mod search;
 mod skills;
 mod summary;
 mod text;
+mod transcript;
 pub(crate) use calls::{action, ask, target};
 pub(crate) use cursor::Summaries;
 pub(crate) use digest::digest;
 pub(crate) use reply::{Hold, reply, shown};
 pub use search::backfill;
-pub(crate) use search::search;
+pub(crate) use search::{SEARCH_WORDS, search, words as search_words};
 pub(crate) use summary::{ChildSummary, Meeting, MeetingState, Summary};
 pub(crate) use text::{call_line, calls_left_out, handover, heard, interrupted, length};
+pub(crate) use transcript::TranscriptSearch;
 
 use crate::protocol::{
     Body, Child, ChildEvent, Entry, EntryId, JobEvent, Millis, ModelSettings, Native, SessionId,
@@ -323,6 +325,7 @@ impl Record {
             .await
             .map_err(io("replaying the record"))?;
         Ok(Replay {
+            line: start as u64,
             reader: BufReader::with_capacity(
                 64 * 1024,
                 file.take(self.offsets[end] - self.offsets[start]),
@@ -337,6 +340,7 @@ impl Record {
 
 /// A fixed byte range, streamed on the caller's task with a 64 KiB reader and one entry buffer.
 pub(crate) struct Replay {
+    line: u64,
     reader: BufReader<Take<File>>,
 }
 
@@ -347,6 +351,7 @@ impl Replay {
         match self.reader.read_line(&mut line).await {
             Ok(0) => None,
             Ok(_) => {
+                self.line += 1;
                 line.pop();
                 Some(Ok(line))
             }
@@ -366,14 +371,16 @@ async fn open(dir: &Path, session: &SessionId) -> Result<File, Error> {
 
 /// List root sessions newest first, reading at most each one's first line and stopping at limit
 /// matches: id, folder, thread, stored name and when its record last changed; with `resident`,
-/// only that resident's threads; fresh runs only when `jobs`. The scan is one blocking task, not
-/// three pool handoffs per file, and once started runs to its end even if the caller drops it.
+/// only that resident's threads; fresh runs only when `jobs`. With `skip_dreams`, unnamed roots
+/// other than resident homes and threads are skipped before the early stop. One blocking task,
+/// not three pool handoffs per file; once started runs to its end even if the caller drops it.
 pub(crate) async fn list(
     home: &Path,
     cwd: Option<&Path>,
     resident: Option<&SessionId>,
     jobs: bool,
     limit: usize,
+    skip_dreams: bool,
 ) -> Result<Vec<(SessionId, PathBuf, Option<Thread>, String, SystemTime)>, Error> {
     let dir = home.join("sessions");
     let (cwd, resident) = (cwd.map(PathBuf::from), resident.cloned());
@@ -409,6 +416,12 @@ pub(crate) async fn list(
                 && cwd.as_deref().is_none_or(|cwd| cwd == started)
                 && resident.is_none_or(|r| thread.as_ref().is_some_and(|t| t.resident == *r))
                 && (jobs || thread.as_ref().is_none_or(|t| t.job.is_none()))
+                // A resident's home is told by its id: it is its resident's name, which begins with
+                // a lowercase letter, where a generated id begins with a digit (`SessionId`).
+                && (!skip_dreams
+                    || !name.is_empty()
+                    || thread.is_some()
+                    || id.as_str().starts_with(|c: char| c.is_ascii_lowercase()))
             {
                 found.push((id, started, thread.map(|t| *t), name, changed));
             }
@@ -503,7 +516,7 @@ impl fmt::Display for Error {
             Self::Exists(id) => write!(f, "A session {id} exists already."),
             Self::Damaged { session, line, why } => write!(
                 f,
-                "The record of session {session} is damaged at line {line} ({why}); it was not opened."
+                "The record of session {session} is damaged at line {line} ({why})."
             ),
             Self::NoEntry(id) => write!(f, "The record has no entry {}.", id.0),
             Self::Io { doing, source } => write!(f, "Razor failed {doing}: {source}."),

@@ -1,12 +1,11 @@
 //! Clicks, drags and the wheel, and what a drawn target does when it is clicked or chosen with
 //! Enter: a click target is its drawn area and action, and the last drawn wins.
-use super::keys::{CUT, focus, fresh, leaving, remove_image};
+use super::keys::{CUT, Pane, focus, fresh, leaving, remove_image};
 use super::transcript::select;
 use super::{App, Transcript, bindings, clipboard, composer, mcp, picker, view::Action};
 use crate::protocol::{Answer, Body, EntryId, SessionId, now};
 use composer::{completion, emoji, shortcodes};
 use crossterm::event::{KeyModifiers as Mods, MouseButton, MouseEvent, MouseEventKind};
-use reqwest::Method;
 
 /// One mouse event. An open panel takes its own clicks, the new-agent chooser only its rows', and
 /// any other modal surface none.
@@ -18,10 +17,36 @@ pub fn mouse(app: &mut App, m: MouseEvent, modal: bool) {
         .rev()
         .find(|(r, _)| r.contains(at))
         .map(|(_, a)| a.clone());
+    if let MouseEventKind::ScrollUp | MouseEventKind::ScrollDown = m.kind
+        && (app.panel.is_some() || !modal)
+    {
+        let down = m.kind == MouseEventKind::ScrollDown;
+        let step = if down { 3 } else { -3 };
+        app.selection = None;
+        if let Some(scroll) = &mut app.list.overview {
+            *scroll = scroll.saturating_add_signed(step);
+        } else if app.list.area.is_some_and(|r| r.contains(at)) {
+            app.list.scroll = app.list.scroll.saturating_add_signed(step);
+        } else if app.status_area.is_some_and(|r| r.contains(at)) {
+            app.status_scroll = app.status_scroll.saturating_add_signed(step);
+        } else if app.panel.is_some() {
+            app.panel_scroll = app.panel_scroll.saturating_add_signed(step);
+        } else if let Some(t) = wheeled(app, at) {
+            // One row per event: a terminal sends several for each notch of the wheel.
+            match down {
+                true => t.page_down(1),
+                false => t.page_up(1),
+            }
+        }
+        return;
+    }
     if app.panel.is_some() {
         if m.kind == MouseEventKind::Down(MouseButton::Left) {
             match action {
-                Some(a @ Action::Task(_)) => act(app, a),
+                Some(
+                    a
+                    @ (Action::Task(_) | Action::Delivery(..) | Action::Inbox(_) | Action::Status),
+                ) => act(app, a),
                 other => mcp::click(app, other),
             }
         }
@@ -34,25 +59,6 @@ pub fn mouse(app: &mut App, m: MouseEvent, modal: bool) {
         return;
     }
     if modal {
-        return;
-    }
-    if let MouseEventKind::ScrollUp | MouseEventKind::ScrollDown = m.kind {
-        let down = m.kind == MouseEventKind::ScrollDown;
-        let step = if down { 3 } else { -3 };
-        app.selection = None;
-        if let Some(scroll) = &mut app.list.overview {
-            *scroll = scroll.saturating_add_signed(step);
-        } else if app.list.area.is_some_and(|r| r.contains(at)) {
-            app.list.scroll = app.list.scroll.saturating_add_signed(step);
-        } else if app.status_area.is_some_and(|r| r.contains(at)) {
-            app.status_scroll = app.status_scroll.saturating_add_signed(step);
-        } else if let Some(t) = wheeled(app, at) {
-            // One row per event: a terminal sends several for each notch of the wheel.
-            match down {
-                true => t.page_down(1),
-                false => t.page_up(1),
-            }
-        }
         return;
     }
     let cell = (m.column, m.row);
@@ -68,7 +74,7 @@ pub fn mouse(app: &mut App, m: MouseEvent, modal: bool) {
         return;
     }
     if app.list.overview.is_none() && draft(app, m, cell) {
-        app.list.keys = false;
+        app.keys = Pane::Conversation;
         return;
     }
     match m.kind {
@@ -162,11 +168,14 @@ pub(super) fn act(app: &mut App, action: Action) {
         | Action::Thread(_)) => super::agents::press(app, a),
         Action::Choose(server, cwd) => super::start::choose(app, Some((server, cwd))),
         Action::Inbox(offset) => {
+            if app.keys != Pane::Status {
+                super::status::focus(app);
+            }
             (app.inbox, app.pane_open, app.to_inbox) = (offset, Some(true), true)
         }
         Action::Tasks(offset) => app.tasks.offset = offset,
         Action::Task(id) => super::tasks::detail(app, id),
-        Action::Delivery(session, entry, _) => delivery(app, session, entry),
+        Action::Delivery(session, entry, _) => super::reader::open(app, session, entry),
         Action::Strip => app.strip = !app.strip,
         Action::Complete(n) => completion::click(app, n),
         Action::Emoji => emoji::open(app, shortcodes::typed(app)),
@@ -220,39 +229,6 @@ pub(super) fn reply(app: &App, session: &SessionId, entry: EntryId) -> Option<St
     match &entry.body {
         Body::Text { text } | Body::Thinking { text } => Some(text.clone()),
         _ => None,
-    }
-}
-
-// A delivery opens as a link does, its address, its path or a note's line copied; the copy
-// starting marks it read.
-fn delivery(app: &mut App, session: SessionId, entry: EntryId) {
-    if app.copying {
-        return app.say("A clipboard write is pending; wait before opening another delivery.");
-    }
-    let Some(delivery) = app
-        .delivered
-        .iter()
-        .find(|d| (&d.session, d.entry) == (&session, entry))
-    else {
-        return;
-    };
-    let Some(target) = delivery
-        .url
-        .clone()
-        .or_else(|| delivery.path.as_ref().map(|p| p.display().to_string()))
-        // A note, with neither file nor url, opens to its line as a link does to its address.
-        .or_else(|| delivery.file.is_none().then(|| delivery.line.clone()))
-    else {
-        return app.say("The delivery has no opening path; reconnect to its owning server.");
-    };
-    let read = delivery.read;
-    clipboard::copy(app, Some(target));
-    if !read && app.copying {
-        let path = format!("v1/sessions/{session}/deliveries/{}/read", entry.0);
-        app.write(|api| async move {
-            let result = api.json(Method::PUT, &path, None).await;
-            move |app: &mut App| result.err().iter().for_each(|e| app.say(&e.to_string()))
-        });
     }
 }
 

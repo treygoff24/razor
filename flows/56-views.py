@@ -205,13 +205,14 @@ with mcp.serve() as external, flow(replies, config=voice + f'[mcp.ask56]\nurl = 
                       "p=sys.argv[1]; v=json.load(open(p)); v['views'][0]['groups'][0]['name']='Edited'\n"
                       "open(p,'w').write(json.dumps(v))\n")
     beta = replace(beta, env={**beta.env, "EDITOR": f"{os.sys.executable} {editor}"})
-    # A resident added now is listed only once its home is made, within a minute.
+    # A resident added to the running server's settings is listed once its home is made, at once.
     (a / "config.toml").write_text((a / "config.toml").read_text() + f"[residents.ember56]\ncwd = {json.dumps(str(f.cwd))}\n")
     assert "ember56" not in status(a).readline().decode() or (a / "sessions/ember56").exists(), "a resident without a home is listed"
+    wait(lambda: "ember56" in server.agents(a), 5, "the added resident was not listed within 5 s")
     with Terminal(beta, "--resume", here, columns=160, rows=50) as t:
         t.shown("beta-visible")
         t.send("\x1bOQ")
-        t.shown("AGENTS", "ATLAS 2", "INNER56", names[unclaimed], "servers · all 2 answer", "1 RESIDENT", timeout=90)
+        t.shown("AGENTS", "ATLAS 2", "INNER56", names[unclaimed], "servers · all 2 answer", "1 RESIDENT")
         assert "Later" not in t.text(), t.text()
         t.resize(50, 50)  # The list alone: below 80 columns it takes the whole width.
         t.click("ATLAS 2")

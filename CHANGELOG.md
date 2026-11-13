@@ -2,6 +2,39 @@
 
 What changed in each Razor release. [Configuration](docs/configuration.md) and the other pages in [docs](docs/README.md) describe each feature in full.
 
+## 0.7.0 (13 November 2026)
+
+### New
+
+- In the terminal, `/search <words>` finds words anywhere in the conversation you are addressing, its tool calls and their results included, and Enter opens that place in the transcript ([Quickstart](docs/quickstart.md#6-quit-the-terminal-app-come-back-or-work-without-it)).
+- The terminal reads what agents deliver: in the status pane's inbox, Enter opens a delivered file in the conversation, Markdown formatted and other text as written, up to 256 KiB, and `y` copies its path or link. HTML, PDF and other files still open in the phone or Mac app ([Deliveries](docs/configuration.md#deliveries)).
+- In the terminal, the prefix and `h`/`l` or Tab/Shift-Tab move the keys among the agents list, the conversation and the status pane, as plain Tab and Shift-Tab do from the list or an open panel; a cyan edge marks the part that has them ([Moving between agents](docs/configuration.md#moving-between-agents)).
+- **For notify and ask programs:** they get the sender's session id, name and project in `RAZOR_SESSION`, `RAZOR_NAME` and `RAZOR_PROJECT`, and a question's entry number in `RAZOR_ASK`, so a script can say who wrote and answer the question later ([Configuration](docs/configuration.md#notifications)).
+- **For scripts and apps reading a session:** `GET /v1/sessions/<id>/search?q=<words>` searches that session's whole transcript, newest match first, at most 50 rows ([Using Razor from scripts](docs/scripting.md#the-local-api)).
+
+### Changed
+
+- Background updates keep your current version when a release needs your action; the terminal, `razor doctor` and a notification explain what to do before you run `razor update` and `razor restart`. Servers on 0.6.0 and earlier, or any server sharing their install folder, still select the next release automatically ([Update Razor](docs/quickstart.md#update-razor)).
+- The guard that refused deleting files a session did not create is now off unless you turn it on with `razor config set guards.delete true`; installs that never set it take the new default. When on, it accepts `~/` paths and its refusals say what you can do ([Security](docs/security.md#what-agents-can-run)).
+- `/status` is gone: Ctrl-T or the status chip opens the status pane and gives it the keys at the inbox, Escape gives them back, and `-` or a click on STATUS sets whether the pane stays open after the keys leave. Clicking a delivery opens it instead of copying its path.
+- Releases ship agent-browser 0.43.0, its latest, in place of 0.42.0: a snapshot gives a hint (an icon, a test id, the row's text) for a control with no name or one it shares, large pages snapshot faster, and a command on a tab that closed fails at once instead of waiting out its timeout.
+- Releases ship Cua Driver 0.49.1, Cua's newest, in place of 0.47.18: a refusal's text ends with what to try instead, reading a hidden Chrome or Electron window on a Mac shows the page as it is now, and on Linux it starts on Ubuntu 20.04 and captures a rootless Xwayland desktop. Its experimental picture-in-picture preview and the `escalate_session` and `get_session_state` tools are gone.
+- **For scripts and apps reading the status stream:** the `agents` line adds `notices`, settings notices that stop nothing, so its `config` holds only errors that keep agents from starting; a `server` line may add `release_action`, saying what to do for a release that needs you ([Using Razor from scripts](docs/scripting.md#the-local-api)).
+- **For scripts answering questions:** a question that cleared because you wrote to its session or closed it leaves its row's `asks`, and answering it is refused.
+- **For scripts listing sessions:** `GET /v1/sessions` takes `skip_dreams=true` to leave out the nightly dream sessions, as `razor --continue` does; older servers ignore it.
+
+### Fixed
+
+- Failed shared task and memory writes are undone locally, so retrying a refused commit no longer duplicates comments or carries in a failed claim.
+- Slow task and memory writes give git time to release its locks, so a timeout no longer blocks every later write ([Git locks](docs/troubleshooting.md#git-locks)).
+- Retired settings and avatar pictures that could not load show as notices in the terminal's status pane, the server log and `razor doctor`, apart from errors that keep agents from starting. The phone and Mac apps, which do not show notices yet, no longer report them as such errors ([Configuration](docs/configuration.md#when-a-change-applies)).
+- A question an agent asked you clears when you write to its session or close the session yourself; a session that closes on its own keeps its question, and MCP and sign-in questions still wait for an answer. Words handed over from a voice call clear it too and show as your message, without the iPhone's "You answered" row ([Concepts](docs/concepts.md#questions-notes-and-deliveries)).
+- Stopping a GPT reply, or one from a model on a provider you configured, keeps the words it had written: they stay in the transcript and the record, and the agent sees them on its next turn.
+- `razor --continue` no longer reopens the nightly dream session.
+- A change to a resident's schedule or heartbeat, or adding a resident, takes effect within about a second instead of taking up to a minute.
+- A finished helper whose report waited for its parent, or whose server restarted before the parent read it, keeps its branch, model and last activity in the agents list instead of showing them blank.
+- Claude now receives an MCP tool's text alongside its structured data, so instructions in the text are no longer lost.
+
 ## 0.6.0 (12 November 2026)
 
 ### New

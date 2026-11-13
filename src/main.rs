@@ -161,7 +161,7 @@ const COMMANDS: &[&str] = &[
     "serve                      run the server in this terminal",
     "stop                       stop this home's server",
     "restart                    stop and start this home's server",
-    "update                     install the latest release; restart when ready",
+    "update                     download and select the latest release; restart to use it; prints any action needed",
     "devices                    list paired devices\ndevices add <name>         show a code here; wait for the other device\ndevices join <name>        paste a code on the joining device\ndevices add <name> --key <key>  enroll a program on this machine with a key\ndevices remove <name>      remove a paired device",
     "mcp list                   list MCP servers\nmcp add <name> --scope <global|project|private> --config '<JSON>'\nmcp remove|enable|disable <name> --scope <global|project|private>\nmcp reconnect|sign-in|sign-out <name>  reconnect or change sign-in\nmcp import <file> --scope <global|project|private>  preview definitions; apply with /mcp import in the app\nmcp complete '<redirect address>'  finish a browser sign-in\n  --scope defaults to private",
     "config get <key>           print an effective setting and its source\nconfig set <key> <value> [--project|--local]  save a setting\nconfig unset <key> [--project|--local]  remove an override\nconfig path [--project|--local]  print the settings file\n  default: your own file; --project: shared project; --local: private project\nconfig get|set|unset voice.<field>  read or change a voice setting this home's server keeps",
@@ -344,7 +344,7 @@ async fn run(home: PathBuf, words: Vec<String>) -> Result<ExitCode, Error> {
         }
         Some("serve") => api::serve(home).await?,
         Some("update") => tokio::select! {
-            sentence = residents::update_release() => println!("{}", sentence?),
+            sentence = residents::update_release(None) => println!("{}", sentence?),
             _ = tokio::signal::ctrl_c() => return Ok(ExitCode::from(130)),
         },
         Some("setup") if words.len() == 1 || words[1..] == ["--console"] => {

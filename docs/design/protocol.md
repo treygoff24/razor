@@ -223,7 +223,7 @@ The choice is between one event per record entry and a separate projection made 
 - **The choice: entries plus three live kinds.**
   - Writer: the controller publishes exactly the line it appended, serialized once, and only three kinds are added.
   - Reader: one schema plus three kinds, the same lines the record file holds.
-  - Crash, disconnect or overrun: one rule, attach from the cursor. It replays the record exactly and re-sends the state in `attached`; only deltas are lost, and each is superseded by its `Text` entry.
+  - Crash, disconnect or overrun: one rule, attach from the cursor. It replays the record exactly and re-sends the state in `attached`; only live lines are lost. On every route, a reply delta is superseded by its `Text` entry ([response retention](responses.md#data-flow)).
   - Later changes: a new entry kind reaches every client with no API change.
   - Cost: the record's line format becomes public API, versioned under `/v1`. Accepted, because the record's shape changes rarely and on purpose.
 

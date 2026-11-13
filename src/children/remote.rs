@@ -609,7 +609,8 @@ pub(crate) async fn descendants(
     )
 }
 
-/// A child row from its parent's recorded facts, with no invented live fields.
+/// A remote or settled local child's row from its parent's facts, without folding its record.
+/// Never use for an unsettled local child: branch, model and last activity require its summary.
 pub(crate) fn child(parent: &SessionId, fact: &ChildSummary) -> AgentView {
     let mut row = AgentView {
         served_model: None,
