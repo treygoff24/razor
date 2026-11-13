@@ -43,7 +43,7 @@ with flow([file("hello"), file("high-usage"), handover, file("done"), file("reca
 # first response (the rebuilt context fits) lifts the guard, and a later large one asks again.
 def step(id, name, arguments, large=False):
     body = response([call(name, json.dumps(arguments), id)]).body
-    return Reply(body.replace(b'"input_tokens": 100', b'"input_tokens": 200000') if large else body)
+    return Reply(body.replace(b'"input_tokens": 100', b'"input_tokens": 300000') if large else body)
 
 
 def run(replies, config="[rebuild]\nthreshold = 0.5"):

@@ -65,6 +65,7 @@ type Speak = Box<
 #[derive(Debug)]
 pub(crate) enum Error {
     Refused(String),
+    Missing(SessionId),
     Other {
         source: Box<dyn std::error::Error + Send + Sync>,
         context: &'static str,
@@ -308,6 +309,7 @@ impl From<controller::Error> for Error {
     fn from(e: controller::Error) -> Self {
         match e {
             controller::Error::Invalid(sentence) => Error::Refused(sentence),
+            controller::Error::NoSession(session) => Error::Missing(session),
             e => other("asking the controller")(e),
         }
     }
@@ -317,6 +319,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Refused(sentence) => f.write_str(sentence),
+            Error::Missing(session) => write!(f, "There is no session {session}."),
             Error::Other { source, context } => write!(f, "Razor failed {context}: {source}"),
         }
     }

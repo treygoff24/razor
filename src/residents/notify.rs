@@ -94,7 +94,7 @@ pub(crate) fn notify(config: &Config, text: String, env: BTreeMap<&str, String>)
 
 /// Carry an ask to the person through the ask command, and return at once. The command runs
 /// detached, at most 16 at a time; when it exits 0 and prints an answer, Razor answers the ask
-/// with `Controller::answer`, which refuses an ask already answered or settled.
+/// with `Controller::answer`, which delivers late answers to message questions too.
 pub(crate) fn ask(controller: &Controller, config: &Config, ask: &Ask, summary: &Summary) {
     let mut env = environment(summary);
     env.insert("RAZOR_ASK", ask.id.1.0.to_string());
@@ -127,8 +127,8 @@ pub(crate) fn ask(controller: &Controller, config: &Config, ask: &Ask, summary: 
         let answer = answer.trim();
         if answered && !answer.is_empty() {
             let answer = Answer::Text(answer.to_string());
-            // A question already answered or settled refuses these late words.
-            let _ = controller.answer(&session, entry, answer, None).await;
+            // Message answers still reach the session after the question settles.
+            let _ = controller.answer(&session, entry, answer, None, None).await;
         }
     });
 }

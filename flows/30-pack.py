@@ -350,14 +350,23 @@ def face(eyes):
 
 script = Path(__file__).resolve().parents[1] / "packs/starter/skills/agent-avatar/avatar.js"
 with tempfile.TemporaryDirectory() as scratch:
-    def avatar(*words):
-        return subprocess.run(["node", script, *words], capture_output=True, text=True, cwd=scratch)
+    def avatar(*words, env=None):
+        return subprocess.run(["node", script, *words], capture_output=True, text=True, cwd=scratch, env=env)
     for name, eyes in (("face", True), ("blank", False)):
         (Path(scratch) / f"{name}.png").write_bytes(face(eyes))
     made = avatar("make", "face.png", "character", "sheet.png")
     assert made.returncode == 0 and (Path(scratch) / "sheet-preview.png").exists(), made.stderr
     checked = avatar("check", "sheet.png")
     assert checked.returncode == 0 and json.loads(checked.stdout)["bytes"] <= 2048, checked.stderr
+    with flow([], config='[residents.scout]\ncwd="."\n') as f:
+        Path(scratch, "razor").symlink_to(os.environ["RAZOR_BIN"])
+        env = f.env | {"PATH": scratch + ":" + f.env["PATH"]}
+        config = Path(env["RAZOR_HOME"]) / "config.toml"
+        before = config.read_bytes()
+        for resident in ("missing", "scout.cwd"):
+            refused = avatar("install", "sheet.png", "owl", "--resident", resident, env=env)
+            assert refused.returncode == 1, refused.stderr
+            assert config.read_bytes() == before and not list(config.parent.glob("avatars/*.png")), refused.stderr
     for words, reason in ((("check", "face.png"), "132"), (("make", "blank.png", "character", "x.png"), "eyes")):
         refused = avatar(*words)
         assert refused.returncode == 1 and reason in refused.stderr, refused.stderr

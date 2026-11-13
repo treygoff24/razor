@@ -2,6 +2,12 @@
 
 Design page. Modules: `src/claude/` (the bridge's Rust half) and `bridge/` (the TypeScript bridge), grown from the first slice into SPEC.md section 3's Claude path. The SDK is `@anthropic-ai/claude-agent-sdk` 0.3.312 with its bundled CLI 2.1.312; line numbers are in its `sdk.d.ts` and `sdk-tools.d.ts`. Every claim about the CLI's behaviour comes from a run of the real SDK and CLI against a local capture server, with no model.
 
+## Sign-in
+
+The server runs the SDK's bundled `auth login`, with `--console` for Console billing. `claude::login` takes instruction lines out, a stop signal and codes in; the CLI owns OAuth, callbacks and credential storage. Each output pipe is capped at 64 KiB, stdin receives only single codes, and cancellation drops and kills the child. Exit zero is followed by the same `auth status` check doctor uses before completion is reported.
+
+`POST /v1/login?provider=claude|console|chatgpt` selects the provider; omitting it keeps ChatGPT. `PUT /v1/login` sends `{code}` only to the device's running Claude sign-in, without recording it. One Claude sign-in at a time prevents competing credential writes. Setup calls `razor login claude` or `razor login console`, so setup, the command and the terminal panel share this path. The terminal's masked code field uses the panel's existing typed line and is discarded when its stream ends.
+
 ## Surface
 
 From the slice, unchanged: one bridge process for every session; every call held in `PreToolUse` until its `Call` is in the record; the SDK's messages mirrored into entries, the mirrored `tool_result` being the only way a `Result` enters the record on this route; the `PostToolBatch` stop for a rebuild; resume or rebuild at open.

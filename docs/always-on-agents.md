@@ -63,7 +63,7 @@ text = "Check ~/scout/inbox and tell me what needs me."
 
 **A schedule** is a named job that comes due at set times. One that comes due while the resident is busy waits for the turn to end. One that came due while the server was down runs once at the next start, as long as it has run at least once before. Each schedule can name its own model and effort, so a cheap job can run on a cheap model.
 
-**Fresh runs.** With `fresh = true`, each run of a schedule gets a thread of its own, a new session with a fresh context, which closes when the run ends. Use it for jobs that should not crowd the home session's context. A fresh run's thread stays out of the plain session list; `GET /v1/sessions?resident=<name>` lists the resident's threads with its fresh runs, each marked with its `job`.
+**Fresh runs.** With `fresh = true`, each run of a schedule gets a thread of its own, a new session with a fresh context, which closes when the run ends and all inputs are answered. If you write to it, it stays open as an ordinary conversation after answering you. Use it for jobs that should not crowd the home session's context. A fresh run's thread stays out of the plain session list; `GET /v1/sessions?resident=<name>` lists the resident's threads with its fresh runs, each marked with its `job`.
 
 **Projects.** Each folder in the resident's `projects` folder (`~/scout/projects` here; hidden folders and links excepted) is a project, shown by the first line of its `.razor/name`, or by the folder's own name without one. You make and rename projects through the API (or the phone client), and start a thread in one by naming it as `resident_project`; renaming changes only the shown name, so the folder, and the project's id, never move. A folder the resident makes there is a project too.
 
@@ -110,6 +110,6 @@ Starting a thread prints its session id; open it with `razor --resume <id>`. A s
 | `heartbeat.model`, `heartbeat.effort` | the session's | The model and effort for that turn only. |
 | `schedules.<job>.at`, `.days`, `.text`, `.model`, `.effort` | as for the heartbeat | The same, for one named schedule. At most 64 schedules are read. |
 | `schedules.<job>.deliver` | `"none"` | `"notify"` ends the run with a note to you; `"ask"` with a question. |
-| `schedules.<job>.fresh` | `false` | Runs each time in a thread of its own that closes when the run ends. |
+| `schedules.<job>.fresh` | `false` | Runs each time in a thread of its own; after all inputs are answered it closes, unless you wrote to it. |
 | `avatar` | none | A name from `[brand.avatars]`: the picture its home and threads wear unless a session chooses another ([Configuration](configuration.md#the-terminal-app)). |
 | `sky` | none | A JSON file, relative to `cwd`, that a separately distributed phone client draws from. |

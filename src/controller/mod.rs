@@ -79,6 +79,9 @@ struct Status {
     agents: BTreeMap<SessionId, AgentView>,
     /// One last look and seen entry per looked-at session, until its record is gone or restart.
     readings: BTreeMap<SessionId, (Millis, Option<EntryId>)>,
+    /// One position per parent that projected children, until its record is gone or restart;
+    /// like readings, it survives row eviction and is bounded by those parents, not appends.
+    child_versions: BTreeMap<SessionId, EntryId>,
     /// Outstanding foreign child facts survive their parent's display row for report recovery.
     remote: BTreeMap<SessionId, SessionId>,
     config: Option<String>,
@@ -119,6 +122,7 @@ impl Controller {
         let status = Status {
             agents: BTreeMap::new(),
             readings: BTreeMap::new(),
+            child_versions: BTreeMap::new(),
             remote: BTreeMap::new(),
             config: None,
             notices: Vec::new(),
@@ -167,15 +171,12 @@ impl Controller {
         tokio::spawn(async move { rows.recent().await });
         let ticker = controller.clone();
         tokio::spawn(async move {
-            for tick in (1..=60).cycle() {
+            loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                ticker.config().await;
+                let after = ticker.config().await.stuck.after;
                 // Recheck cold tasks after a client or the last queued caller leaves.
                 for task in lock(&ticker.inner.sessions).values() {
-                    let _ = task.try_send(Box::new(|s| Box::pin(s.tick())));
-                }
-                if tick == 60 {
-                    ticker.stuck().await;
+                    let _ = task.try_send(Box::new(move |s| Box::pin(s.tick(after))));
                 }
             }
         });
@@ -242,7 +243,10 @@ impl Controller {
     pub(crate) async fn mcp_complete(&self, redirect: &str) -> Result<(), Error> {
         if let Some((session, ask)) = self.inner.mcp_auth.question(redirect).await {
             let answer = Answer::Text(redirect.into());
-            return self.answer(&session, ask, answer, None).await.map(drop);
+            return self
+                .answer(&session, ask, answer, None, None)
+                .await
+                .map(drop);
         }
         let completed = self.inner.mcp_auth.complete(redirect).await;
         completed.map_err(|e| Error::Invalid(e.to_string()))
@@ -512,49 +516,13 @@ impl Controller {
         }
     }
 
-    /// Marks `Stuck` each working session that has waited `stuck.after` with inputs unanswered,
-    /// no job running, no question open, no `agent wait` before its deadline and no working
-    /// descendant.
-    async fn stuck(&self) {
-        let after = self.inner.config.lock().await.config.stuck.after;
-        let after = after.as_millis() as u64;
-        let sessions: Vec<_> = lock(&self.inner.sessions).keys().cloned().collect();
-        for id in sessions {
-            let Ok(s) = self.summary(&id).await else {
-                continue;
-            };
-            if s.unanswered.is_empty()
-                || !s.jobs.is_empty()
-                || !s.questions.is_empty()
-                || !s.mail_questions.is_empty()
-                || now().saturating_sub(s.at) < after
-                || self.ask(&id, Session::waiting).await.unwrap_or(true)
-            {
-                continue;
-            }
-            let mut status = lock(&self.inner.status);
-            let descendant = status.agents.values().any(|row| {
-                let up = |p: &&SessionId| status.agents.get(*p).and_then(|r| r.parent.as_ref());
-                row.state == State::Working
-                    && std::iter::successors(row.parent.as_ref(), up).any(|p| *p == id)
-            });
-            if let Some(row) = status.agents.get_mut(&id)
-                && row.state == State::Working
-                && !descendant
-            {
-                row.state = State::Stuck;
-                let row = row.clone();
-                let _ = status.lines.send(Live::Agent(Box::new(row)));
-            }
-        }
-    }
-
     fn forget(&self, session: &SessionId) {
         lock(&self.inner.sessions).remove(session);
         self.inner.space.notify_waiters();
         lock(&self.inner.idle).retain(|id| id != session);
         let mut status = lock(&self.inner.status);
         status.readings.remove(session);
+        status.child_versions.remove(session);
         status.remote.retain(|_, parent| parent != session);
         if status.agents.remove(session).is_some() {
             let _ = status.lines.send(status.snapshot());
@@ -703,7 +671,23 @@ impl Status {
     }
 
     /// A parent's record decides its children's reports and whether they are done.
-    fn child_rows(&mut self, parent: &Summary) {
+    fn child_rows(&mut self, parent: &Summary, rebuilt: Vec<AgentView>) {
+        if parent.children.is_empty() {
+            return;
+        }
+        let newest = self
+            .child_versions
+            .entry(parent.session.clone())
+            .or_default();
+        *newest = (*newest).max(parent.last);
+        // The newer registrant applies its facts before yielding; an older snapshot needs no
+        // retry, and must neither replace facts nor insert a row after its asynchronous read.
+        if *newest != parent.last {
+            return;
+        }
+        for row in rebuilt {
+            self.agents.entry(row.session.clone()).or_insert(row);
+        }
         for child in &parent.children {
             if child.session.address().is_some() {
                 if child.working() {
@@ -716,13 +700,7 @@ impl Status {
             let Some(mut row) = self.agents.get(&child.session).cloned() else {
                 continue;
             };
-            row.report = child.report.clone().filter(|_| !child.stopped);
-            row.settled = child.settled;
-            if !child.working() {
-                row.state = State::Done;
-            } else if row.state == State::Done {
-                row.state = State::NeedsYou;
-            }
+            children::child_row(&parent.session, child, &mut row);
             self.row(row);
         }
     }

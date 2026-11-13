@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The gate: the line budgets, DESIGN.md's colours, the builds and their lints, every numbered flow
+# The gate: the line ceiling, DESIGN.md's colours, the builds and their lints, every numbered flow
 # on the debug build (not built with --static), then the performance budgets on the release build
 # (docs/design/perf.md).
 set -euo pipefail

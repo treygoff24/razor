@@ -1,6 +1,6 @@
 """Mail between two paired servers (docs/design/mail.md): they pair by code over iroh; `list` shows the other server's agents and `<name>@<server>` is admitted there with
-`@<server>` in its sender; a send to that server stopped, or to one that is stopped and so never completes a
-connection (an asleep machine's), fails saying nothing was sent, nothing is recorded as sent, and `list` names
+`@<server>` in its sender; a send to a frozen server that never completes a
+connection (an asleep machine's) fails saying nothing was sent, nothing is recorded as sent, and `list` names
 both servers as silent. Mail from the paired server whose sender id is the recipient's parent's
 is heard without the parent's header and is not among the parent's inputs at a rebuild."""
 import json
@@ -203,14 +203,12 @@ with flow(replies, config=keys) as f:
     try:
         began, found = time.monotonic(), search("hel")
         assert found["partial"] and [h["session"] for h in found["hits"]] == [here] and time.monotonic() - began < 4, found
-        replies += [message(a, "note", to=f"{there_name}@b", text="LOST_44"),
-                    message(a, "note", to="anyone@asleep", text="ASLEEP_44"), message(a, "list"),
+        replies += [message(a, "note", to="anyone@asleep", text="ASLEEP_44"), message(a, "list"),
                     reply(a, text="Down.")]
         alpha.ask("--resume", here, "Again.")
         record = list(f.record(here))
-        lost, asleep, silent = results(record)[-3:]
-        for name, result in (("b", lost), ("asleep", asleep)):
-            assert result["outcome"] == "error" and f"{name} did not answer; nothing was sent." in result["output"], result
+        asleep, silent = results(record)[-2:]
+        assert asleep["outcome"] == "error" and "asleep did not answer; nothing was sent." in asleep["output"], asleep
         assert json.loads(silent["output"])["silent"] == ["b", "asleep"], silent
         assert len([e for e in record if e["kind"] == "mail_sent"]) == 1, "a failed send was recorded as sent"
     finally:

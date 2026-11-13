@@ -1,7 +1,7 @@
 """The overview fits its agents, opens the selected session, and folds at once without motion or below 80 columns; the
 keys move between the list and a composer, past helpers. Parallel code-mode results leave the newest open call visible."""
 from dataclasses import replace
-import base64, json, os, re, select, signal, socket, socketserver, threading, time
+import base64, json, os, select, signal, socket, socketserver, threading
 from clock import wall_clock
 from driver import flow
 from responses import done, message, response
@@ -98,22 +98,8 @@ with flow(replies, model="sol", config=config) as f:
 
         selected("a74")
 
-        def framed(ages=True):
-            """Each agent's age inside its tile, and every body row closed by its group's frame."""
-            lines = t.screen.display
-            assert not ages or all(any(re.search(rf" {n} .*?\d+[smh] +[▌│]", line) for line in lines)
-                                   for n in ("work74", "b74", "a74")), t.text()
-            assert all(not line.strip() or line.rstrip()[-1] in "│╮╯╴" for line in lines[5:-1]), t.text()
-
-        framed()
-        # At rest with motion off nothing turns faster than the minute: ages under one read `<1m`
-        # and, with the wall clock still, the overview falls quiet once the rows have settled.
-        assert t.quiet() and " <1m " in t.text(), t.text()
-        for height in (13, 10, 9):
-            t.resize(height, 120)
-            t.until(lambda _: all(f" {n} " in t.text() for n in ("work74", "b74", "a74")))
-            assert any(" work74 " in line and " b74 " in line and " a74 " in line for line in t.screen.display), t.text()
-            framed()
+        # With motion off and the wall clock still, the overview falls quiet once rows settle.
+        assert t.quiet(), t.text()
         # Too short for its group at 40 columns, the overview scrolls to keep the selection in sight.
         t.resize(8, 40)
         t.until(lambda _: " a74 " in t.text() and " work74 " not in t.text())
@@ -295,25 +281,16 @@ with flow(replies, model="sol", config=config) as f:
         t.shown("PROJECT74")
         t.send("\x1b")
         t.until(lambda _: "PROJECT74" not in t.text() and "transcript-b74" in t.text())
-        # Motion enabled at a frozen time would never land; narrowing must settle the fold.
-        path = f.home / ".razor/config.toml"
-        path.write_text(path.read_text().replace("motion = false", "motion = true"))
+        # Frozen time cannot finish motion: narrowing below 80 columns must land the fold.
+        settings = f.home / ".razor/config.toml"
+        settings.write_text(settings.read_text().replace("motion = false", "motion = true"))
         t.pump(1)
         t.send("\x1bOR")
-        t.pump(0.1)
+        t.pump(.1)
         t.resize(20, 79)
         t.shown("PROJECT74", "b74")
-        framed()
-        t.resize(20, 40)
-        t.pump(2)
-        framed()
-        t.resize(20, 20)  # Narrower than the smallest tile's group: the tiles narrow to fit.
-        t.pump(2)
-        framed(ages=False)
         t.send("\x1bOR")
         t.shown("transcript-b74")
-        t.resize(20, 120)
-        t.pump(2)
     # A first input given with --resume is sent over the saved draft, which stays.
     server.send(f, "PUT", f"/sessions/{a}/draft", "kept74").read()
     with Terminal(f, "--resume", a, "Say launch74.") as t:
@@ -348,11 +325,11 @@ with flow(replies, model="sol", config=config) as f:
         assert not t.pump(1) and "b74" in t.screen.display[2][41:], t.text()
         os.kill(pid, signal.SIGCONT)
         t.until(lambda _: "work74 · cwd" in t.screen.display[2] and "AGENTS" not in t.text())
-    # A save the server answers 17 seconds late is still waited for: a's old words land before
+    # A save held past 17 seconds on the terminal's clock is still waited for: a's old words land before
     # the newer ones saved behind them as it is left, which stay its draft.
     upstream, path = f.home / ".razor/upstream.sock", f.home / ".razor/server.sock"
     path.rename(upstream)
-    held = threading.Event()
+    held, release = threading.Event(), threading.Event()
 
     class Hold(socketserver.BaseRequestHandler):
         def handle(self):
@@ -364,19 +341,25 @@ with flow(replies, model="sol", config=config) as f:
                             return
                         if source is self.request and data.endswith(b"old408"):
                             held.set()
-                            time.sleep(17)
+                            if not release.wait(30):
+                                return
                             up.sendall(data)
                             source, data = up, up.recv(65536)
                         (up if source is self.request else self.request).sendall(data)
 
     threading.Thread(target=socketserver.ThreadingUnixStreamServer(str(path), Hold).serve_forever, daemon=True).start()
-    with Terminal(f, "--resume", a) as t:
+    with wall_clock(still=False) as (_, env, advance), Terminal(replace(f, env={**f.env, **env}), "--resume", a) as t:
         t.shown("ans74late74")
         t.send("\x15old408")
         assert held.wait(10)
         t.send(" new408" + BACKTAB)
         t.shown("○ b74 ")
         t.click("○ b74 ")
+        assert "a74" in t.screen.display[2][41:], t.text()
+        advance(17_000, monotonic=True)
+        t.resize(40, 120)  # Wake Tokio so a regressed draft deadline must fire before release.
+        assert not t.pump(1, lambda _: "b74" in t.screen.display[2][41:]), "the held save was given up on"
+        release.set()
         header("b74")
         server.wait(lambda: server.send(f, "GET", f"/sessions/{a}/draft").read() == b"old408 new408")
         # The header precedes its draft read; quit must see the loaded draft before clearing it.

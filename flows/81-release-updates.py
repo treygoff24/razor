@@ -198,7 +198,9 @@ with flow([], model='gpt-6.1-sol') as f, releases(f) as (publish, requests):
                 assert 'RAZOR 0.2.0 IS READY' not in t.text(), 'heartbeat repeated the notice'
         finally:
             terminal.BINARY = original
+        (root / 'release-action').write_text('broken Stale action.')
         cached = run(f, command, 'update')
+        assert not (root / 'release-action').exists(), 'latest-installed check kept a malformed action'
         assert cached.returncode == 0 and '0.2.0, the latest release, is installed' in cached.stdout, cached
         assert 'run razor restart if your server started before it' in cached.stdout, cached
         assert requests.count('/install.sh') == 2, requests
@@ -219,9 +221,12 @@ with flow([], model='gpt-6.1-sol') as f, releases(f) as (publish, requests):
         assert first in doctor.stdout, doctor
         # A malformed mark holds too, shown as written; its new sentence is told once more.
         publish('0.4.0', mark=broken)
+        reader = (root / 'release-action').open()
         assert run(f, command, 'restart').returncode == 0
         raw = f'RAZOR_ACTION="{broken}"'
         assert raw in held(f, root, requests, seen, 2)
+        with reader:
+            assert reader.read() == f'0.3.0 {first}', 'action rewrite changed an in-progress read'
         server.wait(lambda: len(notes(f)) >= 2, why='the changed action was not notified')
         assert [raw in note[0] for note in notes(f)] == [False, True], notes(f)
         # The person's update selects the latest and says what to do; its download is already there,

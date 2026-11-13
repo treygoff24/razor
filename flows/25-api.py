@@ -1,6 +1,5 @@
 """The API: enroll a key, list, read pages, attach and send, revoke (docs/design/api.md).
 A root started with no message is live, as if the person had just written to it."""
-import http.client
 import json
 import resource
 import tempfile

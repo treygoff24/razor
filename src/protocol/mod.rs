@@ -287,6 +287,14 @@ pub enum Body {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         inputs: Vec<EntryId>,
     },
+    /// Razor withheld this attempt before admission because the person's message lacked a
+    /// reply; written when the denial is mirrored, with its native reference. Only that guard
+    /// produces this kind; another cause would need a field identifying it.
+    NotRun {
+        call: CallId,
+        name: String,
+        input: serde_json::Value,
+    },
     /// A server's question reaches the same person-facing ask surface as an agent's question.
     Question {
         text: String,

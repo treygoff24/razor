@@ -5,16 +5,15 @@ model is a stand-in.
 Completed foreign helpers leave the live feed; their parent-owned launch/report facts remain
 readable through the parent's children detail, and settled facts through direct detail."""
 import json
-import os
 import queue
 import re
 import shutil
-import signal
 import threading
 import time
 from dataclasses import replace
 from driver import flow
 from model import agent, message, reply, tool
+import responses
 from server import Tap, listed, send, start, stop, until, wait
 from terminal import Terminal
 
@@ -29,8 +28,8 @@ with flow(replies, config='[children]\nmax = 1\ngrace = "0s"') as f:
     beta.cwd.mkdir()
     f.base()
     beta.base()
-    start(f)
-    assert beta.run("devices").returncode == 0
+    start(f, relay=True)
+    start(beta, relay=True)
     # Count what the owner is asked on the real peer connection, including ordinary status traffic.
     tap = Tap(f, beta, "b", "a")
 
@@ -172,12 +171,12 @@ with flow(replies, config='[children]\nmax = 1\ngrace = "0s"') as f:
     request(other, "/children", {"action": "continue", "session": sid, "input": first_input}, peer=True, status=400)
 
     # A person's continuation can exceed the parent's cap, as it can for a local child.
-    replies += [agent(root, "start", server="b", name="hold49", cwd=str(beta.cwd), placement="in_place", brief="Hold the slot."),
-                reply(root, text="Slot held."), reply("You are hold49,", "Bash", {"command": "sleep 60"})]
+    replies += [agent(root, "start", server="b", name="hold49", cwd=str(beta.cwd), brief="Hold the slot."),
+                reply(root, text="Slot held."), reply("You are hold49,", "Bash", {"command": "git switch --detach && git -c user.name=Flow -c user.email=flow@example.invalid commit --allow-empty -m Detached49 && sleep 60"})]
     assert f.run("--resume", parent, "--print=json", "Hold a slot.").returncode == 0
     hold = next(e["session"].split("@")[0] for e in f.record(parent) if e["kind"] == "child" and isinstance(e["event"], dict)
                 and e["event"].get("started", {}).get("name") == "hold49")
-    until(beta, hold, lambda es: any(e["kind"] == "call" and e["input"].get("command") == "sleep 60" for e in es))
+    until(beta, hold, lambda es: any(e["kind"] == "job" for e in es))
     row = wait(lambda: next((r for r in request(local, "/status", method="GET")["agents"] if r["session"] == hold + "@b"), None))
     assert row["parent"] == parent and row["name"] == "hold49", row
     # The person reopens the remote child through its owning server, using the parent's fact id.
@@ -197,8 +196,16 @@ with flow(replies, config='[children]\nmax = 1\ngrace = "0s"') as f:
     continued = [e for e in f.record(parent) if e["kind"] == "child" and e["event"] == "continued"]
     person = next(e for e in beta.record(sid) if e["kind"] == "input" and e["text"] == "PERSON_TASK_49")
     assert person["from"] == "person" and person["child_task"] == continued[-1]["id"]
+    held = other / "sessions" / hold / "worktree"
+    detached = beta.git("-C", str(held), "rev-parse", "HEAD").strip()
+    refused = send(tap.to_b, "POST", "/children", {"action": "settle", "session": hold, "decision": "discard"})
+    raw = refused.read().decode()
+    assert refused.status == 400 and held.exists(), (refused.status, raw)
+    beta.git("branch", "detached49", detached)
     replies += [agent(root, "stop", child="hold49"), agent(root, "settle", child="hold49", decision="discard"), reply(root, text="Slot free.")]
     assert f.run("--resume", parent, "--print=json", "Free the slot.").returncode == 0
+    assert not (other / "sessions" / hold / "worktree").exists(), "clean detached helper was not discarded"
+    assert beta.git("for-each-ref", "--contains", detached, "refs/heads").strip(), "discard lost detached commits"
 
     # Stop closes remote jobs; another continuation finishes while the parent's server is down.
     replies += [agent(root, "continue", child="oak49", brief="STOP_TASK_49"), reply(root, text="Running."),
@@ -221,13 +228,15 @@ with flow(replies, config='[children]\nmax = 1\ngrace = "0s"') as f:
     until(beta, sid, lambda es: sum("report" in e for e in es) == 4)
     assert len(reports(parent)) == 3
     replies += [reply(root, text="Recovered.")]
-    start(f)
+    start(f, relay=True)
     until(f, parent, lambda es: len(reports(parent)) == 4)
     assert reports(parent)[-1]["text"] == "RECOVER_REPORT_49"
     until(f, parent, lambda es: any(e.get("text") == "Recovered." for e in es))
     request(local, "/children", {"action": "update", "parent": parent, "child": sid,
             "update": {"report": next(e["report"] for e in reversed(list(beta.record(sid))) if "report" in e)}}, peer=True)
     assert len(reports(parent)) == 4, "push and recovery each admitted the report"
+    # A missing working folder does not mean its committed branch was merged.
+    shutil.rmtree(other / "sessions" / sid / "worktree")
     replies += [agent(root, "settle", child="oak49", decision="merge"), reply(root, text="Merged.")]
     with Terminal(f, "--resume", parent, status=True) as t:
         t.until(lambda t: osc_id in t.records())
@@ -307,7 +316,7 @@ with flow(replies, config='[children]\nmax = 1\ngrace = "0s"') as f:
 
 # Claim, settle, and retry all use the owning server's project and its real tasks remote.
 replies = []
-with flow(replies) as f:
+with flow(replies, model='sol', config=responses.PLAIN) as f:
     f.base()
     beta = f.home_at("claims49")
     other = beta.home / ".razor"
@@ -321,20 +330,26 @@ with flow(replies) as f:
     f.git("remote", "add", "origin", str(remote))
     (f.cwd / ".razor").mkdir(exist_ok=True)
     (f.cwd / ".razor/config.local.toml").write_text('[tasks]\nremote = "origin"\n')
-    start(f)
+    start(f, relay=True)
     beta.run("devices")
     tap = Tap(f, beta, "b", "a")
-    replies += [tool("OWNER_49", "task", action="write", title=t) for t in ("Assigned", "Extra", "Assigned", "Extra")] + [reply("OWNER_49")]
+    replies += [responses.reply('OWNER_49', 'task', action='write', title=t) for t in ("Assigned", "Extra", "Assigned", "Extra")] + [responses.reply('OWNER_49', 'flow done')]
     beta.ask("OWNER_49")
+    # Failed starts leave a stopped fact but no record on the owner; discard clears that fact.
+    replies += [responses.reply("MISSING_49", "agent", action="start", server="b", name="missing49", cwd=str(beta.cwd / "absent"), brief="Cannot start."),
+                responses.reply("MISSING_49", "agent", action="settle", child="missing49", decision="discard"), responses.reply("MISSING_49", "flow done")]
+    missing = f.ask("MISSING_49")["session"]
+    results = [e for e in f.record(missing) if e["kind"] == "result"]
+    assert [e["outcome"] for e in results] == ["error", "success"], results
     for decision, named, extra in (("merge", 1, 2), ("discard", 3, 4)):
         tag, name = "CLAIM_49_" + decision, "claim49-" + decision
         full = f"Claim report {decision}.\nAll evidence is retained."
-        replies += [tool(tag, "task", action="write", id=named, claim=True),
-                    agent(tag, "start", server="b", name=name, cwd=str(beta.cwd), task=named, brief="Work."),
-                    agent(tag, "wait"), reply(tag),
-                    tool("You are " + name + ",", "task", action="write", id=extra, claim=True),
-                    reply("You are " + name + ",", "Bash", {"command": "touch claim-marker; git add claim-marker; git -c user.name=Flow -c user.email=flow@example.invalid commit --allow-empty -m Claim"}),
-                    agent("You are " + name + ",", "finish", status="finished", report=full)]
+        replies += [responses.reply(tag, 'task', action='write', id=named, claim=True),
+                    responses.reply(tag, 'agent', action='start', server='b', name=name, cwd=str(beta.cwd), task=named, brief='Work.'),
+                    responses.reply(tag, 'agent', action='wait'), responses.reply(tag, 'flow done'),
+                    responses.reply('You are ' + name + ',', 'task', action='write', id=extra, claim=True),
+                    responses.reply('You are ' + name + ',', 'bash', command='touch claim-marker; git add claim-marker; git -c user.name=Flow -c user.email=flow@example.invalid commit --allow-empty -m Claim' + (' && git switch -c reviewer49' if decision == 'discard' else ''), wait_ms=600000),
+                    responses.reply('You are ' + name + ',', 'agent', action='finish', status='finished', report=full)]
         parent = f.ask(tag)["session"]
         result = json.loads([e["output"] for e in f.record(parent) if e["kind"] == "result"][1])
         sid = result["session"].split("@")[0]
@@ -346,10 +361,17 @@ with flow(replies) as f:
         folder = next((other / "tasks").rglob(f"{named}.md")).parent
         claim = (folder / f"{named}.md").read_text()
         assert result.get("task") == {"id": named, "title": "Assigned", "claimed": True} and sid in claim, (result, claim)
+        if decision == "discard":
+            dirty = other / "sessions" / sid / "worktree" / "uncommitted49"
+            dirty.write_text("Keep this work on reviewer49.")
+            refused = send(tap.to_b, "POST", "/children", {"action": "settle", "session": sid, "decision": "discard"})
+            raw = refused.read().decode()
+            assert refused.status == 400 and dirty.read_text() == "Keep this work on reviewer49." and sid in (folder / f"{named}.md").read_text(), raw
+            dirty.unlink()
         # Make the tasks remote unreachable after the child has finished; the git merge still runs.
         if decision == "merge":
             remote.rename(remote.with_name("tasks-away.git"))
-        replies += [agent(tag, "settle", child=name, decision=decision), reply(tag)]
+        replies += [responses.reply(tag, 'agent', action='settle', child=name, decision=decision), responses.reply(tag, 'flow done')]
         f.ask("--resume", parent, tag)
         settled = [e for e in f.record(parent) if e["kind"] == "result"][-1]
         if decision == "merge":
@@ -363,7 +385,7 @@ with flow(replies) as f:
             completed = send(tap.to_b, "POST", "/children", {"action": "settle", "session": sid, "decision": decision, "report": [full, named, f"{parent} {(f.home / '.razor/server.id').read_text().strip()} parent on flow"]})
             assert completed.status == 200, completed.read()
             completed.read()
-            replies += [agent(tag, "settle", child=name, decision=decision), reply(tag)]
+            replies += [responses.reply(tag, 'agent', action='settle', child=name, decision=decision), responses.reply(tag, 'flow done')]
             f.ask("--resume", parent, tag)
             retried = [e for e in f.record(parent) if e["kind"] == "result"][-1]
             assert retried["outcome"] == "success", retried

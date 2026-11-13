@@ -156,7 +156,7 @@ const COMMANDS: &[&str] = &[
     "setup [--console]          choose Claude, ChatGPT or an API key, offer a service and sign in\n  --console bills Claude through Anthropic Console",
     "keys                       save optional web-search and voice keys privately",
     "doctor                     check prerequisites and the default model, with fixes",
-    "login                      sign in to ChatGPT",
+    "login [claude|chatgpt|console] sign in to an AI account (default ChatGPT)",
     "install                    run the server in the background at login",
     "serve                      run the server in this terminal",
     "stop                       stop this home's server",
@@ -404,7 +404,13 @@ async fn run(home: PathBuf, words: Vec<String>) -> Result<ExitCode, Error> {
 async fn manage(home: PathBuf, words: &[String]) -> Result<(), Error> {
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
     match words[..] {
-        ["login"] | ["devices"] | ["devices", "add" | "join" | "remove", _] => {}
+        ["login"]
+        | ["login", "claude" | "chatgpt" | "console"]
+        | ["devices"]
+        | ["devices", "add" | "join" | "remove", _] => {}
+        ["login", ..] => {
+            return Err(Usage("Use razor login [claude|chatgpt|console].".into()));
+        }
         ["devices", "add", _, "--key", _] => {}
         ["config", "get" | "unset", _] | ["config", "set", _, _] => {}
         ["config", ..] => return Err(Usage(VOICE_USE.into())),
@@ -412,10 +418,13 @@ async fn manage(home: PathBuf, words: &[String]) -> Result<(), Error> {
     }
     let (client, key) = api::connect(&home).await?;
     let text = match words[..] {
-        ["login"] => {
-            let signed = api::login(&client, &key).await;
-            signed.map_err(|e| Failed(format!("{e} Run razor login.")))?;
-            "Razor is signed in to ChatGPT.".into()
+        ["login", ..] => {
+            let provider = words.get(1).copied().unwrap_or("chatgpt");
+            let provider = serde_json::from_value(serde_json::json!(provider))?;
+            api::login(&client, &key, provider)
+                .await
+                .map_err(|e| Failed(e.to_string()))?;
+            "The sign-in completed.".into()
         }
         ["devices", "add", name] => api::add_command(&client, &key, name).await?,
         ["devices", "join", name] => api::join_command(&client, &key, name).await?,

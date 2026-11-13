@@ -20,8 +20,8 @@ RAZOR_BIN="$target/release/razor" "$target/flows-venv/bin/python" scripts/perf.p
 #   FAIL perf Draw of a 10,000-line transcript: ...; budget none in SPEC.md
 # The gate creates <target>/flows-venv and installs flows/requirements.txt there.
 # One shared flows/terminal.py reads the app through a PTY and pyte's rendered cells.
-# Budgets come from SPEC.md section 6, rows "| <budget> | <number> ms |" (or MiB), read the way
-# size.py reads its rows: one definition, in the spec.
+# Budgets come from SPEC.md section 6, rows "| <budget> | <number> ms |" (or MiB): one definition,
+# in the spec.
 
 # flows/standin.py saves each model request's metadata as <n>.json, including two timestamps:
 "arrived": float  # time.monotonic() once the request's headers were read, before its body

@@ -1,6 +1,6 @@
 """The model stand-in: one loopback HTTP server replaying recorded response bytes unchanged."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from itertools import count
@@ -82,7 +82,9 @@ def serve(replies: list[Reply], requests: Path):
                 time.sleep(reply.pause if start else 0)
                 self.wfile.write(reply.body[start:end])
             if reply.hold:  # until the client closes; a reply never dropped fails at the 10 s timeout
-                return self.connection.recv(1)
+                with suppress(ConnectionResetError):
+                    self.connection.recv(1)
+                return
             meta["sent"] = time.monotonic()
             put(name.with_suffix(".json"), json.dumps(meta).encode())
 

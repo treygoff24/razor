@@ -10,7 +10,7 @@ from claude import reply
 from clock import wall_clock
 from driver import REPLIES, Reply, flow
 from mcp import PNG
-from responses import PLAIN, call, done, response
+from responses import PLAIN, call, done, message, response
 import server
 
 # Skills are current text once per rebuilt context on Claude, Responses plain and code mode.
@@ -71,12 +71,12 @@ for model, code_mode in (("opus", False), ("sol", False), ("sol", True)):
         if model == "sol" and not code_mode:
             (f.cwd / "tiny18").write_text("tiny")
             f.ask("--resume", sid, "Fill the recent history so the skill source needs paging.")
-        with Terminal(f, "--resume", sid, rows=40, columns=120) as t:
-            t.until(lambda _: "◉" in t.text() and "○ gone18" not in t.text())
-            t.shown("kept18", "handed18")
-            assert "worn off" not in next(line for line in t.text().splitlines() if "kept18" in line), t.text()
-            t.send("\x1b2")
-            t.until(lambda _: any("kept18" in line and "in context" in line for line in t.text().splitlines()))
+            with Terminal(f, "--resume", sid, rows=40, columns=120) as t:
+                t.until(lambda _: "◉" in t.text() and "○ gone18" not in t.text())
+                t.shown("kept18", "handed18")
+                assert "worn off" not in next(line for line in t.text().splitlines() if "kept18" in line), t.text()
+                t.send("\x1b2")
+                t.until(lambda _: any("kept18" in line and "in context" in line for line in t.text().splitlines()))
 
 # Each large skill uses its own spill file; the total keeps the newest skills and never retries the rest.
 large18 = {f"large18-{i}": f"begin {i}\n" + "é" * 31_000 + f"\nend {i}" for i in range(5)}
@@ -137,9 +137,10 @@ with flow([handover] + [Reply((REPLIES / f"{name}.sse").read_bytes()) for name i
 # refused {}. On GPT, the threshold that the waiting response itself reaches ends that wait too.
 wait = {"action": "wait", "timeout_ms": 30000}
 wait_note = "Hand over from the wait."
-replies = [reply(("toolu_wait", "mcp__razor__agent", wait)), reply(("toolu_again", "mcp__razor__agent", wait)),
-           reply(("toolu_wait_note", "mcp__razor__handover", {"note": wait_note})), reply(text="Rebuilt.")]
-with flow(replies) as f:
+replies = [response([call("agent", json.dumps(wait), "toolu_wait")]),
+           response([message("I read your steering; I will wait for the next news."), call("agent", json.dumps(wait), "toolu_again")]),
+           response([call("handover", json.dumps({"note": wait_note}), "toolu_wait_note")]), done()]
+with flow(replies, model="sol", config=PLAIN) as f:
     server.start(f)
     session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
     path = f"/sessions/{session}"
@@ -161,7 +162,7 @@ with flow(replies) as f:
     rebuild = next(e for e in entries if e["kind"] == "rebuild")
     assert rebuild["trigger"] == "handover" and rebuild["note"].strip() == wait_note, rebuild
 large = response([call("agent", json.dumps(wait), "call_wait")]).body
-replies = [Reply(large.replace(b'"input_tokens": 100', b'"input_tokens": 200000')),
+replies = [Reply(large.replace(b'"input_tokens": 100', b'"input_tokens": 300000')),
            response([call("handover", json.dumps({"note": wait_note}), "call_note")]), done()]
 with flow(replies, model="gpt-6.1-sol", config=PLAIN + "[rebuild]\nthreshold = 0.5") as f:
     entries = list(f.record(f.ask(ask, timeout=10)["session"]))

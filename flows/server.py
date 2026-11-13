@@ -27,10 +27,13 @@ class Local(http.client.HTTPConnection):
         self.sock.connect(self.socket_path)
 
 
-def start(f):
-    """Starts the server through a real client call that sends no input; returns its pid."""
+def start(f, *, relay=False):
+    """Starts the local API; with relay, waits for a connected home relay before returning its pid."""
     started = f.run("devices")
     assert started.returncode == 0, started.stderr
+    if relay:
+        wait(lambda: any("(connected)" in line for line in json.loads(send(f, "GET", "/network").read())),
+             10, "the server never connected to its relay")
     return json.loads((f.home / ".razor/server.json").read_text())["pid"]
 
 

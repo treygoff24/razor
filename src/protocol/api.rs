@@ -411,7 +411,17 @@ pub(crate) struct Load {
     pub(crate) total: u64,
 }
 
-/// Dropping the sign-in stream cancels the sign-in.
+/// The account a sign-in uses; an omitted provider keeps the ChatGPT command's default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LoginProvider {
+    Claude,
+    #[default]
+    Chatgpt,
+    Console,
+}
+
+/// Instructions and completion are transient; dropping the stream cancels the sign-in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Login {

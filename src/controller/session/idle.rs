@@ -4,8 +4,9 @@ use super::*;
 
 impl Session {
     /// Checks child grace, configured idle closes and the existing idle handover boundary.
-    pub(in crate::controller) async fn tick(&mut self) -> Result<(), Error> {
+    pub(in crate::controller) async fn tick(&mut self, stuck_after: Duration) -> Result<(), Error> {
         self.settings.read();
+        self.stuck(stuck_after);
         self.record.mark(self.due()).await?;
         if self.state == State::Working || self.blocked {
             return Ok(());
@@ -27,6 +28,34 @@ impl Session {
             self.handover(Trigger::Idle).await?;
         }
         Ok(())
+    }
+
+    /// Marks stalled work from the session's own state, without a queued read keeping it loaded.
+    fn stuck(&self, after: Duration) {
+        let s = self.record.summary();
+        if s.unanswered.is_empty()
+            || !s.jobs.is_empty()
+            || !s.questions.is_empty()
+            || !s.mail_questions.is_empty()
+            || now().saturating_sub(s.at) < after.as_millis() as u64
+            || self.waiters.iter().any(|(_, waiter)| !waiter.is_closed())
+        {
+            return;
+        }
+        let mut status = lock(&self.c.inner.status);
+        let descendant = status.agents.values().any(|row| {
+            let up = |p: &&SessionId| status.agents.get(*p).and_then(|r| r.parent.as_ref());
+            row.state == State::Working
+                && std::iter::successors(row.parent.as_ref(), up).any(|p| *p == self.id)
+        });
+        if let Some(row) = status.agents.get_mut(&self.id)
+            && row.state == State::Working
+            && !descendant
+        {
+            row.state = State::Stuck;
+            let row = row.clone();
+            let _ = status.lines.send(Live::Agent(Box::new(row)));
+        }
     }
 
     /// Idle maintenance remains due: the task stays loaded, and its marker across a restart.

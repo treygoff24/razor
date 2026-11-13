@@ -56,9 +56,9 @@ fn read(file: std::fs::File, bytes: u64) -> Result<Vec<(EntryId, &'static str)>,
             Body::TurnEnd {
                 end: End::Error(_), ..
             } => Some((entry.id, "error")),
-            Body::Call { name, input, .. } => (!child
-                && crate::record::ask(&name, &input).is_some())
-            .then_some((entry.id, "question")),
+            Body::Call { name, input, .. } => crate::record::ask(child, &name, &input)
+                .is_some()
+                .then_some((entry.id, "question")),
             Body::Result {
                 outcome: Outcome::Error,
                 ..

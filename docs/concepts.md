@@ -17,7 +17,9 @@ One server runs for each Razor home, the folder that holds its settings, keys an
 | input | Anything that starts or steers a turn: your message, a schedule firing, or mail from another agent. A message you send while the agent works reaches it before its next step. |
 | state | One of four per agent: *needs you* (it asked you something), *working*, *done*, or *stuck* (unanswered input for a while with nothing running). |
 
-Escape stops the current turn and the commands it started. Ctrl-C twice quits the terminal app and leaves the session running.
+Escape stops the current turn and the commands it started. Repeating Stop within five seconds leaves that first stop to finish and preserves the reply's words. If the turn still has not stopped after five seconds, another Stop forces it to end and may lose words not yet recorded. Ctrl-C twice quits the terminal app and leaves the session running.
+
+When your message reaches a working agent, it must answer in text before more calls. If it tries calls first, Razor withholds one step and asks it to answer; those attempts stay in the record and leave no failed call cards. Calls already running finish, including calls from a running script, and a direct handover can proceed.
 
 `/name <new name>` renames the addressed session immediately: its top bar and agents list row update together, including on a paired server. Names are one line of 1 to 64 characters; a helper's name is its parent's to give.
 
@@ -49,6 +51,8 @@ Everything earlier stays in the record, one recall away. Razor calls this a rebu
 
 `/done` asks the agent for one last turn: it records what it learned, closes finished tasks and writes its own state note, a short note on where the work stands. Later sessions start with the project's merged note and newer sessions' notes; [dreaming](memory.md#dreaming) merges them. An always-on agent's home session writes the state note of its own layer, and a closing thread sends it what to keep; other sessions in its folder write project state notes. The session closes when that turn ends. `/end` (or `/quit`) closes it at once, with no last turn. `/detach` (or `/background` or `/exit`) leaves the terminal app with the session still running, as Ctrl-C pressed twice does unless [`[ui] quit`](configuration.md#the-terminal-app) says to end it. A closed session reopens when you send it a message.
 
+An automatic close waits until all inputs have been answered. A fresh scheduled run you wrote to stays open after answering you; a dreaming session closes after the last input is answered.
+
 `/done` and `/quit` clear the command from the composer as soon as you send it. If you type more before closing finishes, the terminal stays on the closed session with those words; sending them reopens it.
 
 ## Helpers, and merging or discarding their work
@@ -76,10 +80,10 @@ While a helper works, its parent can send it mail and it can ask its parent ques
 When a helper reports, the agent that started it, its parent, decides what happens to the work; you can tell it what you want done. Razor calls this decision settling, and it has three outcomes:
 
 - Merge: the branch is merged into the parent's checkout, and the helper's worktree and branch are removed. A merge that conflicts is undone, and git's words go back to the parent.
-- Discard: the worktree is removed, but the branch stays in git, unmerged, so nothing is lost and you can still merge or delete it yourself.
+- Discard: uncommitted files are committed on the helper's branch before the worktree is removed; the branch stays in git, unmerged, so you can still merge or delete it yourself. Detached commits must have a branch keeping them. A clean worktree on another branch can be removed; uncommitted files on another branch must be committed there or brought back to the helper's branch first.
 - Merged by hand: Razor records that someone already merged the branch, then removes the worktree, and the branch once git agrees it is merged.
 
-Files the helper left uncommitted are moved to `~/.razor/sessions/<id>/uncommitted`, never deleted.
+On a merge or a settlement recorded as already merged, files the helper left uncommitted are moved to `~/.razor/sessions/<id>/uncommitted`. A refused Git operation leaves the helper unsettled for recovery. If a merge is retried after its worktree is gone, Razor still merges the surviving branch. Discarding a paired helper whose record is already gone clears its parent's remaining helper fact.
 
 ## Agents talking to each other
 
@@ -87,7 +91,7 @@ An agent, its children and theirs share one channel: a group conversation in whi
 
 ## Questions, notes and deliveries
 
-An agent can ask you a question that waits for your answer; it appears in a band under the conversation, and the number keys answer it. Questions an agent asks you clear when you write to its session or close it yourself; MCP and sign-in questions still need an answer. A session that closes on its own keeps its question. Agents also deliver things to your inbox: a file, a link, or a note. In the terminal app, Ctrl-T opens the inbox in the status pane, and Enter there reads a delivered file in the conversation ([Deliveries](configuration.md#deliveries)). Questions and notes from the sessions you started yourself, as opposed to their children, also go to the programs named in the `ask` and `notify` settings. The programs receive the sender's session id, name and project, and a question's entry number, as environment variables. In a new install those show desktop notifications; they can reach your phone instead ([Configuration](configuration.md#notifications)).
+An agent can ask you a question that waits for your answer; it appears in a band under the conversation, and the number keys answer it. Questions an agent asks you clear when you write to its session or close it yourself; MCP and sign-in questions still need an answer. A session that closes on its own keeps its question. A late answer to an agent's settled question still reaches the session and reopens it if closed. Agents also deliver things to your inbox: a file, a link, or a note. In the terminal app, Ctrl-T opens the inbox in the status pane, and Enter there reads a delivered file in the conversation ([Deliveries](configuration.md#deliveries)). Questions and notes from the sessions you started yourself, as opposed to their children, also go to the programs named in the `ask` and `notify` settings. The programs receive the sender's session id, name and project, and a question's entry number, as environment variables. In a new install those show desktop notifications; they can reach your phone instead ([Configuration](configuration.md#notifications)).
 
 ## Always-on agents
 

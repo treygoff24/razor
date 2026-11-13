@@ -10,6 +10,7 @@ mod devices;
 mod emoji;
 mod files;
 mod load;
+mod login;
 mod marks;
 pub mod mcp;
 mod meetings;
@@ -92,6 +93,8 @@ struct App {
     residents: Residents,
     deliveries: Deliveries,
     responses: Arc<Responses>,
+    /// At most one Claude sign-in can replace this computer's credentials at a time.
+    login: Arc<Mutex<Option<login::Attempt>>>,
     devices: Arc<Devices>,
     emoji: Arc<emoji::History>,
     views: Arc<views::Kept>,
@@ -202,6 +205,7 @@ async fn listen(
         residents,
         deliveries,
         responses,
+        login: Arc::default(),
         devices,
         emoji: Arc::new(emoji::History::open(&home).await),
         views: Arc::new(views::Kept::open(&home).await),
@@ -308,7 +312,7 @@ fn routes(app: &App) -> Router {
             "/v1/mail",
             post(mail).layer(DefaultBodyLimit::max(MAIL_BYTES)),
         )
-        .route("/v1/login", post(sign_in))
+        .route("/v1/login", post(login::start).put(login::code))
         .route("/v1/mcp/callback", get(mcp_callback))
         .fallback(|| async { Refusal(StatusCode::NOT_FOUND, "There is no such route.".into()) })
         .layer(DefaultBodyLimit::max(BODY_BYTES))
@@ -376,6 +380,7 @@ impl From<crate::children::Error> for Refusal {
     fn from(e: crate::children::Error) -> Refusal {
         let status = match &e {
             crate::children::Error::Refused(_) => StatusCode::BAD_REQUEST,
+            crate::children::Error::Missing(_) => StatusCode::NOT_FOUND,
             crate::children::Error::Other { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
         Refusal(status, e.to_string())
@@ -394,39 +399,6 @@ impl From<crate::devices::Error> for Refusal {
 
 fn bad(sentence: impl Into<String>) -> Refusal {
     Refusal(StatusCode::BAD_REQUEST, sentence.into())
-}
-
-/// The sign-in runs on its own task; leaving or removing its device cancels it.
-async fn sign_in(State(app): State<App>, Extension(gone): Extension<Gone>) -> Response {
-    let (show, shown) = mpsc::channel(8);
-    let (stop, stopped) = watch::channel(false);
-    let (mut end, ended) = oneshot::channel();
-    tokio::spawn(async move {
-        let login = app.responses.login(show, stopped);
-        tokio::pin!(login);
-        let result = tokio::select! {
-            result = &mut login => result,
-            () = end.closed() => {
-                let _ = stop.send(true);
-                login.await
-            }
-        };
-        let _ = end.send(result);
-    });
-    let last = ended.map(|result| match result {
-        Ok(Ok(())) => Login::Done,
-        Ok(Err(e)) => Login::Failed {
-            error: e.to_string(),
-        },
-        Err(_) => Login::Failed {
-            error: "The sign-in stopped before it ended.".into(),
-        },
-    });
-    let lines = received(shown)
-        .map(|text| Login::Show { text })
-        .chain(stream::once(last))
-        .filter_map(|line| async move { line_of(&line) });
-    ndjson(lines, gone)
 }
 
 #[derive(Deserialize)]

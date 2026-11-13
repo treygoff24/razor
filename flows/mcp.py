@@ -38,7 +38,15 @@ def result(params, base):
         return {"resultType": "complete", "content": [{"type": "text", "text": f"{name} accepted"}]}
     text = os.getcwd() + ":" + os.environ.get("MCP_LITERAL", "") if name == "where" else "MCP_RICH_37"
     return {"resultType": "complete", "content": [{"type": "text", "text": text},
-            {"type": "image", "data": PNG, "mimeType": "image/png"}],
+            {"type": "image", "data": PNG, "mimeType": "image/png"},
+            {"type": "resource_link", "name": "internal", "title": "MCP_LINK_37", "uri": "https://example.com/mcp"},
+            {"type": "text", "text": "MCP_BETWEEN_37"},
+            {"type": "resource", "resource": {"uri": "resource://text/37", "text": "MCP_EMBEDDED_37"}},
+            {"type": "audio", "mimeType": "audio/wav", "data": "TVBDX0FVRElPXzM3"},
+            {"type": "resource", "resource": {"uri": "resource://binary/37", "mimeType": "application/octet-stream", "blob": "TVBDX0JMT0JfMzc="}},
+            {"type": "resource_link", "name": "MCP_NAME_37", "uri": "resource://name/37"},
+            {"type": "resource", "resource": {"uri": "resource://untyped/37", "blob": "TVBDX0JMT0JfMzc="}},
+            {"type": "text", "text": "MCP_END_37"}],
             "structuredContent": {"marker": "MCP_STRUCTURED_37", "arguments": params.get("arguments", {})}}
 
 

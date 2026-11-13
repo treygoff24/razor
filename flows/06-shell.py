@@ -12,7 +12,7 @@ import tomllib
 from dataclasses import replace
 from claude import reply
 from driver import REPLIES, Reply, flow
-from responses import PLAIN, call, done, response
+from responses import PLAIN, call, done, message, response
 import server
 
 GPT = "gpt-6.1-sol"
@@ -63,11 +63,13 @@ with flow(replies, config=PLAIN) as f:
         following = "printf steered > steered"
         if name == "opus":
             replies += [reply(*[(id, "Bash", {"command": command}) for id, command in commands]),
-                        reply(("call_next", "Bash", {"command": following}), match=correction),
+                        reply(("call_next", "Bash", {"command": following}),
+                              text="I will write steered before the next action.", match=correction),
                         reply(text="flow done")]
         else:
             replies += [response([call("bash", json.dumps({"command": command}), id) for id, command in commands]),
-                        Reply(response([call("bash", json.dumps({"command": following}), "call_next")]).body,
+                        Reply(response([message("I will write steered before the next action."),
+                                        call("bash", json.dumps({"command": following}), "call_next")]).body,
                               match=correction), done()]
         here, base = part(f"steering-{name}"), len(f.sent())
         session = server.post(f, "/sessions", {"cwd": str(here.cwd), "model": name})["session"]

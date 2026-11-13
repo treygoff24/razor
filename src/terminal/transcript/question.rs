@@ -47,7 +47,7 @@ impl Transcript {
             return None;
         };
         // Razor's own question, its card drawn from the call's decoded input.
-        crate::record::ask(name, input)?;
+        crate::record::ask(false, name, input)?;
         let answer = self.entries.range(e.id..).find_map(|(_, a)| match &a.body {
             Body::Input(Input {
                 from: Origin::Answer { ask },

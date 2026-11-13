@@ -14,9 +14,9 @@ if mark:
         sys.exit('Invalid RAZOR_ACTION: use a stable version no newer than the release and one sentence of at most 200 characters without double quotes, backslashes, dollars, backticks or newlines.')
 PY
 case "${RAZOR_PLATFORM:-$(uname -s)-$(uname -m)}" in
-  Linux-x86_64|linux-x64) platform=linux-x64; target=x86_64-unknown-linux-gnu; cua=linux-x86_64-binary; cua_sha=123444e4a96652e5e0d115a37e3b969d346c985ec995a17f6145fd4c9992a0b8; browser=8e69c9fb662514c9cf36e4911e94e913742ba066e55102486350e049dd847612; rg=x86_64-unknown-linux-musl; rg_sha=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c; jq=linux-amd64; jq_sha=b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f ;;
-  Linux-aarch64|linux-arm64) platform=linux-arm64; target=aarch64-unknown-linux-gnu; cua=linux-arm64-binary; cua_sha=3d2473ef4dd0917390a8ca4de9954e74d53cb372dd32b2d658a9d1c19d1650ea; browser=34be55c2b92d8d199fb9d1d62a905ee5b6ac5b1f3e8c24e5b20597f370d905e5; rg=aarch64-unknown-linux-musl; rg_sha=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915; jq=linux-arm64; jq_sha=8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309 ;;
-  Darwin-arm64|darwin-arm64) platform=darwin-arm64; target=aarch64-apple-darwin; cua=darwin-universal-binary; cua_sha=5943218adaa1cb1aac00442bad9012e26384324f43dc6e766e367a55fa3ba70f; browser=05338a8eeddf0b3f9ebf0c87a6c21aedc10685608c68618e1a8483c43eae9c3f; rg=aarch64-apple-darwin; rg_sha=3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4; jq=macos-arm64; jq_sha=2d75340ba57a4b4b4c8708a21c2dc8e958a48aaa8bba13b27f77f6e4c0eca07e ;;
+  Linux-x86_64|linux-x64) platform=linux-x64; target=x86_64-unknown-linux-gnu; cua=linux-x86_64-binary; cua_sha=e01fe9dd44e6a7d2d8ac128737fb0204c6deb57929da6cc2871c049eda96f7dc; browser=8e69c9fb662514c9cf36e4911e94e913742ba066e55102486350e049dd847612; rg=x86_64-unknown-linux-musl; rg_sha=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c; jq=linux-amd64; jq_sha=b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f ;;
+  Linux-aarch64|linux-arm64) platform=linux-arm64; target=aarch64-unknown-linux-gnu; cua=linux-arm64-binary; cua_sha=6c1ad93c32485270cf826c6439b119b3ad548117e8a9fe8f0073bd11251b9330; browser=34be55c2b92d8d199fb9d1d62a905ee5b6ac5b1f3e8c24e5b20597f370d905e5; rg=aarch64-unknown-linux-musl; rg_sha=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915; jq=linux-arm64; jq_sha=8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309 ;;
+  Darwin-arm64|darwin-arm64) platform=darwin-arm64; target=aarch64-apple-darwin; cua=darwin-universal-binary; cua_sha=5c55f62f04f2f204df8a2ab11f7d821520f275e2bf90512a0fbbfedd0ea68920; browser=05338a8eeddf0b3f9ebf0c87a6c21aedc10685608c68618e1a8483c43eae9c3f; rg=aarch64-apple-darwin; rg_sha=3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4; jq=macos-arm64; jq_sha=2d75340ba57a4b4b4c8708a21c2dc8e958a48aaa8bba13b27f77f6e4c0eca07e ;;
   *) echo 'Unsupported platform; use Linux x86_64 or aarch64, or macOS arm64.' >&2; exit 1 ;;
 esac
 stage=$(mktemp -d)
@@ -44,12 +44,14 @@ else
   binary=$target_dir/release/razor
 fi
 [ "$binary" = "$stage/razor" ] || cp "$binary" "$stage/razor"
-python3 scripts/notices.py "$target" > "$stage/THIRD-PARTY-NOTICES.md"
+browser_url="https://github.com/vercel-labs/agent-browser/releases/download/v0.43.0/agent-browser-$platform"
+cua_url="https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.49.5/cua-driver-rs-0.49.5-$cua.tar.gz"
+python3 scripts/notices.py "$target" "$browser_url" "$cua_url" > "$stage/THIRD-PARTY-NOTICES.md"
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
 # Downloads $1 to $2, which must match the pinned SHA-256 $3.
 fetch() { curl -fsSL "$1" -o "$2" && [ "$(sha256 "$2" | cut -d ' ' -f 1)" = "$3" ] || { echo "Download or checksum failed: $1" >&2; exit 1; }; }
-fetch "https://github.com/vercel-labs/agent-browser/releases/download/v0.43.0/agent-browser-$platform" "$stage/agent-browser" "$browser"
-fetch "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.49.1/cua-driver-rs-0.49.1-$cua.tar.gz" "$stage.cua" "$cua_sha"
+fetch "$browser_url" "$stage/agent-browser" "$browser"
+fetch "$cua_url" "$stage.cua" "$cua_sha"
 tar -xzf "$stage.cua" -C "$stage" cua-driver
 # ripgrep and jq for agents' shells, in tools/, which serve puts last on PATH so the person's own copies win.
 fetch "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-$rg.tar.gz" "$stage.rg" "$rg_sha"

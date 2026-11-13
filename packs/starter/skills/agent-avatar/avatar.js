@@ -267,14 +267,14 @@ async function install(sheet, name, {pool = false, resident, session}) {
   if (!/^[A-Za-z0-9_-]{1,40}$/.test(name)) throw Error('an avatar name is 1 to 40 letters, digits, - or _');
   const bytes = read(sheet, 2048, SMALLER), home = process.env.RAZOR_HOME || path.join(os.homedir(), '.razor');
   check(bytes);
-  if (resident) razor('config', 'get', `residents.${resident}`);
+  if (resident) razor('config', 'get', `residents.${JSON.stringify(resident)}`);
   // A new path every time, since a changed path is what tells the server the picture changed.
   const file = path.join(home, 'avatars', `${name}-${crypto.randomBytes(16).toString('hex')}.png`);
   fs.mkdirSync(path.dirname(file), {recursive: true});
   fs.writeFileSync(file, bytes, {flag: 'wx'});
   try { razor('config', 'set', `brand.avatars.${name}.file`, JSON.stringify(file)); } catch (e) { fs.rmSync(file); throw e; }
   razor('config', 'set', `brand.avatars.${name}.pool`, String(pool));
-  if (resident) razor('config', 'set', `residents.${resident}.avatar`, JSON.stringify(name));
+  if (resident) razor('config', 'set', `residents.${JSON.stringify(resident)}.avatar`, JSON.stringify(name));
   // A missing key or socket means the server is not running; a refusal has no code.
   if (session) await wear(home, session, name).catch(e => {
     throw e.code ? Error(`Razor is not running, so avatar ${name} is installed but not yet worn: start Razor and type /avatar ${name} in the conversation`) : e;

@@ -106,6 +106,21 @@ with wall_clock(still=False) as (stall, clock, advance), flow(replies, env={**cl
     for fields, refusal in [({"ref": 1}, "holds no words"), ({"expires": "2099-01-01"}, "standing decision")]:
         failed = use("memory", resume=session, action="write", kind="ruling", text="Must not land.", **fields)[1]
         assert failed["outcome"] == "error" and refusal in failed["output"], failed
+    replies.extend([reply((None, "mcp__razor__message", {"to": "parent", "type": "question", "text": "Keep the answer marker?"})), reply(text="asked")])
+    answered = f.ask("Ask whether to keep the answer marker.")["session"]
+    question = next(e["id"] for e in f.record(answered) if e["kind"] == "call")
+    question_cite = f"razor:{answered}:l-{question}"
+    replies.append(reply(text="answered"))
+    answer = post(f, f"/sessions/{answered}/asks/{question}", {"text": "Yes."})["entry"]
+    until(f, answered, lambda es: any(e["kind"] == "turn_end" and answer in e["inputs"] for e in es))
+    saved = use("memory", resume=answered, action="write", kind="ruling", text="Keep the answer marker.", ref=answer, cites=[question_cite])[1]
+    assert saved["outcome"] == "success", saved
+    automatic = use("memory", resume=answered, action="write", kind="ruling", text="Keep the answer marker.", ref=answer)[1]
+    for result in (saved, automatic):
+        file = json.loads(use("memory", resume=answered, action="get", id=json.loads(result["output"])["id"])[1]["output"])["file"]
+        assert all(f"cites: razor:{answered}:l-{ref}" in file for ref in (question, answer)) and [line for line in file.splitlines() if line.startswith("> ")] == ["> Yes."], "ruling lost the answered question or exact answer"
+    unrelated = use("memory", resume=answered, action="write", kind="ruling", text="Must not land.", ref=answer, cites=[f"razor:{answered}:l-1"])[1]
+    assert unrelated["outcome"] == "error" and "cites" in unrelated["output"] and "ref" in unrelated["output"], unrelated
     legacy = next((f.home / ".razor/memory").rglob(f"{ruling}.md")).with_name("ruling-legacy24.md")
     legacy.write_text(f'---\nsource: {source}\n---\nthe human said ({source}): "LEGACY_WORDS_24"\n\nagent\'s reading:\nRead the old marker.')
     # A ruling from before Razor, as the one-time import wrote it, and one with no quotation.
@@ -276,6 +291,25 @@ with wall_clock(still=False) as (stall, clock, advance), flow(replies, env={**cl
     # clock: git's group, its hook included, is asked to end (TERM), git removes its lock before
     # the write answers, and the next write lands.
     shared = f'[tasks]\nremote = "{os.path.relpath(remote, f.cwd)}"\n'
+    # A nested project's private memory cannot join the parent's remote, including when it
+    # appears after the parent was already shared. Moving it out permits the parent to share.
+    nested = f.cwd / "private-memory"
+    nested.mkdir()
+    here("init", "-q", at=nested)
+    private = use("memory", action="write", kind="note", text="Private nested memory.", description="Private.", project=str(nested))[1]
+    private = next((f.home / ".razor/memory/projects").rglob(f'{json.loads(private["output"])["id"]}.md')).parent
+    (f.cwd / ".razor/config.local.toml").write_text(shared + f'[memory]\nremote = "{remote}"\n')
+    parent_memory = lambda: use("memory", action="write", kind="note", text="Shared parent memory.", description="Shared.")[1]
+    refused = parent_memory()
+    assert refused["outcome"] == "error" and str(private) in refused["output"] and not there("for-each-ref", "refs/razor/memory"), refused
+    assert use("memory", action="search", query="private")[1]["outcome"] == "success"
+    private.rename(f.home / "private-moved")
+    assert parent_memory()["outcome"] == "success", "separated memory was refused"
+    assert private.name + "/" not in there("log", "--format=", "--name-only", "refs/razor/memory"), "private memory entered shared history"
+    tip = there("rev-parse", "refs/razor/memory")
+    (f.home / "private-moved").rename(private)
+    refused = parent_memory()
+    assert refused["outcome"] == "error" and str(private) in refused["output"] and there("rev-parse", "refs/razor/memory") == tip, refused
     (f.cwd / ".razor/config.local.toml").write_text(shared)
     lock, signals, ahead, background = store / ".git/index.lock", stall / "signals", 0, ThreadPoolExecutor(2)
 
@@ -302,6 +336,13 @@ with wall_clock(still=False) as (stall, clock, advance), flow(replies, env={**cl
         return noted
 
     write = stalled("hold add", "Stalled once.")
+    other = f.cwd.parent / "independent-store"
+    other.mkdir()
+    replies.extend([reply((None, "mcp__razor__task", {"action": "write", "title": "Independent.", "project": str(other)}), match="INDEPENDENT_STORE_24"),
+                    reply(text="saved", match="INDEPENDENT_STORE_24")])
+    fast = background.submit(f.ask, "INDEPENDENT_STORE_24")
+    fast.result(30)
+    assert (f.home / ".razor/tasks" / str(other).lstrip("/") / "%/1.md").exists(), "an independent project writes while another store is held"
     jump(121)
     timed_out = write.result(30)[1]
     ended = (lock.exists(), heard())
@@ -329,8 +370,9 @@ with wall_clock(still=False) as (stall, clock, advance), flow(replies, env={**cl
     there("update-ref", "refs/razor/tasks", moved)
     os.utime(store / ".git/FETCH_HEAD", (0, 0))
     blocked = use("task", action="write", id=2, comment="Refused while held.")[1]
+    assert lock.exists(), "a fresh lock held by outside Git was removed"
     holder.communicate(b"")
-    assert blocked["outcome"] == "error" and "git-locks" in blocked["output"], blocked
+    assert blocked["outcome"] == "error" and f"rm -- '{lock}'" in blocked["output"] and "ten minutes" in blocked["output"], blocked
     # A git that outlives TERM is killed five seconds later and leaves its lock; the next write
     # says so and names the page on clearing one, which once followed lets a write land.
     heard()
@@ -342,14 +384,17 @@ with wall_clock(still=False) as (stall, clock, advance), flow(replies, env={**cl
     assert killed["outcome"] == "error" and lock.exists(), killed
     refused = use("task", action="write", id=2, comment="Refused after the kill.")[1]
     assert refused["outcome"] == "error" and "git-locks" in refused["output"], refused
-    lock.unlink()
-    assert use("task", action="write", id=2, comment="Written once cleared.")[1]["outcome"] == "success"
-    # A refresh whose HEAD check passes its limit refuses the write and keeps an unsent commit.
+    os.utime(lock, (0, 0))
+    assert use("task", action="write", id=2, comment="Written once cleared.")[1]["outcome"] == "success", "an old index lock did not clear itself"
+    cleared = next(line for line in (f.home / ".razor/server.log").read_text().splitlines() if f"removed index.lock in {store} after " in line)
+    assert not lock.exists() and int(cleared.rsplit(" after ", 1)[1].split()[0]) > 600, "lock recovery did not log its age"
+    # A refresh whose tree check passes its limit refuses the write and keeps an unsent commit.
     for name in ("unsent.md", "a1.md"): (store / name).write_text(name)
     here("add", "-A")
     here("-c", "user.name=Flow", "-c", "user.email=flow@example.invalid", "commit", "-qm", "Unsent")
     unsent = here("rev-parse", "HEAD")
-    write = stalled("hold rev-parse -q --verify HEAD", "Refreshed too slowly.")
+    os.utime(store / ".git/FETCH_HEAD", (0, 0))
+    write = stalled("hold rev-parse -q --verify HEAD^{tree}", "Refreshed too slowly.")
     jump(121)
     kept = (write.result(30)[1]["outcome"], here("rev-parse", "HEAD") == unsent, (store / "unsent.md").exists())
     assert kept == ("error", True, True), kept

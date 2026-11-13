@@ -279,9 +279,10 @@ impl Session {
             threshold: None,
             handover: None,
             closing: None,
-            interrupted: false,
+            interrupted: None,
             thoughts: self.thoughts,
             hold: Default::default(),
+            reply: Reply::default(),
         });
         Ok(())
     }
@@ -345,6 +346,14 @@ impl Session {
             .find(|(_, i)| i.command == Some(Command::Handover));
         if let (Some(c), Some((entry, _))) = (&mut self.conversation, asked) {
             c.threshold = Some((*entry, Trigger::Handover));
+        }
+        if let Some((entry, _)) = batch
+            .iter()
+            .rev()
+            .find(|(_, i)| record::steering(self.record.summary(), i))
+            && let Some(c) = &mut self.conversation
+        {
+            c.reply.pending = Some(*entry);
         }
         let (taken, mut inputs): (Vec<_>, Vec<_>) = batch
             .into_iter()
@@ -514,7 +523,9 @@ impl Session {
         let mut start = false;
         if let Some(c) = &mut self.conversation {
             c.resuming &= matches!(line.says, FromBridge::Closed { .. });
-            c.interrupted &= !matches!(line.says, FromBridge::TurnEnd { .. });
+            if matches!(line.says, FromBridge::TurnEnd { .. }) {
+                c.interrupted = None;
+            }
             if let FromBridge::Delta { text } = &mut line.says {
                 (*text, start) = c.hold.push(text);
             } else if let FromBridge::Entry {
@@ -539,6 +550,9 @@ impl Session {
                 window,
                 read,
             } => {
+                if let Some(c) = &mut self.conversation {
+                    c.reply.refused = false;
+                }
                 self.read(read);
                 self.context(tokens, window).await?
             }

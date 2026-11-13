@@ -6,20 +6,20 @@ import os
 import signal
 import time
 
-from driver import REPLIES, Reply, flow
+from driver import flow
 import server
 from server import gone, post, send, until
 from terminal import Terminal
-from model import agent, reply
+from responses import PLAIN, reply
 
 turns = [f"THREAD_64_{n}" for n in range(1, 8)]
-replies = [Reply((REPLIES / "done.sse").read_bytes(), match=m) for m in turns]
-replies += [agent("Fresh run.", "start", name="fresh-child", brief="Wait for release."),
-            agent("Fresh run.", "wait", timeout_ms=30000),
-            reply("You are fresh-child,", "Bash", {"command": "until [ -e release ]; do sleep .05; done"}),
-            agent("You are fresh-child,", "finish", status="finished", report="FRESH_DONE"),
-            reply("FRESH_DONE")]
-with flow(replies) as f:
+replies = [reply(m, "flow done") for m in turns]
+replies += [reply("Fresh run.", "agent", action="start", name="fresh-child", brief="Wait for release."),
+            reply("Fresh run.", "agent", action="wait", timeout_ms=30000),
+            reply("You are fresh-child,", "bash", command="until [ -e release ]; do sleep .05; done", wait_ms=120000),
+            reply("You are fresh-child,", "agent", action="finish", status="finished", report="FRESH_DONE"),
+            reply("FRESH_DONE", "flow done")]
+with flow(replies, model="sol", config=PLAIN) as f:
     (f.cwd / "persona.md").write_text("You are Ember.")
     with (f.home / ".razor/config.toml").open("a") as config:
         config.write(f"\n[residents.ember]\ncwd = {json.dumps(str(f.cwd))}\n"
@@ -134,9 +134,9 @@ with flow(replies) as f:
 # it, and the words come back after a visit elsewhere (Trey, 2026-11-06: "I lost everything I was typing").
 closing = "The person asked for `/done`"
 rs = [f"r{n}" for n in range(1, 8)]
-replies = [reply("CLOSE_64_A"), reply("CLOSE_64_B"),
-           reply(closing, "Bash", {"command": "until [ -e closed ]; do sleep .05; done"}), reply(closing)]
-with flow(replies) as f:
+replies = [reply("CLOSE_64_A", "flow done"), reply("CLOSE_64_B", "flow done"),
+           reply(closing, "bash", command="until [ -e closed ]; do sleep .05; done", wait_ms=120000), reply(closing, "flow done")]
+with flow(replies, model="sol", config=PLAIN) as f:
     with (f.home / ".razor/config.toml").open("a") as config:
         config.write("".join(f"\n[residents.{r}]\ncwd = {json.dumps(str(f.cwd))}\n" for r in ("ember", "fir", *rs)))
     server.start(f)

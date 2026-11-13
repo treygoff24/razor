@@ -242,38 +242,58 @@ impl Session {
         &mut self,
         ask: EntryId,
         answer: Answer,
+        request: Option<String>,
         device: Option<String>,
     ) -> Result<EntryId, Error> {
+        if let Some(entry) = self.record.summary().repeat(request.as_deref()) {
+            return Ok(entry);
+        }
         let answered = |text| Input {
+            request,
             device,
             ..Input::new(Origin::Answer { ask }, text)
         };
-        let questions = &self.record.summary().questions;
-        let Some(question) = questions.iter().find(|q| q.id.1 == ask) else {
-            return invalid("This ask is not open; it may already have an answer.");
+        let text = |options: &[String]| match answer {
+            Answer::Text(text) => Ok(text),
+            Answer::Option(index) => options
+                .get(index)
+                .cloned()
+                .ok_or_else(|| Error::Invalid("That option is not in this ask.".into())),
         };
-        let mut text = match answer {
-            Answer::Text(text) => text,
-            Answer::Option(index) => match question.options.get(index) {
-                Some(text) => text.clone(),
-                None => return invalid("That option is not in this ask."),
-            },
+        let options = match self.record.entry(ask).await?.body {
+            Body::Question {
+                options, redirect, ..
+            } => {
+                let s = self.record.summary();
+                if !s.questions.iter().any(|q| q.id.1 == ask) {
+                    return invalid("This ask is not open; it may already have an answer.");
+                }
+                let mut text = text(&options)?;
+                if redirect {
+                    let completed = self.c.inner.mcp_auth.complete(&text).await;
+                    completed.map_err(|e| Error::Invalid(e.to_string()))?;
+                    text = profiles::mcp_text("signed_in", &[]);
+                }
+                let entry = self.append(Body::Input(answered(text)), None).await?;
+                if self.state == State::Working {
+                    self.delivered.push(entry);
+                } else {
+                    self.end_turn(vec![entry], End::Done, Usage::default(), None)
+                        .await?;
+                }
+                return Ok(entry);
+            }
+            Body::Call { name, input, .. } => {
+                let Some(question) =
+                    record::ask(self.record.summary().child.is_some(), &name, &input)
+                else {
+                    return invalid("This entry is not a question to the person.");
+                };
+                record::options(&question)
+            }
+            _ => return invalid("This entry is not a question to the person."),
         };
-        if let Body::Question { redirect, .. } = self.record.entry(ask).await?.body {
-            if redirect {
-                let completed = self.c.inner.mcp_auth.complete(&text).await;
-                completed.map_err(|e| Error::Invalid(e.to_string()))?;
-                text = profiles::mcp_text("signed_in", &[]);
-            }
-            let entry = self.append(Body::Input(answered(text)), None).await?;
-            if self.state == State::Working {
-                self.delivered.push(entry);
-            } else {
-                self.end_turn(vec![entry], End::Done, Usage::default(), None)
-                    .await?;
-            }
-            return Ok(entry);
-        }
+        let text = text(&options)?;
         self.admit(answered(text)).await
     }
 
@@ -324,12 +344,6 @@ impl Session {
             None => self.waiters.push_back((at, reply)),
         }
         Ok(answer)
-    }
-
-    /// Whether an `agent wait` call is still waiting, before its deadline.
-    pub(in crate::controller) fn waiting(&mut self) -> BoxFuture<'_, Result<bool, Error>> {
-        let waiting = self.waiters.iter().any(|(_, waiter)| !waiter.is_closed());
-        Box::pin(std::future::ready(Ok(waiting)))
     }
 
     /// Gives admitted news to a waiting call, if one waits. The person's input ends every wait

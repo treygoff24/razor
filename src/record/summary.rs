@@ -3,7 +3,7 @@
 mod voice;
 pub(crate) use voice::{Meeting, MeetingState};
 
-use super::calls::{action, ask, target};
+use super::calls::{action, ask, options, target};
 use crate::protocol::*;
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -488,6 +488,7 @@ impl Summary {
                 ..
             } => self.mail_questions.push(id.clone()),
             Body::Notice { .. }
+            | Body::NotRun { .. }
             | Body::Text { .. }
             | Body::Thinking { .. }
             | Body::Response { .. }
@@ -661,6 +662,12 @@ impl Summary {
         }
     }
 
+    /// The exec owning a nested call: its id, a colon and a number, among this turn's cells.
+    pub(crate) fn nested(&self, call: &str) -> Option<EntryId> {
+        let (exec, _) = call.rsplit_once(':')?;
+        self.cells.iter().find(|c| c.0.0 == exec).map(|c| c.1)
+    }
+
     /// The exec Call of the cell `call` reads: its own for an exec, the one it names for a
     /// `wait`; None for any other call.
     pub(crate) fn reads(&self, call: &str) -> Option<EntryId> {
@@ -675,17 +682,13 @@ impl Summary {
     }
 
     fn question(&mut self, id: EntryId, at: u64, name: &str, input: &serde_json::Value) {
-        let asked = self.child.is_none().then(|| ask(name, input)).flatten();
-        let Some(input) = asked else { return };
+        let Some(input) = ask(self.child.is_some(), name, input) else {
+            return;
+        };
         self.questions.push(Ask {
             id: (self.session.clone(), id),
             text: input["text"].as_str().unwrap_or_default().into(),
-            options: input["options"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect(),
+            options: options(&input),
             at,
             waited: false,
         });

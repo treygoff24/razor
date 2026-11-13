@@ -78,9 +78,9 @@ Escape stops what the agent is doing. Ctrl-C twice quits the app; the session ke
 
 ## How the code is kept small and correct
 
-Razor's whole source is held to a line budget the build enforces, and tested only end to end. [SPEC.md](SPEC.md) says what Razor must do and why, in the words of the person who decided each behaviour, and what was deliberately left out. [RULES.md](RULES.md) gives twenty-five rules for the code, one line each, such as no abstraction before its second use and nothing unbounded in memory.
+Razor's whole source is held to a line ceiling the build enforces, and tested only end to end. [SPEC.md](SPEC.md) says what Razor must do and why, in the words of the person who decided each behaviour, and what was deliberately left out. [RULES.md](RULES.md) gives twenty-five rules for the code, one line each, such as no abstraction before its second use and nothing unbounded in memory.
 
-A script, `scripts/size.py`, counts every module's lines against its row of the spec's budget table and fails the build when one goes over. Five speed and memory limits sit beside it:
+A script, `scripts/size.py`, counts every part's lines and fails the build when the total goes over the ceiling set for the release. Five speed and memory limits sit beside it:
 
 - 15 ms from opening the terminal app to its first frame;
 - 24 MiB of server memory at rest;

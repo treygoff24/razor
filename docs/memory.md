@@ -22,7 +22,7 @@ A memory belongs to its project, or to every project when the agent writes it th
 
 ## How your decisions become rulings
 
-A ruling can only come from you. The agent writes one short plain rule and cites the message of yours, or your answer to a question, that it comes from. Razor checks that the cited entry holds your words and copies them into the ruling file under the rule. It never attaches the agent's previous reply as a question. Several rulings may cite the same message.
+A ruling can only come from you. The agent writes one short plain rule and cites the message of yours, or your answer to a question, that it comes from. Razor checks that the cited entry holds your words and copies them into the ruling file under the rule. An answer also keeps a citation to the question it answered. It never attaches the agent's previous reply as a question. Several rulings may cite the same message.
 
 For example, when you decide that every merge waits for the tests, the startup page shows that rule. Reading it whole shows your original message, even if the session has since been deleted or the memory has reached another machine. Older ruling files show their agent's-reading line until dreaming rewrites them.
 
@@ -103,7 +103,7 @@ For the nightly pass, Razor checks code citations against main and live branches
 
 ## Dreaming
 
-At 03:00, Razor starts one fresh dreaming session for each project whose sessions changed since its last pass, finishing each project before starting the next. Automatic discovery skips missing project roots and roots under the system temp directory, `/tmp`, `/var/tmp`, `$XDG_RUNTIME_DIR`, or the user cache directory (`$XDG_CACHE_HOME`, otherwise `~/.cache`). The first project that starts also tidies the memories shared by every project on that server; the remaining dreams list only their own project's memories. A restart during the night can repeat that shared tidy. A resident's project uses a fresh run; other projects get a top-level session named `dream · <date>`. A dreaming session closes whenever its turn ends, including a turn opened by your answer. The pass uses the server's default model and effort, with `[memory] model` overriding the model and `[memory] night` changing the local time. These two settings belong in your own file or a pack, never in a project. Set `night = false` to turn dreaming off, including manual runs.
+At 03:00, Razor starts one fresh dreaming session for each project whose sessions changed since its last pass, finishing each project before starting the next. Automatic discovery skips missing project roots and roots under the system temp directory, `/tmp`, `/var/tmp`, `$XDG_RUNTIME_DIR`, or the user cache directory (`$XDG_CACHE_HOME`, otherwise `~/.cache`). The first project that starts also tidies the memories shared by every project on that server; the remaining dreams list only their own project's memories. A restart during the night can repeat that shared tidy. A resident's project uses a fresh run; other projects get a top-level session named `dream · <date>`. A dreaming session closes at the end of a turn that leaves no input unanswered, including a turn opened by your answer. The pass uses the server's default model and effort, with `[memory] model` overriding the model and `[memory] night` changing the local time. These two settings belong in your own file or a pack, never in a project. Set `night = false` to turn dreaming off, including manual runs.
 
 The session list starts at the later of the last pass and seven days ago; after a missed week, older session inputs fall outside the pass, while stored memories and state notes remain available. Dreaming reads the project's recent session digests, its memory contents and changed source citations. It checks claims, files knowledge into wiki pages, merges session state notes, looks for repeated failures and questions, and prunes what no longer helps. It can read files, recall sessions, load skills, read status, use memory and tasks, and send messages. It has no shell or file-writing tools. Memory permits ruling rewrites only as replacements of existing rulings, carrying forward all original quotations and citations; dreaming cannot originate a ruling. Each rewrite works from your original words, preserving the meaning of every ruling that still applies, and each night it checks new rules against their sources.
 
@@ -124,6 +124,8 @@ A shared project has one pass a night among a person's homes that can reach each
 remote = "ssh://git@git.example.com/you/app.git"
 ```
 
+A home whose memory or tasks folder already has its own files and a different history keeps that folder local and gives a warning on the startup page: to line it up by hand, move it aside, make a call to take the shared files, then copy back memories under unused names or recreate tasks with the task tool.
+
 Only the project's private settings may set this key. Choose a repository whose readers may see the project's memory. With no remote named, the memory folder remains plain files.
 
 ### Sharing with other people
@@ -134,7 +136,11 @@ To record an agreement, write it as a new ruling citing your words, with your ol
 
 A repository you cloned may already share memory or tasks on its origin. Once per project, in the background and never while a session starts, Razor asks the origin; when it holds either, a later startup page asks you whether to join. Yes sets both remotes to `origin` in `.razor/config.local.toml`; no sets `[memory] join = false` there, so you are not asked again. Nothing is shared until you say yes. A page asks at most five such questions, then counts the rest.
 
+Until project memory folders are isolated, shared memory refuses a directory outside its defined structure: at the top, any directory besides `state`, `wiki`, `residents` and `.git`, and inside `state` or `wiki`, any directory. The refusal names it: move it out of the project's memory folder, or remove `[memory] remote` from `.razor/config.local.toml` to keep the memory local. This check runs before every shared change and refresh, so a folder added after sharing also stops the next push. It does not remove anything already pushed. A nested project under `state`, `wiki` or `residents` can be indistinguishable from the parent's own files and remains a limit.
+
 ## Tasks
+
+Each task store serializes its own writes; a slow write in one project leaves other projects' task stores available.
 
 A project's tasks are the work still to do: each has a number, a title, a description and a priority (0, most urgent, to 4), and may have a parent task, tasks blocking it, a due date and a claim. Agents keep them with their `task` tool; anything owed, an agent's promises to itself included, is a task with a due date.
 

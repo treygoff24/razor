@@ -162,14 +162,16 @@ impl Controller {
     /// Admits a display row at creation and restart seeding, never from a historical read.
     async fn seed(&self, session: &SessionId) -> Result<(), Error> {
         let summary = self.summary(session).await?;
+        self.child_rows(&summary).await;
         let row = self.row(&summary).await;
         lock(&self.inner.status).row(row);
-        self.child_rows(&summary).await;
         Ok(())
     }
 
     /// Rebuilds evicted local helpers from their records before applying their parent's facts.
     pub(super) async fn child_rows(&self, parent: &Summary) {
+        lock(&self.inner.status).child_rows(parent, Vec::new());
+        let mut rows = Vec::new();
         for child in &parent.children {
             if child.session.address().is_none()
                 && child.report.as_ref().is_some_and(Report::listed)
@@ -180,18 +182,13 @@ impl Controller {
                 // Read without entering a child's queue: its load may be waiting on this parent.
                 match self.inner.summaries.read(self.home(), &child.session).await {
                     Ok(summary) => {
-                        let mut row = self.row(&summary).await;
-                        children::child_row(&parent.session, child, &mut row);
-                        let mut status = lock(&self.inner.status);
-                        if !status.agents.contains_key(&child.session) {
-                            status.row(row);
-                        }
+                        rows.push(self.row(&summary).await);
                     }
                     Err(e) => eprintln!("razor: reading child {}'s row: {e}", child.session),
                 }
             }
         }
-        lock(&self.inner.status).child_rows(parent);
+        lock(&self.inner.status).child_rows(parent, rows);
     }
 
     /// Seeds missing local display rows without loading session tasks.
@@ -430,17 +427,20 @@ impl Controller {
         Ok(taken.ok().and_then(Result::ok))
     }
 
-    /// Answers a still-open recorded question once, in the asker's own record, naming the
-    /// enrolled device that answered.
+    /// Records the person's answer, including one to a settled message question. A repeated
+    /// request returns its original entry; MCP and sign-in questions must still be open.
     pub(crate) async fn answer(
         &self,
         session: &SessionId,
         ask: EntryId,
         answer: Answer,
+        request: Option<String>,
         device: Option<String>,
     ) -> Result<EntryId, Error> {
-        self.ask(session, move |s| Box::pin(s.answer(ask, answer, device)))
-            .await
+        self.ask(session, move |s| {
+            Box::pin(s.answer(ask, answer, request, device))
+        })
+        .await
     }
 
     /// Withdraws an input not yet sent to a model; its `Stopped` turn end is durable.

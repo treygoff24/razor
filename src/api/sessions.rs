@@ -317,13 +317,24 @@ async fn handover(State(app): State<App>, Path(id): Path<SessionId>) -> Reply {
     Ok(Json(entry.map_or(json!({}), |e| json!({ "entry": e }))))
 }
 
+#[derive(Deserialize)]
+struct AnswerRequest {
+    #[serde(flatten)]
+    answer: Answer,
+    request: Option<String>,
+}
+
 async fn answer(
     State(app): State<App>,
     Path((id, ask)): Path<(SessionId, EntryId)>,
     Extension(devices::Enrolled(device)): Extension<devices::Enrolled>,
-    Json(a): Json<Answer>,
+    Json(a): Json<AnswerRequest>,
 ) -> Reply {
-    let entry = app.controller.answer(&id, ask, a, device).await?;
+    request(a.request.as_deref())?;
+    let entry = app
+        .controller
+        .answer(&id, ask, a.answer, a.request, device)
+        .await?;
     Ok(Json(json!({ "entry": entry })))
 }
 

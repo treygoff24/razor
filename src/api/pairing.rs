@@ -2,7 +2,7 @@
 use super::*;
 use crate::devices::pairing::{self, BYTES, Code, DEADLINE, Exchange};
 use devices::Enrolled;
-use iroh::{Endpoint, EndpointAddr, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, TransportAddr, Watcher};
 use razor_network::{Client, Connect, Protocol};
 
 #[derive(Deserialize)]
@@ -37,13 +37,33 @@ pub(super) async fn add(
     Json(command): Json<Command>,
 ) -> Result<Response, Refusal> {
     local(device)?;
-    let endpoint = endpoint(&app).await?;
     let relays = app.controller.config().await.network.advertised();
+    let endpoint = endpoint(&app).await?;
+    let mut status = endpoint.home_relay_status();
+    let answered = async {
+        while !status
+            .get()
+            .iter()
+            .any(|s| s.is_connected() || s.last_error().is_some())
+        {
+            if status.updated().await.is_err() {
+                break;
+            }
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(5), answered).await;
+    let (connected, lines) = Devices::relay_status(&endpoint, &relays);
+    let warning = (!connected).then(|| {
+        format!(
+            "{} A device elsewhere may not reach this server until that is fixed.",
+            lines.join(" ")
+        )
+    });
     let (code, done) = app
         .devices
         .offer(command.name, endpoint.id(), relays)
         .await?;
-    let code = json!({"code": code}).to_string().into();
+    let code = json!({"code": code, "warning": warning}).to_string().into();
     let result = async move {
         json!({"result": app.devices.outcome(done).await})
             .to_string()
@@ -177,6 +197,9 @@ pub async fn add_command(client: &reqwest::Client, key: &str, name: &str) -> Res
                 Error::Refused("Pairing reply was invalid; restart pairing.".into())
             })?;
             buffered.drain(..=n);
+            if let Some(warning) = line["warning"].as_str() {
+                eprintln!("{warning}");
+            }
             if let Some(code) = line["code"].as_str() {
                 let qr = qrcode::QrCode::with_error_correction_level(code, qrcode::EcLevel::L)
                     .map_err(other("Drawing the pairing code"))?;

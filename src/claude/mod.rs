@@ -131,7 +131,8 @@ pub(crate) async fn sign_in(dir: &Path) -> Result<String, Error> {
         .map_err(io("asking the Claude Code CLI for its sign-in"))?;
     let status: Value = serde_json::from_slice(&status.stdout).unwrap_or_default();
     if status["loggedIn"] != true {
-        let sentence = "Claude is not signed in; run razor setup.";
+        let sentence =
+            "Claude is not signed in; run razor login claude, or /login in the terminal app.";
         return Err(Error::Missing(sentence.into()));
     }
     let said =
@@ -143,16 +144,81 @@ pub(crate) async fn sign_in(dir: &Path) -> Result<String, Error> {
         .join(", "))
 }
 
-/// Runs the bundled CLI's own `auth login` in this terminal: a Claude subscription, or with
-/// `console` an Anthropic Console account billed for API use. The CLI keeps the credentials and
-/// says how it went; `sign_in` says whether Razor can use them.
-pub(crate) async fn login(console: bool) -> Result<(), Error> {
-    let mut login = Command::new(cli(&dir().await?).await?);
-    login
+/// The bundled CLI owns OAuth and credential storage. Instructions are streamed (at most
+/// 64 KiB per pipe), codes go only to stdin, and dropping this future kills the CLI.
+pub(crate) async fn login(
+    console: bool,
+    show: mpsc::Sender<String>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    mut codes: mpsc::Receiver<String>,
+) -> Result<(), Error> {
+    let dir = dir().await?;
+    let mut child = Command::new(cli(&dir).await?)
         .args(["auth", "login"])
-        .args(console.then_some("--console"));
-    let ran = login.status().await;
-    ran.map(drop).map_err(io("starting the Claude sign-in"))
+        .args(console.then_some("--console"))
+        .env("BROWSER", "true")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(io("starting the Claude sign-in"))?;
+    let (Some(mut input), Some(out), Some(err)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        return Err(Error::Exited);
+    };
+    let wait = async {
+        loop {
+            tokio::select! {
+                status = child.wait() => {
+                    return status.map_err(io("waiting for the Claude sign-in"));
+                }
+                Some(code) = codes.recv() => {
+                    input.write_all(format!("{code}\n").as_bytes()).await
+                        .map_err(io("sending the Claude sign-in code"))?;
+                }
+            }
+        }
+    };
+    tokio::select! {
+        result = async {
+            let (_, _, status) = tokio::try_join!(login_output(out, show.clone()), login_output(err, show), wait)?;
+            if !status.success() {
+                return Err(Error::Missing("Claude sign-in failed; run razor login claude, or /login in the terminal app, to try again.".into()));
+            }
+            sign_in(&dir).await.map(drop)
+        } => result,
+        _ = stop.wait_for(|stop| *stop) => Err(Error::Exited),
+    }
+}
+
+async fn login_output(
+    pipe: impl tokio::io::AsyncRead + Unpin,
+    show: mpsc::Sender<String>,
+) -> Result<(), Error> {
+    let mut pipe = BufReader::new(pipe.take((64 << 10) + 1));
+    let (mut bytes, mut total) = (Vec::new(), 0);
+    loop {
+        let n = pipe
+            .read_until(b'\n', &mut bytes)
+            .await
+            .map_err(io("reading the Claude sign-in"))?;
+        if n == 0 {
+            return Ok(());
+        }
+        total += n;
+        if total > 64 << 10 {
+            return Err(Error::Missing(
+                "Claude sign-in output exceeded 64 KiB; run razor login claude to try again."
+                    .into(),
+            ));
+        }
+        show.send(String::from_utf8_lossy(&bytes).trim().into())
+            .await
+            .map_err(|_| Error::Exited)?;
+        bytes.clear();
+    }
 }
 
 /// The platform's own Claude Code CLI inside the SDK's packages in `dir`.

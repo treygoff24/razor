@@ -9,6 +9,7 @@ import claude
 from driver import flow
 from model import agent, message, reply, tool
 import server
+from terminal import Terminal
 
 replies = []
 config = ('startup = ["razor", "~/parent.md"]\n[server]\nname = "desk"\n'
@@ -303,8 +304,12 @@ with flow(replies, config=config) as top:
     assert note not in answered, "the finish answered a note the child never read"
     replies += [agent(root, "continue", child="elm16", brief="CONTINUE_16B"),
                 agent(root, "wait", children=["elm16"]), reply(root, text="Again."),
-                reply(child, "Bash", {"command": "true"}), agent(child, "finish", status="finished", report="Read it.")]
+                reply(child, "Bash", {"command": "true"}), agent(child, "finish", status="partial", report="Read it.")]
     f.ask("--resume", parent, "Continue elm16.")
+    with Terminal(f, "--resume", parent, rows=50, columns=180) as t:
+        t.shown("CHILDREN")
+        column = t.find("CHILDREN")[1] - 8
+        t.until(lambda t: any("elm16" in line[column:] and "finished" in line[column:] for line in t.screen.display))
     requests = f.sent()
     assert any(child in r and "CONTINUE_16B" in r and "UNREAD_NOTE_16" in r for r in requests), "the continuation lost the unread note"
     answered = [i for e in f.record(child_sid) if e["kind"] == "turn_end" for i in e["inputs"]]

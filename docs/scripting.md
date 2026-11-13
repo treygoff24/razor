@@ -24,7 +24,7 @@ The exit code says how it went:
 | Code | Meaning |
 | --- | --- |
 | 0 | The turn finished; the reply is on standard output. |
-| 1 | The turn failed or was stopped, or Razor could not run it; the reason is one sentence on standard error, such as `Claude is not signed in; run razor setup.` |
+| 1 | The turn failed or was stopped, or Razor could not run it; the reason is one sentence on standard error, such as `Claude is not signed in; run razor login claude, or /login in the terminal app.` |
 | 2 | The command line was wrong, such as an unknown flag, two message words, or `--resume` with `--continue`; the sentence ends with `Run razor --help.` |
 
 `--print` starts the server if none is running, as every `razor` command that needs one does.
@@ -53,7 +53,7 @@ razor --print --model sonnet --effort low "Which files changed most this month?"
 
 ```text
 {"session": "20261104-211641-6cae", "message": "The reply."}
-{"error": "Claude is not signed in; run razor setup.", "session": "20261104-211641-6cae"}
+{"error": "Claude is not signed in; run razor login claude, or /login in the terminal app.", "session": "20261104-211641-6cae"}
 ```
 
 `--print=stream` prints the session as it happens, one JSON object a line, and stops after the line that ends the turn. Every line has a `kind`. The first is `attached`; then come the record's entries as they are written, each with its `id`: the `input` you sent, the agent's `text`, each tool `call` and its `result`, and finally `turn_end`, whose `end` is `"done"`, `"stopped"` or `{"error": "<sentence>"}` and whose `model` names the model the turn ran on. Between them come lines that are never recorded: `delta` (reply text as it streams, `start` on each reply block's first words), `thought` (a thinking summary as it streams, numbered by `n`, `start` on its first words; one with `void` drops the unfinished thoughts through its `n` and any reply words no `text` took, before a cut response is tried again), `taken` (a waiting message reached the agent), `pending` (the messages still waiting) and `tail` (a running command's latest output). A turn that failed for want of a sign-in looks like this:
@@ -61,7 +61,7 @@ razor --print --model sonnet --effort low "Which files changed most this month?"
 ```text
 {"kind":"attached","session":"20261104-211641-6cae","last":6,"pending":[]}
 {"id":6,"at":1793827016333,"kind":"input","from":"person","text":"Stream it."}
-{"id":7,"at":1793827016507,"kind":"turn_end","inputs":[6],"end":{"error":"Claude is not signed in; run razor setup."},"usage":{"input":0,"output":0,"cache_read":0,"cache_write":0,"requests":0,"waited":0},"context":null,"threshold":0.8}
+{"id":7,"at":1793827016507,"kind":"turn_end","inputs":[6],"end":{"error":"Claude is not signed in; run razor login claude, or /login in the terminal app."},"usage":{"input":0,"output":0,"cache_read":0,"cache_write":0,"requests":0,"waited":0},"context":null,"threshold":0.8}
 ```
 
 An input that hands the agent a skill records it separately as `"skill":{"name":"razor","text":"<the resolved SKILL.md>"}`. The input's `text` holds only the person's words, which may be empty when handing back a skill. To display the skill's name, read `skill.name`; to read its instructions, use `skill.text`. Records from before 0.4.0 keep the instructions inside `text`, between `<skill>` lines. Handing back a skill without words, pictures or files preserves the session's saved draft.
@@ -92,6 +92,14 @@ curl -sS -N --unix-socket ~/.razor/server.sock -H "Authorization: Bearer $(cat ~
 
 With `RAZOR_HOME` set, both files are in that folder instead. The API does not start a server; if nothing answers, `razor restart` starts one. A refusal comes back with an HTTP status (400 for a request Razor will not take, 401 for a missing or revoked key, 404 for an unknown session or route, 409 when a session is busy or full) and `{"error": "<one sentence>"}`.
 
+### Withheld calls in the record
+
+`not_run` is an attempt Razor withheld before admission because the agent had not answered your mid-work message. It has `call`, `name` and `input`, and the usual entry `id` and `at`; it is never paired with a `result` and counts as neither a call nor a failure. It travels in the transcript stream and entry pages, and recall reads it whole. Clients omit it from call cards, and search omits it; digest, recap and rebuilt context say why it was not run without repeating an instruction to the agent.
+
+Servers on 0.7.0 or earlier cannot open a session whose record contains `not_run`: their record reader refuses an unknown entry kind. Their terminals skip the valid JSON line and display the newer-server warning while continuing to read the stream. A script or app reading the record must handle this kind or skip it.
+
+### Session routes
+
 The routes a script needs:
 
 | Request | Body | Answer |
@@ -103,7 +111,7 @@ The routes a script needs:
 | `GET /v1/sessions/<id>/entries?before=<entry>&limit=<n>` | | One page of the record as JSON lines, oldest first, ending before that entry (or at the end); 256 entries unless `limit` says otherwise, at most 1,024. `&native=true` as on `events`. |
 | `GET /v1/sessions/<id>/digest?limit=<bytes>` | | One JSON string, at most 24 KiB of text, or `limit` bytes when that is less: inputs and replies, failed calls with their error's first line, memory and task calls with their JSON arguments, and changed files, in entry order. Includes helpers and fresh runs. Newest failures have priority, then newest other entries; a last line counts omissions. Each entry is at most 1 KiB, with longer entries clipped and marked. |
 | `GET /v1/dream/<id>` | | For a paired server running a shared project's nightly pass: this server's id, its person's email in the project's checkout, whether its own night runs the pass as the project's always-on agent, its clock, and the project's sessions not yet read, each with when it last changed. `<id>` is the first commit of the shared memory's history ([Memory](memory.md#several-machines)). |
-| `POST /v1/sessions/<id>/asks/<entry>` | `{"option": <n>}`, counting from 0, or `{"text": "…"}` | `{"entry": <n>}`: the answer, recorded as the session's next input. Refused once the question has an answer. |
+| `POST /v1/sessions/<id>/asks/<entry>` | `{"option": <n>}`, counting from 0, or `{"text": "…"}`; optional `request` beside either | `{"entry": <n>}`: the answer, recorded as the session's next input, even if a message question has already settled. Reusing a request id returns its first entry. MCP and sign-in questions must still be open. |
 | `POST /v1/sessions/<id>/stop` | | `{}`: what Escape does. The turn and the command it is running stop; background commands and helpers keep going. |
 | `DELETE /v1/sessions/<id>/input/<entry>` | | `{}`: withdraws a message the agent has not taken yet. |
 | `POST /v1/sessions/<id>/done` | | `{"entry": <n>}`: what `/done` does. The closing turn runs on in the server, and the session closes when it ends. |
@@ -128,13 +136,30 @@ Four optional fields of an input are for programs:
 - `images` is a list of pictures as plain base64, JPEG, PNG or WebP, at most 20 to a message and 10 MB of base64 each.
 - `skill` is the name of a skill to load, such as `"razor"`. Razor resolves it at admission and records the resulting name and text as the `skill` object described above.
 
+### Custom avatars on the status stream
+
 An agent row's optional `avatar` is its recorded choice. The `brand` on every
 `agents` snapshot carries `resident_avatars`, a map from resident name to avatar
 name. Clients use the row's choice, else that map's entry for `resident` (or the
 session id for a resident's home). Add `?avatars=true` to the status stream to
 receive `brand.avatars`, a map from name to base64 PNG bytes, on every `agents`
-snapshot. Without the flag this map is empty. Pool settings never travel. See [configuration](configuration.md#the-terminal-app) for selection,
-inheritance, reload and missing-picture rules.
+snapshot. Without the flag this map is empty; `resident_avatars` still travels.
+Pool settings never travel.
+
+Each picture is an 8-bit RGBA PNG, 132 × 33 pixels, with four 33 pixel cells in
+order: idle, blink, talk, sleep. Helpers wear their root's choice. Picture names
+belong to the server that supplies them: a paired session's name must never pick
+up this server's picture of the same name. With no picture from the owning
+server, draw the usual creature.
+
+Settings are checked once a second. A changed avatar file path or resident
+selection resends `agents` with the new `brand` without a session turn. To re-roll,
+write a new file and change its configured path; overwriting the old file alone
+does not trigger a reload. A missing or malformed picture is omitted with a
+`notices` sentence, including at startup, and the server keeps running. See
+[configuration](configuration.md#the-terminal-app) for selection and bounds.
+
+### Other status lines
 
 The status stream carries the agents of the live list: the always-on agents, every session at work, asking or stuck, an idle one with an unread delivery, your input in the last twelve hours, a terminal open on it or a reply you have not looked at, and their helpers. The rest stay on disk, read a page at a time with `GET /v1/agents`. An `agents` line's `config`, when present, is a settings error that keeps agents from starting; its `notices`, when present, list settings notices that stop nothing, such as a retired setting to remove ([Configuration](configuration.md#when-a-change-applies)). After the first line, the stream sends:
 

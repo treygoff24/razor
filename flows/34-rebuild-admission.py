@@ -99,7 +99,8 @@ with flow(replies) as f:
     assert len(skills34) == 1 and skills34[0]["name"] == "held34" and not skills34[0]["worn"], skills34
 
 gate = lambda name: call("bash", json.dumps({"command": f"while [ ! -e {name} ]; do sleep 0.02; done"}), name)
-replies = [response([gate("one"), gate("two")]), response([gate("three")]), responses.done(), responses.done()]
+replies = [response([gate("one"), gate("two")]),
+           response([responses.message("I read the 64 notes; I am continuing."), gate("three")]), responses.done(), responses.done()]
 with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:
     server.start(f)
     session, sender = (server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"] for _ in "ab")

@@ -2,6 +2,32 @@
 
 Razor keeps each memory as a Markdown file in the server's home. Until 2026-11-02 Memorum could be configured as a second store, so a person who used it kept sharing memory with Claude Code and Codex; Trey dropped it that day, and a one-time import outside the product copies its memories into the files. The sections below are newest first: the 2026-11-02 design and what was built, then the files store as built on 2026-11-01, whose Memorum parts are history.
 
+## Store locks
+
+If a Git step fails because its store's `.git/index.lock` exists and that file is over ten
+minutes old, the step removes only that lock, logs the store and age, and retries once. That
+age is five times the longest local step. A younger lock stays: the refusal gives its exact
+removal command, how to check for an outside Git first, and when recovery becomes automatic.
+A Git stuck in an uninterruptible wait past its kill can have its lock removed after ten minutes.
+
+Each task store has one mutex keyed by its folder. A write or refresh holds it until its
+Git work finishes, then releases it before sending notes to the controller. The registry keeps
+one small entry per store touched during the server run and holds its own mutex only to look
+up that entry. Tasks and memory have separate checkouts, so a slow task store blocks neither
+another project's tasks nor memory. Memory still shares one mutex until its nested folders
+are isolated. An unshared memory read takes no mutex.
+
+One separate mutex prevents overlapping background scans. Each scan tries each task store's
+mutex before reading its tasks, deciding whether to sync, or changing it. Busy stores wait for
+the next scan; a skipped store keeps claim recovery owed. The scan releases every store before
+delivering notes or releasing claims through the ordinary write path.
+
+Shared memory checks its directory boundary under that same memory lock before every refresh
+and write: directories outside `state`, `wiki`, `residents` and `.git`, or directories inside
+`state` and `wiki`, refuse sharing before Git runs. This temporary refusal leaves existing
+files and remote history untouched and leaves with the folder redesign. Nested projects under
+`state`, `wiki` or `residents` can remain indistinguishable from the parent's own files.
+
 ## A resident's own layer, and sharing between people
 
 **Surface.** `memory` takes `resident: true` to search, read or write the caller's resident's own layer, and a new ruling takes `settles: [ids]`. `task` write takes `resident: <name>` and `for: <person>` (empty clears either). `[memory] join = false`, in a project's private settings, declines an offer to share. `GET /v1/dream/{id}` is a paired server's part of a shared project's night (the dreaming design page's section on the night across a person's servers). No other surface changes.
@@ -13,6 +39,13 @@ Razor keeps each memory as a Markdown file in the server's home. Until 2026-11-0
 **Settling.** A new ruling citing the person may name other people's rulings in `settles`, a header line carried forward through replacements like `cites`. A ruling whose id a standing ruling settles shows as set aside, and its owner's page asks the person once per such ruling: yes retires it, no replaces it with a fresh copy, whose new id no `settles` names, so it stands again. Nothing is stored about the question itself.
 
 **Joining.** The first startup page of a git project naming neither remote, and not declined, starts one background `git ls-remote origin refs/razor/memory refs/razor/tasks`, at most once per project and 256 projects while the server runs; the start path never waits on it. A later page asks the person; the agent writes both remotes on a yes and `join = false` on a no. Questions for the person sit below the tasks, at most five, then a count; a helper's page has none.
+
+A populated local store with no history in common with a populated remote keeps its own files
+and continues local reads and writes. The check runs after fetch and before staging, committing
+or rebasing. The startup page uses that same check against the fetched reference and gives
+manual joining instructions inside its existing five-line cap. Empty local stores take the
+remote's files, and local files against an empty remote publish as before. Automatic import
+of an existing store is deferred to the store layout and project identity rebuild.
 
 **Secrets.** Every memory write is refused when its composed file holds a word starting with a known key prefix and 16 more key characters, or a PEM private-key marker. The patterns are data in `text.toml`, and the refusal never repeats what matched. The dream retires an older memory holding a key and reports it for rotation.
 
@@ -36,7 +69,7 @@ The write path and page share these rules:
 
 1. The agent supplies the rule as one nonempty line of text.
 2. A new ruling cites `ref`, defaulting to the latest person entry in its session.
-3. Razor copies the exact words from that entry, without guessing what question they answered.
+3. Razor copies the exact words from that entry; for an answer it also cites the question the answer belongs to, without quoting that question as the person's words.
 4. The file's body starts with the rule, then each original citation and its words as a Markdown quotation.
 5. `memory get` returns that complete file, including the original words even after its session is deleted.
 6. `replaces` accepts one id, or a list of ruling ids to merge. All replacements stay in one scope.

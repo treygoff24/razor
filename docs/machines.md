@@ -12,7 +12,7 @@ On one machine, name the other and show a code:
 razor devices add laptop
 ```
 
-It prints a code, as a QR code and as one line of text, and waits up to ten minutes. On the other machine, name the first and paste the line when asked:
+Before showing the code, it waits up to five seconds for a relay connection or a relay error. If this server is not connected, it warns that a device elsewhere may not reach it; the code still works for a device that can connect directly. It prints the code as a QR code and as one line of text, and waits up to ten minutes. On the other machine, name the first and paste the line when asked:
 
 ```sh
 razor devices join desk
@@ -57,7 +57,7 @@ In the app, open Settings and choose Pair a Machine, then scan the QR code or pa
 | One nightly pass | For a project whose memory is shared, one of your paired servers runs the night's pass and reads your sessions from all of them ([Memory](memory.md#several-machines)). |
 | Shared settings | One server can keep the saved arrangements of the agents list (`/views`) and the voice settings for all of them: set `[server] shared` on the others to its id, the contents of `server.id` in its Razor home. |
 
-A server that stops answering keeps its last rows in the list, marked with how long since it was heard from. A Mac's server says it is going to sleep a second before the Mac sleeps, so the servers paired with it mark it at once instead of when their reads time out, and they list it answering again when it wakes. A paired server's key is a full key: it can do on this server anything this server's own terminal can, devices, settings and sign-ins included, so pair only machines you trust as you trust this one. Each pairing is direct: a server shows the servers it has paired, not their pairs.
+A server that stops answering keeps its last rows in the list, marked with how long since it was heard from. A cached paired connection that must be re-established has five seconds to connect; a dead path fails without sending the request. A request that may have reached the other server is never replayed automatically. A Mac's server says it is going to sleep a second before the Mac sleeps, so the servers paired with it mark it at once instead of when their reads time out, and they list it answering again when it wakes. A paired server's key is a full key: it can do on this server anything this server's own terminal can, devices, settings and sign-ins included, so pair only machines you trust as you trust this one. Each pairing is direct: a server shows the servers it has paired, not their pairs.
 
 ## Start sessions on a paired server
 

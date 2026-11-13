@@ -2,7 +2,7 @@
 //! project's folder, moved to `closed/<n>.md` by one rename when it closes, and a file per
 //! comment in `comments/<n>/`. Whether a task is open is where its file is; everything else is
 //! derived when read. Nothing is held between calls, and everything here runs on a blocking
-//! thread, under memory's lock for a change.
+//! thread, under that store's lock for a change.
 
 use super::files::{self, fit};
 use super::{Answer, Error, Note, TEXT, fill, other, refuse};

@@ -12,37 +12,37 @@ import shutil
 from dataclasses import replace
 import time
 from driver import Reply, flow
-from model import agent, message, reply, tool
+from responses import PLAIN, call, reply, response
 import server
 from server import Local, send, until, wait
 from terminal import Terminal
 
-replies = [agent("RESIDENT_56", "start", name="resident-kid56", brief="Deliver and wait.", placement="in_place"),
-           reply("RESIDENT_56", text="Started."),
-           agent("You are resident-kid56,", "start", name="resident-grandkid56", brief="Wait.", placement="in_place"),
-           reply("You are resident-grandkid56,", "Bash", {"command": "sleep 60"}),
-           tool("You are resident-kid56,", "deliver", line="resident-unread56", url="https://example.com/resident56"),
-           reply("You are resident-kid56,", text="Idle with a delivery."),
-           reply("THREAD_56", text="thread56"), reply("voice-words56", text="voice56"), reply("FLOW_A56", text="alpha-visible"), reply("FLOW_B56", text="beta-visible"),
-           tool("FLOW_C56", "deliver", line="unread56", url="https://example.com/unread56"), reply("FLOW_C56", text="loose-visible"), reply("STEER_56", "Bash", {"command": "printf observed56"}),
-           reply("STEER_56", text="steered"),
-           reply("WORK_56", "Bash", {"command": "sleep 600", "timeout": 600000}),
-           message("ASK_56", "question", text="Choose 56", options=["yes", "no"]),
-           reply("ASK_56", text="answered56"),
-           reply("You are kid56,", "Bash", {"command": "sleep 2"}),
-           tool("You are kid56,", "mcp__ask56__form"),
-           agent("CHILD_56", "start", name="kid56", brief="Wait.", placement="in_place"),
-           reply("CHILD_56", text="parent56"),
-           reply("You are helper56,", "Bash", {"command": "sleep 600", "timeout": 600000}),
-           agent("LEAD_56", "start", name="helper56", brief="Work.", placement="in_place"),
-           message("LEAD_56", "question", text="Lead asks 56", options=["yes", "no"]),
-           reply("LEAD_56", text="asked56"), reply("LEAD_56", text="led56"),
-           *(reply(k, "Bash", {"command": f"while [ ! -e {w}56 ]; do sleep 0.05; done"}) if w else reply(k, text=k) for k, w in
+replies = [reply('RESIDENT_56', 'agent', action='start', name='resident-kid56', brief='Deliver and wait.', placement='in_place'),
+           reply('RESIDENT_56', 'Started.'),
+           reply('You are resident-kid56,', 'agent', action='start', name='resident-grandkid56', brief='Wait.', placement='in_place'),
+           reply('You are resident-grandkid56,', 'bash', command='sleep 60', wait_ms=600000),
+           reply('You are resident-kid56,', 'deliver', line='resident-unread56', url='https://example.com/resident56'),
+           reply('You are resident-kid56,', 'Idle with a delivery.'),
+           reply('THREAD_56', 'thread56'), reply('voice-words56', 'voice56'), reply('FLOW_A56', 'alpha-visible'), reply('FLOW_B56', 'beta-visible'),
+           reply('FLOW_C56', 'deliver', line='unread56', url='https://example.com/unread56'), reply('FLOW_C56', 'loose-visible'), reply('STEER_56', 'bash', command='printf observed56', wait_ms=600000),
+           reply('STEER_56', 'steered'),
+           reply('WORK_56', 'bash', command='sleep 600', wait_ms=600000),
+           reply('ASK_56', 'message', type='question', text='Choose 56', options=['yes', 'no']),
+           reply('ASK_56', 'answered56'),
+           reply('You are kid56,', 'bash', command='sleep 2', wait_ms=600000),
+           replace(response([call('mcp__ask56__form', '{}')]), match='You are kid56,'),
+           reply('CHILD_56', 'agent', action='start', name='kid56', brief='Wait.', placement='in_place'),
+           reply('CHILD_56', 'parent56'),
+           reply('You are helper56,', 'bash', command='sleep 600', wait_ms=600000),
+           reply('LEAD_56', 'agent', action='start', name='helper56', brief='Work.', placement='in_place'),
+           reply('LEAD_56', 'message', type='question', text='Lead asks 56', options=['yes', 'no']),
+           reply('LEAD_56', 'asked56'), reply('LEAD_56', 'led56'),
+           *(reply(k, 'bash', command=f'while [ ! -e {w}56 ]; do sleep 0.05; done', wait_ms=600000) if w else reply(k, k) for k, w in
              [("HELD_56", "held"), ("HELD_56", None), ("HELD_56", "closing"), ("HELD_56", None), ("IDLE_56", None), ("IDLE_56", "idle"), ("IDLE_56", None)]),
            Reply(b'{"type": "error", "error": {"type": "permission_error", "message": "Failed56."}}', status=403, match="FAIL_56")]
 # The recorder and the transcriber are stand-ins for devices: a steady tone, and one phrase.
 voice = 'capture = ["/usr/bin/python3", "-c", "import os,struct,time\\nwhile 1: os.write(1,struct.pack(\'<h\',5000)*1600); time.sleep(.1)"]\ntranscribe = ["/bin/sh", "-c", "cat >/dev/null; echo voice-words56"]\n'
-with mcp.serve() as external, flow(replies, config=voice + f'[mcp.ask56]\nurl = "{external.url}/mcp"\ntools = ["form"]') as f:
+with mcp.serve() as external, flow(replies, model="sol", config=voice + PLAIN + f'[mcp.ask56]\nurl = "{external.url}/mcp"\ntools = ["form"]') as f:
     a, b = f.home / ".razor", f.home / ".razor-b"
     b.mkdir()
     shutil.copy(a / "auth.json", b / "auth.json")

@@ -24,7 +24,7 @@ from urllib.parse import urlencode
 from driver import flow
 import mcp
 import server
-from responses import PLAIN, reply as turn
+from responses import PLAIN, call, message, response, reply as turn
 from terminal import Terminal
 from wcwidth import wcswidth
 
@@ -237,10 +237,10 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN + '[server]\nname="box"\nre
         t.until(lambda t: "WORDS_FOR_A" not in t.text())
 
     # A program's input leaves a session's three message questions open, an answer settles its own
-    # alone, and the person's next message settles the rest.
-    replies += [*(turn("B_FIRST", "message", type="question", text=f"QUESTION_B{n}") for n in (2, 3, 4)),
+    # alone, and the person's next message settles the rest. Late answers still reach it.
+    replies += [*(turn("B_FIRST", "message", type="question", text=f"QUESTION_B{n}", options=[f"b-{n}-option"]) for n in (2, 3, 4)),
                 turn("B_FIRST", "b-asked"), turn("B_FIRST", "b-scripted"), turn("B_FIRST", "b-answered-2"),
-                turn("B_FIRST", "b-moved-on")]
+                turn("B_FIRST", "b-moved-on"), turn("B_FIRST", "b-late-answer"), turn("b-3-option", "b-after-close")]
     ended = lambda text: lambda es: es[-1]["kind"] == "turn_end" and any(e.get("text") == text for e in es)
     open_asks = lambda: {ask["text"]: ask["id"][1] for ask in server.agents(f)[b]["asks"]}
     server.post(f, f"/sessions/{b}/input", {"text": "B_THRICE"})
@@ -254,6 +254,19 @@ with flow(replies, model="gpt-6.1-sol", config=PLAIN + '[server]\nname="box"\nre
     server.post(f, f"/sessions/{b}/input", {"text": "B_NEVER_MIND"})
     server.until(f, b, ended("b-moved-on"))
     assert not open_asks(), "the person's message left a question open"
+    # Request ids deduplicate a retried answer; a fresh option answer reopens a closed session.
+    ask = asked["QUESTION_B3"]
+    path = f"/sessions/{b}/asks/{ask}"
+    answer = {"text": "LATE_ANSWER_47", "request": "late-answer-47"}
+    entry = server.post(f, path, answer)["entry"]
+    assert server.post(f, path, answer)["entry"] == entry, "retry delivered twice"
+    server.until(f, b, ended("b-late-answer"))
+    server.post(f, f"/sessions/{b}/quit", {})
+    picked = server.post(f, path, {"option": 0})["entry"]
+    entries = server.until(f, b, ended("b-after-close"))
+    assert all(any(e["kind"] == "turn_end" and e["end"] == "done" and i in e["inputs"] for e in entries) for i in (entry, picked))
+    assert [e["text"] for e in entries if e["kind"] == "input" and e["from"] == {"answer": {"ask": ask}}] == ["LATE_ANSWER_47", "b-3-option"]
+    assert all(text in "".join(f.sent()) for text in ("LATE_ANSWER_47", "b-3-option"))
 
     # A third session delivers a file over the cap, a wrapped Markdown link and a text file over
     # one range.
@@ -312,7 +325,8 @@ until = "until [ -e {} ]; do sleep 0.05; done".format
 big = lambda r: replace(r, body=r.body.replace(b'"input_tokens": 100,', b'"input_tokens": 60000,'))
 replies = [turn(None, "bash", command=until("first")), turn(None, "PIN_47 pinned words"),
            turn(None, "bash", command=until("release")),
-           turn(None, "bash", command=until("again")), big(turn(None, "kept-visible")),
+           response([message("Your model change is staged; I will continue this turn."),
+                     call("bash", json.dumps({"command": until("again")}), "again47")]), big(turn(None, "kept-visible")),
            turn(None, "handover", note="NOTE_47"), turn(None, "after-visible")]
 CODES = "codes :x: `a[1:x:2]`\n```\nb[1:x:2]\n```"
 with flow(replies, model="gpt-6.1-sol", config=PLAIN) as f:

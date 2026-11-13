@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::mpsc;
 
 /// A local socket client and the default paired destination for session commands.
 pub struct Connection {
@@ -298,15 +299,52 @@ pub async fn turn(
     Err(gone())
 }
 
-/// `razor login`: the ChatGPT sign-in runs in the server; each instruction is printed as it comes.
-pub async fn login(client: &reqwest::Client, key: &str) -> Result<(), Error> {
-    let mut answer = send(client.post(format!("{LOCAL}/v1/login")).bearer_auth(key)).await?;
+/// `razor login`: the selected provider runs in the server; codes never enter a session.
+pub async fn login(
+    client: &reqwest::Client,
+    key: &str,
+    provider: crate::protocol::LoginProvider,
+) -> Result<(), Error> {
+    let url = format!("{LOCAL}/v1/login");
+    let mut answer = send(
+        client
+            .post(&url)
+            .query(&[("provider", provider)])
+            .bearer_auth(key),
+    )
+    .await?;
+    let claude = provider != crate::protocol::LoginProvider::Chatgpt;
+    let (typed, mut codes) = mpsc::channel(1);
+    if claude {
+        println!("After signing in at the link below, paste the code here and press Enter.");
+        // A detached stdin reader lets the command exit when a browser callback completes.
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let stdin = std::io::stdin();
+            for code in stdin.lock().lines().map_while(Result::ok) {
+                if typed.blocking_send(code).is_err() {
+                    break;
+                }
+            }
+        });
+    }
     let mut pending = Vec::new();
     let reading = "Reading the sign-in";
-    while let Some(line) = line(&mut answer, &mut pending)
-        .await
-        .map_err(other(reading))?
-    {
+    loop {
+        let line = tokio::select! {
+            line = line(&mut answer, &mut pending) => line.map_err(other(reading))?,
+            Some(code) = codes.recv(), if claude => {
+                if code.trim().is_empty() {
+                    continue;
+                }
+                let body = json!({"code": code});
+                if let Err(e) = send(client.put(&url).bearer_auth(key).json(&body)).await {
+                    eprintln!("{e}");
+                }
+                continue;
+            }
+        };
+        let Some(line) = line else { break };
         match serde_json::from_slice(&line).map_err(other(reading))? {
             Login::Show { text } => println!("{text}"),
             Login::Done => return Ok(()),

@@ -15,7 +15,7 @@ import socket
 import subprocess
 import sys
 import time
-from driver import NETWORK_STOP_TIMEOUT, flow
+from driver import BINARY, NETWORK_STOP_TIMEOUT, flow
 from server import agents, gone, offer as add, pair, peer, post, send, start, stop, until, wait
 
 if not (RELAY := os.environ.get("RAZOR_FLOW_RELAY")):
@@ -56,12 +56,12 @@ def udp(pid):
             if target(fd).removeprefix("socket:[").removesuffix("]") in inodes} if tables else None
 
 
-with flow([], model="local/m", config=SETTINGS + network(OURS)) as a, \
-        flow([], model="local/m", config=SETTINGS + network(OURS)) as b, \
-        flow([], model="local/m", config="provider_only = true\n" + SETTINGS + network(OURS)) as c:
+with wall_clock(still=False) as (_, env, advance), flow([], model="local/m", config=SETTINGS + network(OURS), env=env) as a, \
+        flow([], model="local/m", config=SETTINGS + network(OURS), env=env) as b, \
+        flow([], model="local/m", config="provider_only = true\n" + SETTINGS + network(OURS, ALTERNATE), env=env) as c:
     state = {name: f.home / ".razor" for name, f in (("a", a), ("b", b), ("c", c))}
     for f in (a, b, c):
-        start(f)
+        start(f, relay=f is not c)
 
     # provider_only opens no endpoint; turning it off opens one.
     pid = json.loads((state["c"] / "server.json").read_text())["pid"]
@@ -70,6 +70,10 @@ with flow([], model="local/m", config=SETTINGS + network(OURS)) as a, \
     config.write_text(config.read_text().replace("provider_only = true", "provider_only = false"))
     agents(c)  # a read of the settings, which reopens the endpoint
     wait(lambda: (state["c"] / "node.key").exists() and udp(pid) != set(), 10, "endpoint never opened")
+    relays = wait(lambda: (lines := json.loads(send(c, "GET", "/network").read()))
+                  and any("(connected)" in line for line in lines) and lines, 10)
+    assert len(relays) == 2, relays  # the network key and the one home relay iroh selected
+    config.write_text(config.read_text().replace(f', "{ALTERNATE}"', ""))
 
     # A wrong code is refused; the right one still pairs after it, and a second use is refused.
     offer, code = add(a, "b")
@@ -109,6 +113,8 @@ with flow([], model="local/m", config=SETTINGS + network(OURS)) as a, \
 
     # The key pairing enrolled reaches the API; a key nobody enrolled gets no answer.
     stop(b)
+    unreached = send(a, "GET", "/sessions?server=b&limit=1")
+    assert unreached.status == 502 and b"b did not answer; nothing was sent." in unreached.read(), "an unreached server was reported as possibly having run the request"
     key = str(state["b"] / "node.key")
     reached = peer("get", key, me, RELAY, "/v1/device")
     assert reached.returncode == 0 and '"name":"b"' in reached.stdout, reached
@@ -148,9 +154,31 @@ with flow([], model="local/m", config=SETTINGS + network(OURS)) as a, \
         config.write_text(before.replace(OURS, f"http://127.0.0.1:{port}/?token=wrong"))
         refusal = f"Home relay: http://127.0.0.1:{port}/ (refused this server; check this server's access to it, including the password in network.relays in config.toml)."
         wait(lambda: refusal in json.loads(send(c, "GET", "/network").read()), 30, "doctor never named the refusal")
+        showing, code = add(c, "not-connected")
+        showing.send_signal(signal.SIGINT)
+        out, err = showing.communicate(timeout=15)
+        assert showing.returncode == 0 and refusal in err and "device elsewhere" in err, (out, err)
         config.write_text(before)
     finally:
         guarding.kill()
+
+    # A relay that accepts TCP but never answers cannot hold the local API or pairing forever.
+    with socket.socket() as silent:
+        silent.bind(("127.0.0.1", 0))
+        silent.listen()
+        url = f"http://127.0.0.1:{silent.getsockname()[1]}/"
+        config.write_text(before.replace(OURS, url))
+        pending = json.loads(send(c, "GET", "/network").read())[1]
+        assert pending == f"Home relays: {url} (not yet answered since start).", pending
+        showing = subprocess.Popen([BINARY, "devices", "add", "silent"], env=c.env, cwd=c.cwd,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert not select.select([showing.stdout, showing.stderr], [], [], 0.2)[0], "code before the relay's first answer"
+        advance(5_001, monotonic=True)
+        assert next(line for line in showing.stdout if line.startswith("razor1-"))
+        showing.send_signal(signal.SIGINT)
+        out, err = showing.communicate(timeout=15)
+        assert showing.returncode == 0 and pending in err and "device elsewhere" in err, (out, err)
+        config.write_text(before)
 
     # Nor do the settings: `config get network` and a session's settings; for an address that does
     # not parse, a string where the list belongs, a time or a model that is wrong, doctor, `config
@@ -187,11 +215,11 @@ with flow([], model="local/m", config=SETTINGS + network(OURS)) as a, \
 # the server, bridge and SDK must all leave, not just release the API socket.
 with ThreadPoolExecutor(max_workers=1) as requests, wall_clock() as (_, env, advance), flow([reply((None, "mcp__razor__agent", {"action": "wait", "timeout_ms": 600_000}))], env=env) as a:
     b = a.home_at("b")
-    pids = [start(f) for f in (a, b)]
+    pids = [start(f, relay=True) for f in (a, b)]
     began = time.monotonic()
     stop(a)
     assert time.monotonic() - began < NO_PEER_STOP_TIMEOUT, "a server with no peers waited to drain"
-    pids[0] = start(a)
+    pids[0] = start(a, relay=True)
     pair(a, b, "b", "a")
     sid = post(a, "/sessions", {"cwd": str(a.cwd)})["session"]
     post(a, f"/sessions/{sid}/input", {"text": "Keep working."})

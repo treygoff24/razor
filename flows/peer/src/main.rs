@@ -429,7 +429,14 @@ async fn tap(
                 };
                 let counted = connection.remote_id() == first;
                 let onward = if counted { to_second } else { to_first };
-                let Ok(onward) = endpoint.connect(onward, razor_network::API).await else {
+                // The tap is an already connected peer that can lose its onward connection.
+                // Drop it within the paired-read budget, rather than holding the caller's mutation deadline.
+                let Ok(Ok(onward)) = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    endpoint.connect(onward, razor_network::API),
+                )
+                .await
+                else {
                     return;
                 };
                 while let Ok((send, recv)) = connection.accept_bi().await {

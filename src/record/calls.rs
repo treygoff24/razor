@@ -10,9 +10,19 @@ pub(crate) fn action(name: &str) -> &str {
 }
 
 /// The input of a call that asks the person a question: a `message` of type question to the
-/// parent or to no one. A child's calls ask its parent, not the person; callers check that.
-pub(crate) fn ask(name: &str, input: &Value) -> Option<Value> {
-    said(name, input).filter(|input| input["type"] == "question")
+/// parent or to no one, from a session that is no child.
+pub(crate) fn ask(child: bool, name: &str, input: &Value) -> Option<Value> {
+    said(name, input).filter(|input| !child && input["type"] == "question")
+}
+
+/// A question's options, ignoring values that are not strings.
+pub(crate) fn options(input: &Value) -> Vec<String> {
+    input["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect()
 }
 
 /// The input of Razor's `message` note or question to the parent or to no one, under each

@@ -9,7 +9,7 @@
 pub enum Transport { Claude, Responses }
 /// The controller's one source for route and context window; Claude's window is the SDK's.
 pub struct Model { pub transport: Transport, pub window: Option<u64> }
-/// Refuses a model not listed; GPT names and windows are Codex's catalog at the pin.
+/// Refuses a model not listed; GPT names and default windows are checked against the sign-in catalog at release.
 pub fn model(name: &str) -> Result<Model, Error>;
 /// Versioned declarations; version names the shipped data, the route and the code-mode choice,
 /// and on Claude code mode the web verbs (web.md).
@@ -62,7 +62,7 @@ impl Conversation {
 
 ## Data flow
 
-1. `model` lists the GPT names and windows of Codex's pinned `models.json`, GPT-5.6 and newer; Claude's window is None, using the SDK's reported one. Versioned data holds prompts, declarations and result wording. GPT and nested calls retain tool JSON; Claude direct Bash/terminal/TaskStop and job notices use the trained shapes in claude.md. The controller supplies a job notice's absolute job-spool path and call_id; a result's `path` is the shell's own, set when the output spilled or was cut or the job still runs.
+1. `model` keeps GPT names and default windows in its shipped table, checked against the ChatGPT sign-in catalog at each release and capped at 500,000. The catalog is not an enforced cap: a default above its figure needs a recorded turn for that exact id ending normally at or above 500,000 tokens on the sign-in route. The table is read without network I/O; configured windows override it. Legacy ids remain accepted by settings so a newer release does not refuse previously valid configuration; Claude's window is None, using the SDK's reported one. Versioned data holds prompts, declarations and result wording. GPT and nested calls retain tool JSON; Claude direct Bash/terminal/TaskStop and job notices use the trained shapes in claude.md. The controller supplies a job notice's absolute job-spool path and call_id; a result's `path` is the shell's own, set when the output spilled or was cut or the job still runs.
 2. `Tools::actions()` supplies `Action { name, read_only, session, schema }`; built-ins use profile data, scripts/MCP use `Schema {description, input}`. There is no `added` counter.
 3. Compare declaration name and bytes with the conversation's recorded prefix/additions; offer only absent/changed declarations. Code mode appends the updated exec definition. Restarts use the same comparison; removal is refused by name until rebuild.
 4. Persist the initial prompt/tools as a native request-prefix descriptor, and the exact rendered user inputs and direct results sent with each completed request before its output. Resume reads only the record's indexed native entries; it never re-renders Body::Input or includes merely admitted mail. Function/custom outputs keep their call kind. Nested calls have no wire outputs.

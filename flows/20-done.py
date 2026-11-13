@@ -8,20 +8,20 @@ A second session in the same folder reads the note at its start, and its own `/d
 (docs/design/done.md)."""
 import json
 import sys
-from claude import reply
+from responses import PLAIN, call, reply, response
 from driver import flow
 import server
 from terminal import Terminal
 
 state = {"action": "write", "kind": "state"}
-replies = [reply(("toolu_job", "Bash", {"command": "sleep 600", "run_in_background": True})),
-           reply(text="Started."),
-           reply(("toolu_wait", "Bash", {"command": "while [ ! -e go ]; do sleep 0.05; done"})),
-           reply(("toolu_note", "mcp__razor__memory", dict(state, text="First closeout."))),
-           reply(text="Closed out."), reply(("toolu_ask", "mcp__razor__message", {"type": "question", "text": "Go on?"})),
-           reply(text="Asked."), reply(text="Reopened."), reply(text="Hello."),
-           reply(("toolu_next", "mcp__razor__memory", dict(state, text="Second closeout."))),
-           reply(text="Closed out again."), reply(text="Both notes read.")]
+replies = [response([call("bash", json.dumps({"command": "sleep 600", "wait_ms": 0}), "toolu_job")]),
+           reply(None, "Started."),
+           response([call("bash", json.dumps({"command": "while [ ! -e go ]; do sleep 0.05; done", "wait_ms": 120000}), "toolu_wait")]),
+           response([call("memory", json.dumps(dict(state, text="First closeout.")), "toolu_note")]),
+           reply(None, "Closed out."), response([call("message", json.dumps({"type": "question", "text": "Go on?"}), "toolu_ask")]),
+           reply(None, "Asked."), reply(None, "Reopened."), reply(None, "Hello."),
+           response([call("memory", json.dumps(dict(state, text="Second closeout.")), "toolu_next")]),
+           reply(None, "Closed out again."), reply(None, "Both notes read.")]
 
 
 def answered(entry, end):
@@ -40,7 +40,7 @@ input = json.load(sys.stdin)
 if input["from"] == "razor":
     print(json.dumps({{"text": input["text"] + "\\nREWRITTEN_20"}}))
 """
-with flow(replies, config='[[plugins]]\nfile = "rewrite.py"\nbefore = ["input"]\n') as f:
+with flow(replies, model="sol", config=PLAIN + '[[plugins]]\nfile = "rewrite.py"\nbefore = ["input"]\n') as f:
     (f.home / ".razor/rewrite.py").write_text(HOOK)
     (f.home / ".razor/rewrite.py").chmod(0o755)
     server.start(f)

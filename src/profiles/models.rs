@@ -31,7 +31,7 @@ struct Chat {
 }
 
 /// A model's route under the live settings: where its requests go, the provider it is on (none
-/// for Claude's and GPT's own sign-ins), its window when config or the catalog knows it, and on
+/// for Claude's and GPT's own sign-ins), its window when config or the shipped table knows it, and on
 /// chat the variant it gets when config names none.
 #[derive(Clone)]
 pub(crate) struct Model {
@@ -155,7 +155,7 @@ pub(crate) fn validate(
     Ok(())
 }
 
-/// Resolves Razor's limits from live settings, else the catalog's or the SDK's window at most
+/// Resolves Razor's limits from live settings, else the shipped or SDK window at most
 /// `LARGE`'s, handed over at 0.8 or, at that size, `LARGE`'s share; a configured Claude window
 /// never changes what its SDK sends.
 pub(crate) fn limits(name: &str, config: &Config, reported: Option<u64>) -> (Option<u64>, f64) {
@@ -174,14 +174,14 @@ pub(crate) fn limits(name: &str, config: &Config, reported: Option<u64>) -> (Opt
 /// models that support it that high, auto handover/compaction around 425 or 450".
 pub(crate) const LARGE: (u64, f64) = (500_000, 0.9);
 
-/// GPT's shipped context windows, by id.
+/// GPT's shipped defaults by id; config overrides them.
 fn window(id: &str) -> Option<u64> {
     MODELS.iter().find(|(n, _)| *n == id).map(|(_, w)| *w)
 }
 
 const MODELS: &[(&str, u64)] = &[
     ("gpt-6-astra", 272_000),
-    ("gpt-6.1-sol", 272_000),
+    ("gpt-6.1-sol", 500_000),
     ("gpt-6-sol", 272_000),
     ("gpt-6-luna", 272_000),
     ("gpt-5.6-sol", 272_000),

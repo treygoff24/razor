@@ -10,6 +10,6 @@ Trey, 2026-10-27: "I want each lane to go into this thinking like, 'This is goin
 
 Keep changes small, review the diff, and run the flows relevant to the change. SPEC section 7 describes the design and review process; [docs/contributing.md](docs/contributing.md) says what a change needs and how to send it.
 
-Run flows with `scripts/flows.sh 02 26` (numbers or names); it prepares the build, bridge packages and Python environment. `python3 scripts/size.py` checks the line budgets, and `scripts/gate.sh` runs every check a change must pass, on Linux.
+Run flows with `scripts/flows.sh 02 26` (numbers or names); it prepares the build, bridge packages and Python environment. `python3 scripts/size.py` checks the total against the release's line ceiling in `scripts/size.tsv`, and `scripts/gate.sh` runs every check a change must pass, on Linux.
 
 What Razor does for its users is in [docs/README.md](docs/README.md).

@@ -444,7 +444,7 @@ async fn send(
     )
     .await;
     let unavailable =
-        || "The paired request did not finish; check its transcript before sending again.".into();
+        || "The paired request may not have arrived; check its result before sending again.".into();
     let response = answer
         .map_err(|_| Refusal(StatusCode::BAD_GATEWAY, unavailable()))?
         .map_err(|error| {

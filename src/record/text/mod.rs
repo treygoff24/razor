@@ -1,10 +1,19 @@
 //! Model-facing rebuild text, checked by the compiler rather than a runtime template parser.
 
 mod input;
-pub(crate) use input::{call_line, calls_left_out, heard, length, skill};
+pub(crate) use input::{call_line, calls_left_out, heard, length, skill, steering};
 
 use super::{ChildSummary, Summary};
 use crate::protocol::{Body, End, EntryId, JobEvent, Millis, Outcome, Trigger, Usage};
+
+/// One refused step asks for the reply the person's mid-turn input still needs.
+pub(crate) const UNANSWERED: &str = include_str!("unanswered.md");
+pub(crate) const NOT_RUN: &str = "not run because the person's message had not been answered";
+
+/// The same account of a withheld attempt in a rebuild, digest or recap.
+pub(crate) fn not_run(name: &str, input: &serde_json::Value) -> String {
+    format!("{name} {}: {NOT_RUN}", super::target(input))
+}
 
 /// Requests a continuation note with the reason the session is handing over.
 pub(crate) fn handover(trigger: Trigger) -> &'static str {

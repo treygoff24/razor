@@ -14,9 +14,9 @@ from dataclasses import replace
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler
 import chat
-import claude
 from driver import BINARY, REPLIES, Reply, flow
 from png import png
+from responses import PLAIN, call, done, response
 from terminal import Terminal
 import server
 
@@ -238,7 +238,7 @@ with flow(replies, config='[providers.runinfra]\nbase_url = "{standin}"\n',
     assert [code for _, code in results] == [0] * 6, results
 
 # A session's avatar is a recorded choice, kept across rebuild and process restart.
-with flow([hello, claude.reply(("avatar_note", "mcp__razor__handover", {"note": "Keep the avatar."})), hello]) as f:
+with flow([done(), response([call("handover", '{"note":"Keep the avatar."}', "avatar_note")]), done()], model="sol", config=PLAIN) as f:
     picture = f.home / ".razor/owl.png"
     picture.write_bytes(Path(__file__).with_name("replies").joinpath("avatar.png").read_bytes())
     person = picture.with_name("config.toml")

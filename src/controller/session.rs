@@ -25,7 +25,7 @@ use futures_util::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Component;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot, watch};
 
 /// The most inputs a session holds that the model has not read.
@@ -99,6 +99,14 @@ pub(super) struct Session {
     done: Option<(EntryId, bool)>,
 }
 
+/// The reply owed to a person's midturn message, and this step's withheld attempts.
+#[derive(Default)]
+struct Reply {
+    pending: Option<EntryId>,
+    refused: bool,
+    calls: Vec<(CallId, String, serde_json::Value)>,
+}
+
 /// An open model conversation: messages in, lines out, and what its batch must settle.
 struct Conversation {
     send: mpsc::Sender<ToBridge>,
@@ -119,14 +127,16 @@ struct Conversation {
     threshold: Option<(EntryId, Trigger)>,
     /// The note of the handover call in the batch being settled; empty for the night's.
     handover: Option<String>,
-    /// Escape interrupted this turn; the path has not yet ended it.
-    interrupted: bool,
+    /// When Escape interrupted this turn; the path has not yet ended it.
+    interrupted: Option<Instant>,
     /// The session's thoughts before this conversation's, which its own numbers follow.
     thoughts: u64,
     /// A finished child's parent and report, admitted once the batch settles.
     closing: Option<(SessionId, Input)>,
     /// The live words of the reply being streamed that may be its suggestion.
     hold: crate::record::Hold,
+    /// The latest midturn person input, this step's refusal, and attempts awaiting their mirror.
+    reply: Reply,
 }
 
 /// A finished action: its answer to the model, whether the batch must settle, a finished
@@ -231,7 +241,7 @@ impl Session {
         }
         self.publish_row();
         if let Some(parent) = &parent {
-            lock(&self.c.inner.status).child_rows(parent);
+            lock(&self.c.inner.status).child_rows(parent, Vec::new());
         }
         children::recover_loaded(self.c.clone(), self.record.summary());
         self.c.child_rows(self.record.summary()).await;
@@ -434,8 +444,7 @@ impl Session {
         }
     }
 
-    /// The last turn is ending on `answered`: withdraw every other unanswered input;
-    /// no turn starts after it, and the session closes as a finished child does.
+    /// Closes the turn and withdraws inputs it did not answer.
     pub(super) async fn close_out(&mut self, answered: &[EntryId]) -> Result<(), Error> {
         (self.done, self.planned, self.blocked) = (None, None, true);
         self.c.inner.children.post.closed(self.id.as_str());
@@ -497,11 +506,8 @@ impl Session {
     /// None when the call is not open.
     fn took(&mut self, call: &CallId, error: bool) -> Option<Vec<EntryId>> {
         let s = self.record.summary();
-        let at =
-            |ids: &[(CallId, EntryId)], id: &str| ids.iter().find(|c| c.0.0 == id).map(|c| c.1);
         let own = s.unresolved.iter().find(|c| c.0 == *call)?.1;
-        // A call a cell made has its exec's id, a colon and a number; its news moves to the cell.
-        let cell = call.0.rsplit_once(':').and_then(|(e, _)| at(&s.cells, e));
+        let cell = s.nested(&call.0);
         let reads = s.reads(&call.0).unwrap_or(own);
         let leaves = |t: &mut (_, _)| !error && t.0 == reads && cell.map(|e| t.0 = e).is_none();
         Some(self.taken.extract_if(.., leaves).map(|t| t.1).collect())
@@ -527,12 +533,20 @@ impl Session {
     }
 
     /// Escape: stops the running actions and kills this turn's foreground jobs, then has the
-    /// model path interrupt the turn and end it `Stopped`, keeping the conversation. A second
-    /// Escape, or one with no conversation, drops it and ends the turn here; held inputs open
-    /// the next turn.
+    /// model path interrupt the turn and end it `Stopped`, keeping the conversation. After five
+    /// seconds without an answer, another Stop drops it and ends the turn here.
     pub(super) async fn stop(&mut self) -> Result<(), Error> {
         let quit = matches!(self.done, Some((EntryId(0), _)));
         if self.state != State::Working && !quit {
+            return Ok(());
+        }
+        // A working path answers in milliseconds; five seconds covers habitual repeated presses
+        // while leaving a later Stop available when the path never answers.
+        const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
+        if let Some(c) = &self.conversation
+            && let Some(at) = c.interrupted
+            && at.elapsed() < INTERRUPT_GRACE
+        {
             return Ok(());
         }
         self.actions.clear();
@@ -548,9 +562,15 @@ impl Session {
         let running = self.foreground.iter().filter(|j| j.1.is_none());
         self.stopped.extend(running.map(|(job, _)| *job));
         self.release(true);
-        if let Some(c) = self.conversation.as_mut().filter(|c| !c.interrupted) {
-            c.interrupted = true;
+        if let Some(c) = &mut self.conversation
+            && c.interrupted.is_none()
+        {
+            c.reply = Reply::default();
+            c.interrupted = Some(Instant::now());
             return self.say(|session| ToBridge::Interrupt { session }).await;
+        }
+        if self.conversation.is_some() {
+            eprintln!("razor: session {}: forcing an unanswered stop", self.id);
         }
         self.conversation = None;
         // Inputs sent and not yet read were in the dropped conversation's queue: as for a finished
@@ -703,19 +723,12 @@ impl Session {
     }
 }
 
-/// Closes `session` and its descendants on a task of its own, then sends a finished child's
-/// recorded report to `parent`. A plain function, so the type of the future it spawns is not
-/// part of the turn's end that calls it, which closing and admission also reach.
-fn close(c: Controller, session: SessionId, parent: Option<SessionId>) {
+/// Sends a finished child's recorded report after its descendants close. A plain function,
+/// so its spawned future's type is not part of the turn's end that also reaches admission.
+fn send_report(c: Controller, session: SessionId, parent: SessionId) {
     tokio::spawn(async move {
-        let closed = match parent {
-            Some(parent) => children::deliver(&c, &session, parent)
-                .await
-                .map_err(|e| Error::Invalid(e.to_string())),
-            None => c.close(&session).await,
-        };
-        if let Err(e) = closed {
-            eprintln!("razor: closing session {session}: {e}");
+        if let Err(e) = children::deliver(&c, &session, parent).await {
+            eprintln!("razor: delivering report from {session}: {e}");
         }
     });
 }

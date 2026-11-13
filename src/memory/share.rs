@@ -50,7 +50,7 @@ where
                     let who = who.as_ref();
                     let (url, changed) = fresh(root, dir, name, fetch, reference, who).await?;
                     synced |= changed;
-                    Some(url)
+                    url
                 }
                 Ok(None) => None,
                 Err(why) => return Err(refuse(&fill(&TEXT.settings, &[("why", why)]))),
@@ -87,11 +87,36 @@ where
 async fn git(dir: &Path, secs: u64, args: &[&str]) -> Result<String, Error> {
     let fixed = "--literal-pathspecs -c core.hooksPath=/dev/null -c commit.gpgSign=false -c http.proactiveAuth=basic";
     let args: Vec<&str> = fixed.split(' ').chain(args.iter().copied()).collect();
-    let ran = crate::children::git::timed(dir, secs, &args).await;
+    let lock = dir.join(".git/index.lock");
+    let index = |why: &str| why.contains("index.lock': File exists");
+    let mut ran = crate::children::git::timed(dir, secs, &args).await;
+    if let Err(why) = &ran
+        && index(&why.to_string())
+    {
+        let age = fs::metadata(&lock).await.and_then(|m| m.modified());
+        if let Some(age) = age.ok().and_then(|at| at.elapsed().ok())
+            && age > Duration::from_secs(600)
+        {
+            match fs::remove_file(&lock).await {
+                Ok(()) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(other("removing an old git index lock")(e)),
+            }
+            eprintln!(
+                "razor: removed index.lock in {} after {} seconds",
+                dir.display(),
+                age.as_secs()
+            );
+            ran = crate::children::git::timed(dir, secs, &args).await;
+        }
+    }
     ran.map_err(|e| {
         let mut why = e.to_string();
-        if why.contains(".lock") && why.contains("File exists") {
-            why += &TEXT.git_lock;
+        if index(&why) {
+            let quoted = format!("'{}'", lock.display().to_string().replace('\'', "'\\''"));
+            why += &fill(&TEXT.git_lock, &[("lock", &quoted)]);
+        } else if why.contains(".lock") && why.contains("File exists") {
+            why += &TEXT.git_lock_other;
         }
         refuse(&why)
     })
@@ -145,12 +170,15 @@ pub(super) async fn people(dir: &Path) -> Vec<(String, String)> {
     people.into_iter().map(owned).collect()
 }
 
-/// The first commit of the shared folder `dir`, which every folder joined to its remote holds.
-pub(super) async fn first(dir: &Path) -> Option<String> {
-    let roots = git(dir, LOCAL, &["rev-list", "--max-parents=0", "HEAD"])
-        .await
-        .ok()?;
-    roots.lines().last().map(str::to_owned)
+/// The first commit of `revision` in `dir`, which every folder joined to that history holds.
+pub(super) async fn first(dir: &Path, revision: &str) -> Result<Option<String>, Error> {
+    let roots = git(dir, LOCAL, &["rev-list", "--max-parents=0", revision]).await?;
+    Ok(roots.lines().last().map(str::to_owned))
+}
+
+async fn roots(dir: &Path, revision: &str) -> Result<BTreeSet<String>, Error> {
+    let roots = git(dir, LOCAL, &["rev-list", "--max-parents=0", revision]).await?;
+    Ok(roots.lines().map(str::to_owned).collect())
 }
 
 /// Whether the origin of the checkout at `root` holds shared memory or tasks.
@@ -166,7 +194,7 @@ pub(super) async fn offered(root: &Path) -> bool {
 /// would read it; the first time, `dir` becomes a checkout. Edits made outside a write, the
 /// folder's own tasks before it was shared among them, are committed and kept on top of the
 /// remote's; when they touch a file the remote's tasks changed, nothing changes and the call is
-/// refused with what to do.
+/// refused with what to do. Unrelated local files stay unshared, reported by an absent URL.
 pub(super) async fn fresh(
     root: &Path,
     dir: &Path,
@@ -174,7 +202,7 @@ pub(super) async fn fresh(
     get: bool,
     reference: &str,
     who: Who<'_>,
-) -> Result<(String, bool), Error> {
+) -> Result<(Option<String>, bool), Error> {
     let url = git(root, LOCAL, &["remote", "get-url", "--", name]).await;
     let url = url.unwrap_or_else(|_| name.to_owned());
     // A path, no `:` before any `/`, is the checkout's; git would read it from `dir`, where it runs.
@@ -199,15 +227,16 @@ pub(super) async fn fresh(
         let fetched = git(dir, NET, &["fetch", "-q", "--no-tags", &url, &refs]).await;
         fetched.map_err(|e| refuse(&fill(&TEXT.offline, &[("why", &e)])))?;
     }
+    let (seen_head, head) = (rev(dir, SEEN).await?, rev(dir, "HEAD").await?);
+    if unrelated(dir, seen_head.as_deref(), head.as_deref()).await? {
+        return Ok((None, false));
+    }
     let status = git(dir, LOCAL, &["status", "--porcelain"]).await?;
     if !status.is_empty() {
         git(dir, LOCAL, &["add", "-A"]).await?;
         authored(dir, who, &["commit", "-q", "-m", "edited by hand"]).await?;
     }
-    match (
-        rev(dir, SEEN).await?.is_some(),
-        rev(dir, "HEAD").await?.is_some(),
-    ) {
+    match (seen_head.is_some(), head.is_some() || !status.is_empty()) {
         (false, _) => Ok(()),
         // Nothing here yet, not even an untracked file, so taking the remote's loses nothing.
         (true, false) => git(dir, LOCAL, &["reset", "-q", "--hard", SEEN])
@@ -223,7 +252,46 @@ pub(super) async fn fresh(
     }?;
     let now = if get { rev(dir, SEEN).await? } else { None };
     let changed = now.is_some() && now != seen && tree != rev(dir, "HEAD^{tree}").await?;
-    Ok((url, changed))
+    Ok((Some(url), changed))
+}
+
+/// Whether local files have no history in common with the last fetched, nonempty remote.
+/// No fetch or file changes: the startup page and the refresh use the same decision.
+pub(super) async fn unjoined(dir: &Path) -> Result<bool, Error> {
+    let (seen, head) = (rev(dir, SEEN).await?, rev(dir, "HEAD").await?);
+    unrelated(dir, seen.as_deref(), head.as_deref()).await
+}
+
+async fn unrelated(dir: &Path, seen: Option<&str>, head: Option<&str>) -> Result<bool, Error> {
+    let Some(seen) = seen else {
+        return Ok(false);
+    };
+    if let Some(head) = head
+        && git(dir, LOCAL, &["merge-base", "--is-ancestor", seen, head])
+            .await
+            .is_ok()
+    {
+        return Ok(false);
+    }
+    let mut entries = fs::read_dir(dir).await.map_err(other("reading a store"))?;
+    let mut own = false;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(other("reading a store"))?
+    {
+        own = entry.file_name() != ".git";
+        if own {
+            break;
+        }
+    }
+    if !own {
+        return Ok(false);
+    }
+    let Some(head) = head else {
+        return Ok(true);
+    };
+    Ok(roots(dir, head).await? != roots(dir, seen).await?)
 }
 
 /// Applies no further edits after a refusal. Failed edits or commits restore the changed paths;

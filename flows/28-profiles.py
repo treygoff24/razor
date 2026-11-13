@@ -82,7 +82,7 @@ with flow([reply] * 3, model="GPT 6.1 Sol") as f:
         entries = list(f.record(session))
         assert entries[0]["model"] == entries[-1]["model"] == "sol", entries
         assert f.request(index)["model"] == "gpt-6.1-sol", f.request(index)
-        assert entries[-1]["served_model"] == "gpt-6.1-sol-served", entries[-1]
+        assert entries[-1]["served_model"] == "gpt-6.1-sol-served" and entries[-1]["window"] == 500000, entries[-1]
     pid = server.start(f)
     os.kill(pid, signal.SIGTERM)
     server.gone(pid)

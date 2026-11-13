@@ -6,8 +6,8 @@ from pathlib import Path
 import signal
 import time
 from driver import flow
-from model import agent, message, reply
-from responses import done
+from model import reply
+from responses import PLAIN as CODEX, call, done, message, response, reply as gpt
 import server
 from standin import Reply
 from terminal import Terminal
@@ -17,27 +17,27 @@ plain, job, mail, sibling, person, error, long, crash, held = [f"You are {name}4
 closing = ["First closing paragraph40.", "Closing report40. " + "🪒" * 17000]
 long_text = "\n\n".join(closing)
 replies = [
-    agent(PLAIN, "start", name="plain40", brief="End in prose, without finish.", placement="in_place"),
-    agent(PLAIN, "wait"), reply(PLAIN, text="plain-report-received40"),
+    gpt(PLAIN, "agent", action="start", name="plain40", brief="End in prose, without finish.", model="opus", placement="in_place"),
+    gpt(PLAIN, "agent", action="wait"), gpt(PLAIN, "plain-report-received40"),
     reply(plain, text=closing),
-    agent(JOB, "start", name="job40", brief="Leave a job running, then report.", placement="in_place"),
-    reply(JOB, text="job-parent-ready40"), reply(JOB, text="job-report-received40"),
-    reply(job, "Bash", {"command": "while [ ! -f release40 ]; do sleep 0.05; done", "run_in_background": True}),
-    reply(job, text="job-waiting40"), reply(job, text="job-closing40"),
-    agent(MAIL, "start", name="sibling40", brief="Do not reply to mentions.", placement="in_place"),
-    agent(MAIL, "start", name="mail40", brief="Mention your sibling and wait.", placement="in_place"),
-    reply(MAIL, text="mail-parent-ready40"), reply(MAIL, text="mail-report-received40"),
-    reply(sibling, "Bash", {"command": "sleep 120", "run_in_background": True}),
-    reply(sibling, text="sibling-ready40"), reply(sibling, text="sibling-no-reply40"),
-    message(mail, "note", to="channel", text="@sibling40 Please look at this."),
-    reply(mail, text="mail-waiting40"), reply(mail, text="mail-nudged-report40"),
-    agent(PERSON, "start", name="person40", brief="Send your parent a note, then wait.", placement="in_place"),
-    reply(PERSON, text="person-parent-ready40"), reply(PERSON, text="person-parent-ready40"),
-    message(person, "note", text="Ready for steering40."),
-    reply(person, text="person-visible40"), reply(person, text="person-answer40"),
+    gpt(JOB, "agent", action="start", name="job40", brief="Leave a job running, then report.", placement="in_place"),
+    gpt(JOB, "job-parent-ready40"), gpt(JOB, "job-report-received40"),
+    gpt(job, "bash", command="while [ ! -f release40 ]; do sleep 0.05; done", wait_ms=0),
+    gpt(job, "job-waiting40"), gpt(job, "job-closing40"),
+    gpt(MAIL, "agent", action="start", name="sibling40", brief="Do not reply to mentions.", placement="in_place"),
+    gpt(MAIL, "agent", action="start", name="mail40", brief="Mention your sibling and wait.", placement="in_place"),
+    gpt(MAIL, "mail-parent-ready40"), gpt(MAIL, "mail-report-received40"),
+    gpt(sibling, "bash", command="sleep 120", wait_ms=0),
+    gpt(sibling, "sibling-ready40"), gpt(sibling, "sibling-no-reply40"),
+    gpt(mail, "message", type="note", to="channel", text="@sibling40 Please look at this."),
+    gpt(mail, "mail-waiting40"), gpt(mail, "mail-nudged-report40"),
+    gpt(PERSON, "agent", action="start", name="person40", brief="Send your parent a note, then wait.", placement="in_place"),
+    gpt(PERSON, "person-parent-ready40"), gpt(PERSON, "person-parent-ready40"),
+    gpt(person, "message", type="note", text="Ready for steering40."),
+    gpt(person, "person-visible40"), gpt(person, "person-answer40"),
 ]
 
-with flow(replies, config='[children]\ngrace = "1h"\n') as f:
+with flow(replies, model="sol", config=CODEX + '[children]\ngrace = "1h"\n') as f:
     server.start(f)
 
     def start(text):
@@ -72,8 +72,8 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     assert actual == expected and len(actual.encode()) <= 65536, (len(actual.encode()), actual[:100], actual[-128:])
     assert len([e for e in f.record(sid) if e["kind"] == "turn_end"]) == 1
     ended(parent, "plain-report-received40")
-    replies += [agent(PLAIN, "continue", child="plain40", brief="End as one long block40."),
-                agent(PLAIN, "wait"), reply(PLAIN, text="single-report-received40"),
+    replies += [gpt(PLAIN, "agent", action="continue", child="plain40", brief="End as one long block40."),
+                gpt(PLAIN, "agent", action="wait"), gpt(PLAIN, "single-report-received40"),
                 reply(plain, text=closing[1])]
     server.post(f, f"/sessions/{parent}/input", {"text": "Continue plain40 with one block."})
     server.until(f, parent, lambda _: len(reports(parent, sid)) == 2)
@@ -82,6 +82,7 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     suffix = f"\nFull closing text: session {sid}, record entry {texts[-1]['id']}.\n"
     expected = closing[1].encode()[:65536 - len(suffix.encode())].decode("utf-8", "ignore") + suffix
     assert reports(parent, sid)[-1]["text"] == expected
+    ended(parent, "single-report-received40")  # The next restart must not cut this reply.
 
     # A live job holds completion; only its notice turn's closing text reaches the parent.
     parent = start(JOB)
@@ -89,6 +90,7 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     entries = ended(sid, "job-waiting40")
     assert any(e["kind"] == "job" and e["event"] == "started" for e in entries) and not reports(parent, sid), entries
     assert not any(e["kind"] == "job" and e["event"] == "ended" for e in entries), entries
+    ended(parent, "job-parent-ready40")  # Only the child's job is unfinished at shutdown.
     # It ends while the server is down: its notice still opens the turn that reports.
     server.stop(f)
     (f.cwd / "release40").touch()
@@ -100,6 +102,7 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     # Its notice is recorded before its end, so no stop between the two leaves the child idle.
     assert [(e["kind"], e.get("event", e.get("from"))) for e in entries if e["kind"] in ("input", "job")][-2:] == [("input", "razor"), ("job", "ended")], entries
     assert len([e for e in entries if e["kind"] == "turn_end"]) == 2, entries
+    ended(parent, "job-report-received40")  # The later kill must not replay this parent turn.
 
     # No sibling reply: changing the real live setting shortens the existing grace.
     parent = start(MAIL)
@@ -108,6 +111,7 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     assert any(e["kind"] == "mail_sent" for e in entries) and not reports(parent, sid), entries
     # A turn the kill cuts runs again on restart, so the sibling's answer to the mention ends first.
     ended(child(parent, "sibling40"), "sibling-no-reply40")
+    ended(parent, "mail-parent-ready40")  # Restart only the child's mail grace.
     server.stop(f, signal.SIGKILL)
     server.start(f)
     config = f.home / ".razor/config.toml"
@@ -120,11 +124,11 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
 
     # Continue clears the nudge as well: sent mail must receive a fresh grace, not finish now.
     config.write_text(config.read_text().replace('grace = "1s"', 'grace = "1h"'))
-    replies += [agent(MAIL, "continue", child="mail40", brief="A new task40: mention the sibling again."),
-                reply(MAIL, text="continued-parent-ready40"), reply(MAIL, text="continued-report-received40"),
-                message(mail, "note", to="channel", text="@sibling40 New task40."),
-                reply(mail, text="continued-waiting40"), reply(mail, text="continued-nudged-report40"),
-                reply(sibling, text="sibling-still-no-reply40")]
+    replies += [gpt(MAIL, "agent", action="continue", child="mail40", brief="A new task40: mention the sibling again."),
+                gpt(MAIL, "continued-parent-ready40"), gpt(MAIL, "continued-report-received40"),
+                gpt(mail, "message", type="note", to="channel", text="@sibling40 New task40."),
+                gpt(mail, "continued-waiting40"), gpt(mail, "continued-nudged-report40"),
+                gpt(sibling, "sibling-still-no-reply40")]
     server.post(f, f"/sessions/{parent}/input", {"text": "Continue mail40 on a new task."})
     ended(sid, "continued-waiting40")
     assert len(reports(parent, sid)) == 1, reports(parent, sid)
@@ -134,7 +138,7 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     assert len([e for e in f.record(sid) if e["kind"] == "input" and e["from"] == "razor"]) == 2
 
     ended(parent, "continued-report-received40")
-    replies += [agent(MAIL, "stop", child="sibling40"), reply(MAIL, text="mail-cleaned40")]
+    replies += [gpt(MAIL, "agent", action="stop", child="sibling40"), gpt(MAIL, "mail-cleaned40")]
     server.post(f, f"/sessions/{parent}/input", {"text": "Stop the sibling's pending job."})
     ended(parent, "mail-cleaned40")
 
@@ -159,8 +163,8 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
         assert not reports(parent, sid), reports(parent, sid)
 
     # Continue reaches the idle child that did not report, whatever its last turn's end.
-    replies += [agent(PERSON, "continue", child="person40", brief="Again40."), reply(PERSON, text="person-continued40"),
-                reply(PERSON, text="person-report40"), reply("Again40."), Reply(b'{"type": "error", "error": {"type": "permission_error", "message": "Failed40."}}', status=403, match=person)]
+    replies += [gpt(PERSON, "agent", action="continue", child="person40", brief="Again40."), gpt(PERSON, "person-continued40"),
+                gpt(PERSON, "person-report40"), gpt("Again40.", "flow done"), Reply(b'{"type": "error", "error": {"type": "permission_error", "message": "Failed40."}}', status=403, match=person)]
     server.post(f, f"/sessions/{parent}/input", {"text": "Continue person40."})
     ended(parent, "person-report40")
     # A failed turn that took the person's input does not report: its end carries no report.
@@ -170,8 +174,8 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
 
     # A turn ending in an error reports blocked at once with its sentence; continue runs it again.
     rejected = Reply(b'{"error": {"type": "invalid_request_error", "message": "Rejected40"}}', status=400, match=error)
-    replies += [agent(ERROR, "start", name="error40", brief="Fail once.", model="gpt-6.1-sol", placement="in_place"),
-                agent(ERROR, "wait"), reply(ERROR, text="error-report-received40"), rejected]
+    replies += [gpt(ERROR, "agent", action="start", name="error40", brief="Fail once.", model="gpt-6.1-sol", placement="in_place"),
+                gpt(ERROR, "agent", action="wait"), gpt(ERROR, "error-report-received40"), rejected]
     parent = start(ERROR)
     sid = child(parent, "error40")
     entries = ended(parent, "error-report-received40")
@@ -179,8 +183,8 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     wait = next(e["call"] for e in entries if e["kind"] == "call" and e["input"].get("action") == "wait")
     waited = json.loads(next(e["output"] for e in entries if e["kind"] == "result" and e["call"] == wait))
     assert waited["from"]["report"]["status"] == "blocked" and waited["text"] == blocked, waited
-    replies += [agent(ERROR, "continue", child="error40", brief="Try again40."), agent(ERROR, "wait"),
-                reply(ERROR, text="retry-report-received40"), replace(done(), match=error)]
+    replies += [gpt(ERROR, "agent", action="continue", child="error40", brief="Try again40."), gpt(ERROR, "agent", action="wait"),
+                gpt(ERROR, "retry-report-received40"), replace(done(), match=error)]
     server.post(f, f"/sessions/{parent}/input", {"text": "Continue error40."})
     ended(parent, "retry-report-received40")
     assert [(r["from"]["report"]["status"], r["text"]) for r in reports(parent, sid)] == [
@@ -190,8 +194,8 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
 
     # An error sentence past 64 KiB is cut so the report fits, the retry line kept.
     big = json.dumps({"type": "response.incomplete", "response": {"incomplete_details": {"reason": "🪒" * 20000}}}, ensure_ascii=False)
-    replies += [agent(LONG, "start", name="long40", brief="Fail long.", model="gpt-6.1-sol", placement="in_place"),
-                agent(LONG, "wait"), reply(LONG, text="long-report-received40"), Reply(f"data: {big}\n\n".encode(), match=long)]
+    replies += [gpt(LONG, "agent", action="start", name="long40", brief="Fail long.", model="gpt-6.1-sol", placement="in_place"),
+                gpt(LONG, "agent", action="wait"), gpt(LONG, "long-report-received40"), Reply(f"data: {big}\n\n".encode(), match=long)]
     parent = start(LONG)
     sid = lone = child(parent, "long40")
     ended(parent, "long-report-received40")
@@ -203,13 +207,15 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     # The notice stays queued while a model reply streams (`agent wait` would take it); the CLI is
     # stopped before it reads that reply's end and killed once the stand-in has sent it.
     (f.cwd / "crash40").mkdir()
-    replies += [agent(CRASH, "start", name="crash40", brief="Wait on a job.", cwd="crash40", placement="in_place"),
-                agent(CRASH, "wait"), reply(CRASH, text="crash-report-received40"),
+    replies += [gpt(CRASH, "agent", action="start", name="crash40", brief="Wait on a job.", cwd="crash40", model="opus", placement="in_place"),
+                gpt(CRASH, "agent", action="wait"), gpt(CRASH, "crash-report-received40"),
                 reply(crash, "Bash", {"command": "while [ ! -f go40 ]; do sleep 0.05; done", "run_in_background": True}),
                 replace(reply(crash, text="unread40"), cuts=tuple(range(10, 850, 10)))]  # about 2.5 s
     parent = start(CRASH)
     sid = child(parent, "crash40")
     server.until(f, sid, lambda es: any(e["kind"] == "result" for e in es))
+    # The job must end during the second request's stream, before the CLI is stopped.
+    server.wait(lambda: sum(crash in body for body in f.sent()) >= 2)
     replies.append(reply(f"{sid}/job-1</output-file>", text="crash-recovered40"))
     (f.cwd / "crash40/go40").touch()
     server.until(f, sid, lambda es: any(e["kind"] == "job" and e["event"] == "ended" for e in es))
@@ -226,13 +232,21 @@ with flow(replies, config='[children]\ngrace = "1h"\n') as f:
     # A report survives a stop the moment its child's turn end is written. Words the person sent
     # as the child streamed its finish wait for its next task, which the person's first message
     # after the restart opens with both.
-    replies += [agent(HELD, "start", name="held40", brief="Finish at once.", placement="in_place"),
-                reply(HELD, text="held-parent-ready40"), reply(HELD, text="held-report-heard40"),
-                replace(agent(held, "finish", status="finished", report="held-report40"), cuts=tuple(range(1, 60))),
-                reply("HELD_LATER40", text="held-answer40")]
+    replies += [gpt(HELD, "agent", action="start", name="held40", brief="Finish at once.", placement="in_place"),
+                gpt(HELD, "held-parent-ready40"), gpt(HELD, "held-report-heard40"),
+                gpt(held, "agent", action="wait"),
+                replace(response([message("I read your message; I will send the finished report."),
+                                  call("agent", json.dumps({"action": "finish", "status": "finished", "report": "held-report40"}), "held_finish40")]),
+                        match=held, cuts=tuple(range(1, 60))),
+                gpt("HELD_LATER40", "held-answer40")]
     parent = start(HELD)
     sid = child(parent, "held40")
-    server.wait(lambda: any(held in body for body in f.sent()))
+    # Let the parent's opening turn end before releasing the child's finish: the kill tests
+    # report recovery, without also interrupting and replaying the parent's opening reply.
+    ended(parent, "held-parent-ready40")
+    server.until(f, sid, lambda es: any(e["kind"] == "call" and e["input"].get("action") == "wait" for e in es))
+    server.post(f, f"/sessions/{sid}/input", {"text": "HELD_FINISH40"})
+    server.wait(lambda: any("HELD_FINISH40" in body for body in f.sent()))
     early = server.post(f, f"/sessions/{sid}/input", {"text": "HELD_EARLY40"})["entry"]
     while b'"kind":"turn_end"' not in (f.home / ".razor/sessions" / sid / "record.jsonl").read_bytes():
         pass

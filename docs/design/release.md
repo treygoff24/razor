@@ -38,7 +38,8 @@ startup. A retired key loads ignored, with a notice, for at least one release.
 A change that code cannot carry over is marked as needing action and called out in
 the changelog's "To update" steps. Set `RAZOR_ACTION="0.7.0 One sentence saying what
 to do."` when running `scripts/release.sh`; it writes that literal line in `install.sh`.
-A mark is never dropped, only superseded. Its version is when the newest need began.
+A mark is never dropped, only superseded; publishing refuses an unmarked installer
+when the latest release has a mark. Its version is when the newest need began.
 For a second need, raise that version and retain each need in the sentence with its
 version: "Updating from before 0.7.0: … From before 0.9.0: …". This holds servers
 between the two needs too. The sentence is at most 200 characters on one line,
@@ -74,8 +75,8 @@ check neither downloads nor selects the release. It saves the mark in one small
 `release-action` file under the install root. `current` stays unchanged: a restart,
 reboot or crash still starts the selected old version. A typed `razor update` downloads
 and selects the latest release and prints the action. After that successful install
-it removes the file. If another install has already met the mark, the next update
-check removes the file before contacting the release server; status hides it meanwhile.
+it removes the file. A check that finds the latest release already installed also
+removes the file, even if its mark is malformed; status hides a met mark meanwhile.
 Installer improvements reach an existing installation one release later; downloaded shell
 code is never executed. Every release archive must install correctly with the previous
 release's installer.

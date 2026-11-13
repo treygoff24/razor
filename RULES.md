@@ -33,7 +33,7 @@ Read this before writing a line; reviewers check against it. It grows only on Tr
 ## Size
 
 17. A file over 800 lines or a function over 80 is a review finding unless the reviewer writes why it is the right shape.
-18. Each module's line budget is in the spec and the gate counts it; a lane that nears its budget cuts before it asks.
+18. The release's line ceiling is in `scripts/size.tsv` and the gate counts it.
 19. No code for a future need. If the spec does not name it and a flow does not exercise it, it is not written.
 
 ## Dependencies

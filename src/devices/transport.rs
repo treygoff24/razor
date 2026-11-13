@@ -15,6 +15,37 @@ const CHILD_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const MAIL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Devices {
+    /// One snapshot of the endpoint's relay evidence and its credential-free doctor sentences.
+    pub(crate) fn relay_status(
+        endpoint: &iroh::Endpoint,
+        relays: &[iroh::RelayUrl],
+    ) -> (bool, Vec<String>) {
+        use iroh::Watcher;
+        let status = endpoint.home_relay_status().get();
+        let lines = if status.is_empty() {
+            let relays = relays
+                .iter()
+                .map(crate::config::shown)
+                .collect::<Vec<_>>()
+                .join(", ");
+            vec![format!(
+                "Home relays: {relays} (not yet answered since start)."
+            )]
+        } else {
+            status.iter().map(|relay| {
+                let state = if relay.is_connected() {
+                    "connected"
+                } else if relay.auth_denied_reason().is_some() {
+                    "refused this server; check this server's access to it, including the password in network.relays in config.toml"
+                } else {
+                    "not reached; check the relay and WebSocket access"
+                };
+                format!("Home relay: {} ({state}).", crate::config::shown(relay.url()))
+            }).collect()
+        };
+        (status.iter().any(|s| s.is_connected()), lines)
+    }
+
     /// Replaces the outgoing cache with the endpoint's lifetime, including when disabled.
     pub(crate) async fn endpoint(&self, endpoint: Option<iroh::Endpoint>) {
         *self.client.write().await = endpoint.map(|e| Arc::new(razor_network::Client::new(e)));
@@ -144,7 +175,7 @@ impl Devices {
                 "{server} did not acknowledge the operation; it may have run. Check that server's agents list before trying again."
             ))
         };
-        let (status, bytes) = match self
+        let (status, bytes) = self
             .exchange(
                 &device,
                 "/v1/children",
@@ -153,15 +184,11 @@ impl Devices {
                 Duration::from_secs(30),
             )
             .await
-        {
-            Ok(answer) => answer,
-            Err(error @ (razor_network::Error::NotSent { .. } | razor_network::Error::Refused)) => {
-                return refuse(Self::refusal(server, &error).unwrap_or_else(|| {
-                    format!("Could not connect to {server}; the operation was not sent.")
-                }));
-            }
-            _ => return Err(uncertain()),
-        };
+            .map_err(|error| {
+                Self::refusal(server, &error)
+                    .map(Error::Refused)
+                    .unwrap_or_else(uncertain)
+            })?;
         let body: Value = serde_json::from_slice(&bytes).map_err(|_| uncertain())?;
         if !status.is_success() {
             return refuse(format!(
@@ -195,16 +222,10 @@ impl Devices {
             .await
         {
             Ok(answer) => answer,
-            Err(error @ (razor_network::Error::NotSent { .. } | razor_network::Error::Refused)) => {
-                return refuse(
-                    Self::refusal(server, &error)
-                        .unwrap_or_else(|| format!("{server} did not answer; nothing was sent.")),
-                );
-            }
-            _ => {
-                return refuse(format!(
-                    "{server} did not answer; the mail may not have arrived."
-                ));
+            Err(error) => {
+                return refuse(Self::refusal(server, &error).unwrap_or_else(|| {
+                    format!("{server} did not answer; the mail may not have arrived.")
+                }));
             }
         };
         let body: Value = serde_json::from_slice(&bytes).unwrap_or_default();
@@ -244,10 +265,17 @@ impl Devices {
         .unwrap_or_else(|e| Err(razor_network::Error::Uncertain { source: e.into() }))
     }
 
-    /// Admission refusal proves no API stream was served, even after a successful handshake.
+    /// Handshake or admission failure proves no API request was sent.
     pub(crate) fn refusal(server: &str, error: &razor_network::Error) -> Option<String> {
-        matches!(error, razor_network::Error::Refused)
-            .then(|| format!("{server} refused this server's key; pair them again."))
+        match error {
+            razor_network::Error::Refused => Some(format!(
+                "{server} refused this server's key; pair them again."
+            )),
+            razor_network::Error::NotSent { .. } => {
+                Some(format!("{server} did not answer; nothing was sent."))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -267,32 +295,9 @@ impl Devices {
         endpoint: &iroh::Endpoint,
         relays: &[iroh::RelayUrl],
     ) -> Vec<String> {
-        use iroh::Watcher;
         // A relay that admits only listed keys needs this one.
         let mut lines = vec![format!("Network key: {}.", endpoint.id())];
-        for relay in endpoint.home_relay_status().get() {
-            lines.push(format!(
-                "Home relay: {} ({}).",
-                crate::config::shown(relay.url()),
-                if relay.is_connected() {
-                    "connected"
-                } else if relay.auth_denied_reason().is_some() {
-                    "refused this server; check this server's access to it, including the password in network.relays in config.toml"
-                } else {
-                    "disconnected; check the relay and WebSocket access"
-                }
-            ));
-        }
-        if lines.len() == 1 {
-            let relays = relays
-                .iter()
-                .map(crate::config::shown)
-                .collect::<Vec<_>>()
-                .join(", ");
-            lines.push(format!(
-                "Home relays: {relays} (not reached; check the relay and WebSocket access)."
-            ));
-        }
+        lines.extend(Self::relay_status(endpoint, relays).1);
         for (device, _) in self.paired().await {
             let mut request = Request::new(Bytes::new());
             *request.uri_mut() = axum::http::Uri::from_static("/v1/device");
@@ -301,7 +306,7 @@ impl Devices {
                 self.request(&device, request, Connect::Cached),
             )
             .await;
-            if let Ok(Err(error)) = &answer
+            if let Ok(Err(error @ razor_network::Error::Refused)) = &answer
                 && let Some(sentence) = Self::refusal(&device.name, error)
             {
                 lines.push(sentence);

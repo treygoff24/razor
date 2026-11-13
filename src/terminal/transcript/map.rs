@@ -46,7 +46,7 @@ impl Marks {
                 end: End::Error(_), ..
             } => Mark::Error,
             Body::Call { name, input, .. }
-                if !self.child && crate::record::ask(name, input).is_some() =>
+                if crate::record::ask(self.child, name, input).is_some() =>
             {
                 Mark::Question
             }

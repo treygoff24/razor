@@ -106,6 +106,9 @@ impl Session {
         usage: Usage,
         took: Option<EntryId>,
     ) -> Result<(), Error> {
+        if let Some(c) = &mut self.conversation {
+            c.reply = Reply::default();
+        }
         self.actions.clear();
         self.drain().await?;
         let (rebuilt, threshold) = match &mut self.conversation {
@@ -201,14 +204,18 @@ impl Session {
         inputs.dedup();
         // Entry 0 is `/quit`'s: the turn ending now is the last.
         let done = self.done.map(|(entry, _)| entry);
-        let closed =
+        let mut closed =
             crate::memory::dreaming(s) || done.is_some_and(|d| d.0 == 0 || inputs.contains(&d));
         let close_reason =
             (closed && done.is_some() && done != s.job()).then_some(CloseReason::Person);
+        // A run's automatic close waits until a turn answers everything admitted so far.
+        closed &= close_reason.is_some() || s.unanswered.iter().all(|id| inputs.contains(id));
+        // A fresh run someone joined becomes an ordinary open session after its schedule ends.
+        self.done
+            .take_if(|(id, _)| Some(*id) == s.job() && inputs.contains(id));
         if closed {
             self.close_out(&inputs).await?;
             self.c.inner.children.closed(&self.c, self.record.summary());
-            close(self.c.clone(), self.id.clone(), None);
         }
         let (window, threshold) = limits(&self.model, &self.settings.config, self.reported);
         // A switch's note turn ran on the conversation's model, before the switch.
@@ -228,6 +235,13 @@ impl Session {
             child_grace: self.turn.grace(),
         };
         self.append(end, None).await?;
+        if closed {
+            // The turn is already ended: close must not stop it and record a second end.
+            self.set_state(State::Done);
+            if let Err(e) = Box::pin(self.close()).await {
+                eprintln!("razor: closing {}: {e}", self.id);
+            }
+        }
         self.c.inner.space.notify_waiters();
         Ok(())
     }
@@ -314,6 +328,6 @@ impl Session {
         self.actions.clear();
         self.blocked = true;
         self.set_state(State::Done);
-        close(self.c.clone(), self.id.clone(), Some(parent));
+        send_report(self.c.clone(), self.id.clone(), parent);
     }
 }

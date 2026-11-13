@@ -15,13 +15,13 @@ A new module, or a change to a module's public surface, starts as a design page 
 
 ## Line budgets
 
-Razor's size is held to a budget: the spec's budget table gives each module a limit in non-blank, non-comment lines of Rust, TypeScript, Python and shell, and the whole program a total. `scripts/size.py` counts every row and fails when one is over:
+Razor's size is held to one ceiling: a total of non-blank, non-comment lines of Rust, TypeScript, Python and shell, set once per release on Trey's written yes and recorded in `scripts/size.tsv`, whose last row is the release being built. `scripts/size.py` prints each part's count, and each product part's growth since the last release with the part that grew most, and fails only when the total is over the ceiling:
 
 ```sh
 python3 scripts/size.py
 ```
 
-A change that would take its module over its row says so, with the count, before it is written; a module near its limit cuts before it asks for more. A granted raise changes only the numbers in the spec's table. The spec's five performance limits sit beside the line budget, measured on Linux by `scripts/perf.py`.
+Within the ceiling no change asks for a grant. A change that would take the total over it cuts first; a raise between releases is Trey's written yes on its own. The part that grew most since the last release is the one that release rewrites cold (SPEC section 7). The spec's five performance limits sit beside the line budget, measured on Linux by `scripts/perf.py`.
 
 ## Tests
 
@@ -39,7 +39,7 @@ Each flow prints `PASS 02-session` or its failure, then a `FLOW` line with its t
 
 ## The gate
 
-One script runs everything a change must pass: the line budgets, DESIGN.md's colours against the terminal's theme, `cargo fmt`, `cargo clippy` with warnings denied, debug and release builds, the bridge's type check, `shellcheck`, every flow, and the performance limits on the release build.
+One script runs everything a change must pass: the line ceiling, DESIGN.md's colours against the terminal's theme, `cargo fmt`, `cargo clippy` with warnings denied, debug and release builds, the bridge's type check, `shellcheck`, every flow, and the performance limits on the release build.
 
 ```sh
 scripts/gate.sh
@@ -84,7 +84,7 @@ These are the words the code and its reviews use beyond [the glossary in Concept
 
 - **flow**: one end-to-end test script that drives the installed binary against a **stand-in**, a scripted fake of a model's API.
 - **gate**: the one check on merged code: build, lints, flows, budgets.
-- **budget**: a number the gate enforces: lines per module, and the five performance limits.
+- **budget**: a number the gate enforces: the line ceiling on the total of the release being built, and the five performance limits.
 
 ### How the work is organised
 

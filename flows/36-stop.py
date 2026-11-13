@@ -3,12 +3,14 @@ next inputs continue the same native conversation, with no rebuild. An input sen
 path before Escape runs as the next turn there: the session stays working, a second Escape stops
 it and its job, and the session then answers what comes next. News a code-mode cell's calls
 take reaches the model through the next Result that reads the cell, or after a stop as an input."""
+from dataclasses import replace
 import os
 import signal
 import subprocess
 import time
 
 from claude import reply
+from clock import wall_clock
 from driver import Reply, flow
 from responses import PLAIN, call, done, response
 import json
@@ -168,11 +170,34 @@ for model in ("opus", "gpt-6.1-sol"):
         last = f.sent()[-1]
         assert last.count("NEWS_A") == 1 and last.count("NEWS_B") == 1, "news reached the model twice or not at all"
 
-# A second Escape before the path ends the turn drops the conversation: an input sent to it and not
+# Quick repeated Stops keep an unfinished Claude reply and its native conversation. Holding
+# the path's processes leaves the interrupt pending until both Stops reach the controller.
+held = reply(text="Partial words.")
+held = replace(held, body=held.body.split(b"event: content_block_stop")[0], hold=True)
+with flow([held, reply(text="After stop.")]) as f:
+    pid = server.start(f)
+    session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
+    stream = server.send(f, "GET", f"/sessions/{session}/events?after=0")
+    server.post(f, f"/sessions/{session}/input", {"text": "Say many words."})
+    next(line for line in map(json.loads, stream) if line.get("text") == "Partial words.")
+    stream.close()
+    path(pid, signal.SIGSTOP)
+    for _ in range(2):
+        server.post(f, f"/sessions/{session}/stop", {})
+    path(pid, signal.SIGCONT)
+    entries = server.until(f, session, lambda es: any(e["kind"] == "turn_end" for e in es))
+    assert [e["text"] for e in entries if e["kind"] == "text"] == ["Partial words."], entries
+    later = server.post(f, f"/sessions/{session}/input", {"text": "Go on."})["entry"]
+    entries = server.until(f, session, lambda es: any(e["kind"] == "turn_end" and later in e["inputs"] for e in es))
+    assert not any(e["kind"] == "rebuild" for e in entries), entries
+    assert "Partial words." in f.sent()[-1], "the model lost the stopped reply"
+
+# A Stop after five seconds without the path ending the turn drops the conversation: an input sent to it and not
 # yet read is not answered by the stopped turn, but opens the next one. Stopping the model path's
 # processes holds the first Escape back, so the path never starts on that input before the second.
 gate = lambda id, file: (id, "Bash", {"command": f"until [ -e {file} ]; do sleep 0.05; done"})
-with flow([reply(gate("unread_a", "a_go"), gate("unread_b", "b_go")), reply(text="flow done")]) as f:
+with wall_clock(still=False) as (_, env, advance), flow(
+        [reply(gate("unread_a", "a_go"), gate("unread_b", "b_go")), reply(text="flow done")], env=env) as f:
     pid = server.start(f)
     session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
     server.post(f, f"/sessions/{session}/input", {"text": "Run both gates."})
@@ -181,8 +206,9 @@ with flow([reply(gate("unread_a", "a_go"), gate("unread_b", "b_go")), reply(text
     (f.cwd / "a_go").touch()
     server.until(f, session, lambda es: any(e["kind"] == "result" and e["call"] == "unread_a" for e in es))
     path(pid, signal.SIGSTOP)
-    for _ in range(2):
-        server.post(f, f"/sessions/{session}/stop", {})
+    server.post(f, f"/sessions/{session}/stop", {})
+    advance(5_001, monotonic=True)
+    server.post(f, f"/sessions/{session}/stop", {})
     path(pid, signal.SIGCONT)
     entries = server.until(f, session, lambda es: any(e["kind"] == "turn_end" and later in e["inputs"] for e in es))
     assert [e["end"] for e in entries if e["kind"] == "turn_end"] == ["stopped", "done"], entries[-3:]
@@ -207,17 +233,19 @@ with flow(replies, config="[profiles.claude]\ncode_mode = true\n") as f:
         server.until(f, session, lambda es: any(e["kind"] == "turn_end" and later in e["inputs"] for e in es))
         assert (f.cwd / f"ok-{i}").exists(), f"round {i}: the cell after a late Escape was refused"
 
-# A second Escape in the first request after a rebuild answers the rebuild, which no input is: a
+# A forced Stop in the first request after a rebuild answers the rebuild, which no input is: a
 # restart then asks nothing. Stopping the model path's processes holds the first Escape back.
 slow = reply(text="Rebuilt reply.")
-with flow([reply(("h", "mcp__razor__handover", {"note": "Continue."})), Reply(slow.body, cuts=(1,) * 50)]) as f:
+with wall_clock(still=False) as (_, env, advance), flow(
+        [reply(("h", "mcp__razor__handover", {"note": "Continue."})), Reply(slow.body, cuts=(1,) * 50)], env=env) as f:
     pid = server.start(f)
     session = server.post(f, "/sessions", {"cwd": str(f.cwd)})["session"]
     server.post(f, f"/sessions/{session}/input", {"text": "Keep this task."})
     server.until(f, session, lambda es: (f.requests / "002.body").exists())
     path(pid, signal.SIGSTOP)
-    for _ in range(2):
-        server.post(f, f"/sessions/{session}/stop", {})
+    server.post(f, f"/sessions/{session}/stop", {})
+    advance(5_001, monotonic=True)
+    server.post(f, f"/sessions/{session}/stop", {})
     entries = server.until(f, session, lambda es: es[-1].get("end") == "stopped")
     assert next(e["id"] for e in entries if e["kind"] == "rebuild") in entries[-1]["inputs"], entries[-3:]
     # The reply is all written before the path resumes, so dropping the request cuts nothing.

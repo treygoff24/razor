@@ -122,6 +122,12 @@ impl Record {
                     let input: String = input.to_string().chars().take(120).collect();
                     calls.insert(call, (entry.id, name, input));
                 }
+                Body::NotRun { name, input, .. } => {
+                    lines.insert(
+                        entry.id,
+                        format!("- #{} {}", entry.id.0, text::not_run(&name, &input)),
+                    );
+                }
                 Body::Result { call, outcome, .. } => {
                     if let Some((id, name, input)) = calls.remove(&call) {
                         lines.insert(id, text::call(id, &name, &input, Some((outcome, entry.id))));

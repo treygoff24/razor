@@ -11,9 +11,11 @@ import subprocess
 import time
 import tomllib
 import chat
+import server as api
 from driver import AUTH, BINARY, Reply, flow
 from model import reply, tool
 from standin import serve
+from terminal import Terminal
 
 
 def terminal(f, argv, answers, binary=BINARY):
@@ -88,23 +90,76 @@ with flow([tool(None, "search", query="setup saved key"), reply(None)]) as f:
         f.ask("--model", "opus", "Search with the saved key.")
         sent = json.loads((f.home / "web-requests/001.json").read_text())
         assert sent["headers"].get("x-api-key") == secret, "serve did not load the saved key"
-    # Claude Code's CLI is signed in. Plain setup leaves it; --console runs its console sign-in.
+    saved.write_text('EXA_API_KEY = "flow-nul-prefix\\u0000flow-nul-suffix"\n')
+    refused = f.run("doctor")
+    assert refused.returncode != 0 and "flow-nul-" not in refused.stdout + refused.stderr, "NUL key was accepted or printed"
+
+with flow([]) as f:
+    browser = f.home / "agent-browser"
+    browser.write_text("#!/bin/sh\nexit 0\n")
+    browser.chmod(0o755)
+    f.env["PATH"] = f"{f.home}:{f.env['PATH']}"
+    # Setup, the recovery command and the panel use the same bundled CLI in the server.
     bundle = f.home / "bundle"
     cli = bundle / "bridge/node_modules/@anthropic-ai/claude-agent-sdk-flow/claude"
     cli.parent.mkdir(parents=True)
     (bundle / "bridge/main.ts").touch()
-    cli.write_text('#!/bin/sh\necho "$*" >> "$HOME/claude-calls"\n'
-                   '[ "$1 $2" = "auth status" ] && echo \'{"loggedIn":true,"authMethod":"flow"}\'\nexit 0\n')
+    cli.write_text("""#!/bin/sh
+ echo "$*" >> "$HOME/claude-calls"
+ if [ "$2" = status ]; then
+   if [ -e "$HOME/missing" ]; then echo '{"loggedIn":false}'; else echo '{"loggedIn":true,"authMethod":"flow"}'; fi
+   exit 0
+ fi
+ echo 'https://claude.invalid/sign-in'
+ [ -e "$HOME/automatic" ] && exit 0
+ read -r code
+ [ "$code" = 'flow-code#state' ] || exit 7
+ rm -f "$HOME/missing"
+ touch "$HOME/signed-in"
+ """)
     cli.chmod(0o755)
     shutil.copy2(BINARY, bundle / "razor")
     calls = f.home / "claude-calls"
     for option in ([], ["--console"]):
-        terminal(f, ["setup", *option], [("Use Claude, ChatGPT, both, or an API key", ""), *ending], bundle / "razor")
+        terminal(f, ["setup", *option], [("Use Claude, ChatGPT, both, or an API key", ""), ending[0], *([("https://claude.invalid/sign-in", "\n\0\nflow-code#state")] if option else []), ending[1]], bundle / "razor")
         logins = [l for l in (calls.read_text() if calls.exists() else "").splitlines() if l.startswith("auth login")]
         assert logins == (["auth login --console"] if option else []), (option, logins)
-    saved.write_text('EXA_API_KEY = "flow-nul-prefix\\u0000flow-nul-suffix"\n')
-    refused = f.run("doctor")
-    assert refused.returncode != 0 and "flow-nul-" not in refused.stdout + refused.stderr, "NUL key was accepted or printed"
+        assert (f.home / "signed-in").exists() == bool(option), "setup did not complete Claude sign-in"
+    with Terminal(f) as t:
+        t.shown("Message the agent")
+        t.send("/login\r")
+        t.shown("Anthropic Console")
+        t.send("\r")
+        t.shown("https://claude.invalid/sign-in")
+        other = api.post(f, "/devices", {"name":"other59"})["key"]
+        with api.send(f,"POST","/login?provider=claude") as refused:
+            assert refused.status == 409
+        with api.send(f,"PUT","/login",{"code":"flow-code#state"},key=other) as refused:
+            assert refused.status == 400
+        t.send("\x1b[200~flow-code#state\x1b[201~")
+        t.shown("•" * len("flow-code#state"))
+        assert "flow-code#state" not in t.text(), "sign-in code echoed in panel"
+        t.send("\r")
+        t.shown("The server login completed.")
+        t.send("\x1b")
+        t.until(lambda t: "The server login completed." not in t.text())
+        t.send("/login claude\r")
+        t.shown("https://claude.invalid/sign-in")
+        t.send("\x1b")
+        t.until(lambda t: "https://claude.invalid/sign-in" not in t.text())
+    automatic = f.home / "automatic"
+    automatic.touch()
+    terminal(f, ["login", "claude"], [], bundle / "razor")  # Callback completes without stdin.
+    missing = f.home / "missing"
+    missing.touch()
+    failed = subprocess.run([bundle / "razor", "login", "claude"], env=f.env, cwd=f.cwd, capture_output=True, text=True, timeout=10)
+    sentence = "Claude is not signed in; run razor login claude, or /login in the terminal app."
+    assert failed.returncode == 1 and sentence in failed.stderr, failed
+    automatic.unlink()
+    missing.unlink()
+    failed = subprocess.run([bundle / "razor", "login", "claude"], input="wrong#state\n", env=f.env, cwd=f.cwd, capture_output=True, text=True, timeout=10)
+    assert failed.returncode == 1, failed
+    assert not list((f.home / ".razor/sessions").glob("*/record.jsonl")), "login created a session"
 
 # A gateway-only home can finish setup and doctor without Claude or ChatGPT credentials.
 with flow([chat.reply({"content": "OK"}), Reply(b'{"error":{"message":"bad key"}}', status=401)]) as f:

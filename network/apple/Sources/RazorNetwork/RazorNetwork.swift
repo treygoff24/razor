@@ -1,4 +1,5 @@
 import Foundation
+import os
 import RazorNetworkFFI
 
 // Razor's network client for a Swift app: HTTP requests and streams to a paired machine, addressed
@@ -53,6 +54,9 @@ public final class NetworkClient: @unchecked Sendable {
     /// forbids racing the two.
     private let lock = NSLock()
     private var closed = false
+    private var outstanding = 0, changed = false
+    private let openedAt: TimeInterval
+    private var lastHead: TimeInterval?
 
     /// `key` is the 32-byte secret key; `relays` are the only relays this client uses.
     public init(key: Data, relays: [String]) throws(NetworkError) {
@@ -65,9 +69,17 @@ public final class NetworkClient: @unchecked Sendable {
         }
         guard let opened else { throw NetworkError(error) }
         handle = opened
+        openedAt = ProcessInfo.processInfo.systemUptime
     }
 
     deinit { close() }
+
+    /// Looks for new network paths without blocking; call when the app observes a network change.
+    public func networkChanged() {
+        lock.withLock {
+            if !closed { changed = true; razor_network_network_change(handle) }
+        }
+    }
 
     /// Cancels every request, closes the endpoint and returns when it is closed; later requests
     /// fail. Requests in flight keep this client alive, so close it explicitly before the app
@@ -101,12 +113,17 @@ public final class NetworkClient: @unchecked Sendable {
                                                        body_length: UInt64(length), protocol: pairing ? RAZOR_NETWORK_PAIRING : RAZOR_NETWORK_API,
                                                        connect: fresh == nil ? RAZOR_NETWORK_CACHED : RAZOR_NETWORK_FRESH,
                                                        connect_timeout_ms: UInt64((fresh ?? 0) * 1000))
-                    return lock.withLock { closed ? nil : razor_network_request(handle, &to, &head, &error) }
+                    return lock.withLock {
+                        guard !closed, let request = razor_network_request(handle, &to, &head, &error) else { return nil }
+                        outstanding += 1
+                        return request
+                    }
                 }
             }
         }
         guard let made else { throw error == nil ? NetworkError(.other, "The network client is closed.") : NetworkError(error) }
-        return NetworkRequest(made)
+        return NetworkRequest(made, ended: { self.lock.withLock { self.outstanding -= 1 } },
+                              headed: { self.lock.withLock { self.lastHead = ProcessInfo.processInfo.systemUptime } })
     }
 }
 
@@ -115,8 +132,11 @@ public final class NetworkClient: @unchecked Sendable {
 /// Freed, it is cancelled.
 public final class NetworkRequest: @unchecked Sendable {
     private let handle: OpaquePointer
-    fileprivate init(_ handle: OpaquePointer) { self.handle = handle }
-    deinit { razor_network_request_free(handle) }
+    private let ended: @Sendable () -> Void, headed: @Sendable () -> Void
+    fileprivate init(_ handle: OpaquePointer, ended: @escaping @Sendable () -> Void, headed: @escaping @Sendable () -> Void) {
+        self.handle = handle; self.ended = ended; self.headed = headed
+    }
+    deinit { razor_network_request_free(handle); ended() }
 
     public func cancel() { razor_network_cancel(handle) }
 
@@ -131,6 +151,7 @@ public final class NetworkRequest: @unchecked Sendable {
     public func response() throws(NetworkError) -> NetworkResponse {
         var error: UnsafeMutablePointer<RazorNetworkError>?
         guard let raw = razor_network_response(handle, &error) else { throw NetworkError(error) }
+        headed()
         defer { razor_network_response_free(raw) }
         var headers: [String: String] = [:]
         for h in UnsafeBufferPointer(start: raw.pointee.headers, count: raw.pointee.header_count) {
@@ -167,15 +188,27 @@ extension NetworkClient {
             length = size
         }
         let request = try request(peer, method, path, headers: headers, length: length, pairing: pairing, fresh: fresh)
-        let watch = Watchdog(idle) { request.cancel() }
+        let watch = Watchdog(idle) { phase, bytes in
+            let state = self.lock.withLock {
+                let now = ProcessInfo.processInfo.systemUptime
+                return (self.outstanding, Int(now - self.openedAt), self.lastHead.map { Int(now - $0) } ?? -1, self.changed)
+            }
+            Logger(subsystem: "com.treygoff.razor", category: "network").error("Request timeout phase=\(phase, privacy: .public) received=\(bytes) outstanding=\(state.0) client_age_s=\(state.1) since_head_s=\(state.2) network_changed=\(state.3)")
+            request.cancel()
+        }
         let head = try await blocking(request, watch) { () throws(NetworkError) -> NetworkResponse in
             // A machine may answer before the whole body has gone; its answer is then the result.
             var stopped: NetworkError?
             do throws(NetworkError) { try request.upload(body, of: length, watch, sent) } catch { stopped = error }
             do throws(NetworkError) { return try request.response() } catch { throw stopped ?? error }
         }
+        watch.body()
         let chunks = AsyncThrowingStream<Data, any Error> {
-            let bytes = try await blocking(request, watch) { () throws(NetworkError) -> Data in try request.read() }
+            let bytes = try await blocking(request, watch) { () throws(NetworkError) -> Data in
+                let bytes = try request.read()
+                watch.received(bytes.count)
+                return bytes
+            }
             return bytes.isEmpty ? nil : bytes
         }
         return (head, chunks)
@@ -325,18 +358,23 @@ private final class Watchdog: @unchecked Sendable {
     private let idle: TimeInterval
     private let lock = NSLock()
     private var expired = false
+    // Before head includes opening the stream and uploading; the C interface has no separate open event.
+    private var phase = "before head", bytes = 0
 
-    init(_ idle: TimeInterval, _ expire: @escaping @Sendable () -> Void) {
+    init(_ idle: TimeInterval, _ expire: @escaping @Sendable (String, Int) -> Void) {
         self.idle = idle
         timer.setEventHandler { [weak self] in
-            self?.lock.withLock { self?.expired = true }
-            expire()
+            guard let self else { return }
+            let state = lock.withLock { expired = true; return (phase, bytes) }
+            expire(state.0, state.1)
         }
         timer.resume()
     }
 
     deinit { timer.cancel() }
 
+    func body() { lock.withLock { phase = "body" } }
+    func received(_ count: Int) { lock.withLock { bytes += count } }
     func touch() { timer.schedule(deadline: .now() + idle) }
     func rest() { timer.schedule(deadline: .distantFuture) }
 

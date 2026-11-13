@@ -12,6 +12,7 @@ import time
 from claude import reply
 from clock import wall_clock
 from driver import flow
+from responses import PLAIN, message, reply as turn, response
 from server import send, start, stop, until, wait
 import server
 
@@ -57,9 +58,11 @@ def server_id(where):
 
 
 replies = []
-with flow(replies) as f:
+# Ordinary sessions run on the plain GPT route; the Claude route keeps the startup page's request
+# and, through `[memory] model`, the manual passes' memory and task calls.
+with flow(replies, model="sol", config=PLAIN + '[memory]\nmodel = "opus"\n') as f:
     def use(where, tool, ok=True, **arguments):
-        replies.extend([reply((None, f"mcp__razor__{tool}", arguments)), reply(text="done")])
+        replies.extend([turn(None, tool, **arguments), turn(None, "done")])
         sid = where.ask("Keep this project's work.")["session"]
         out = [e for e in where.record(sid) if e["kind"] == "result"][-1]
         assert (out["outcome"] == "success") == ok, out
@@ -71,7 +74,7 @@ with flow(replies) as f:
         use(where, "task", action="list")
         use(where, "memory", action="search", query="")
         replies.append(reply(text="opened"))
-        where.ask("Open this project.")
+        where.ask("--model", "opus", "Open this project.")
         return json.loads(where.sent()[-1])["messages"][0]["content"][0]["text"]
 
     def dream(where, *said, gap=0.03):
@@ -95,7 +98,7 @@ with flow(replies) as f:
         use(where, "task", action="write", title=f"{where.cwd.name}'s own")
     for where, said in ((b, "B_SOURCE_90"), (carol, "C_SOURCE_90")):
         use(where, "memory", action="search", query="")
-        replies.append(reply(text="Worked."))
+        replies.append(turn(None, "Worked."))
         where.source = where.ask(said)["session"]
 
     # An old shared stamp cannot certify that any identified home was read.
@@ -127,9 +130,9 @@ with flow(replies) as f:
     other.git("config", "user.name", "Pat")
     other.git("config", "user.email", "pat@example.invalid")
     use(other, "memory", action="search", query="")
-    replies.append(reply(text="Work in the second checkout."))
+    replies.append(turn(None, "Work in the second checkout."))
     other.source = other.ask("SECOND_CHECKOUT_90")["session"]
-    replies.append(reply(text="Work while the first peer was away."))
+    replies.append(turn(None, "Work while the first peer was away."))
     b.source = b.ask("FAILED_DIGEST_90")["session"]
     history = a.git("-C", str(memory), "rev-list", "--max-parents=0", "HEAD").strip()
     part = json.loads(send(b, "GET", "/dream/" + history).read())
@@ -186,7 +189,7 @@ with flow(replies) as f:
 night, own = (time.strftime("%H:%M:%S", time.localtime(time.time() + seconds)) for seconds in (120, -600))
 with tempfile.TemporaryDirectory(prefix="razor-night-flow-", dir=Path.home()) as folder, wall_clock() as (_, env, advance):
     replies = []
-    with flow(replies, config=f'[memory]\nnight = "{night}"', env=env) as f:
+    with flow(replies, model="sol", config=PLAIN + f'[memory]\nnight = "{night}"', env=env) as f:
         first, alone, kept = (Path(folder) / name for name in ("first", "ibis", "kept"))
         first.mkdir(), alone.mkdir(), kept.mkdir()
         a, b = home(f, "a", "Pat", first), home(f, "b", "Pat", first)
@@ -197,8 +200,8 @@ with tempfile.TemporaryDirectory(prefix="razor-night-flow-", dir=Path.home()) as
         pair(a, b)
         for where in homes:  # a's write starts each project's shared memory; b's read joins it
             call = {"action": "write", "kind": "note", "text": "Shared.", "description": "Shared."}
-            replies.extend([reply((None, "mcp__razor__memory", call if where.home == a.home else {"action": "search", "query": ""})),
-                            reply(text="done")])
+            replies.extend([turn(None, "memory", **call if where.home == a.home else {"action": "search", "query": ""}),
+                            turn(None, "done")])
             where.source = where.ask("Keep this project's work.")["session"]
 
         def dreams(where):
@@ -214,8 +217,8 @@ with tempfile.TemporaryDirectory(prefix="razor-night-flow-", dir=Path.home()) as
             entries = list(b.record(record.parent.name))
             if entries[0].get("project_root") == str(kept / "b"):
                 os.utime(record, (time.time()-8*86400, time.time()-8*86400))
-        replies.extend([reply(text="Tidied.", thinking=["a", "b"], gap=1), reply(text="Tidied.", thinking=["a", "b"], gap=1),
-                        reply(text="Tidied.", thinking=["a", "b"], gap=3, match=str(alone / "b"))])
+        # Each pass's answer streams in two pieces, the gap apart.
+        replies.extend(replace(response([message("Tidied", ".")], gap=gap), match=match) for gap, match in ((1, None), (1, None), (3, str(alone / "b"))))
         advance(240_000)
         # The timers go a minute on in steps the two servers' connection lives through, as it does
         # through real time: one jump times it out at the moment each asks the other for its night.
@@ -237,13 +240,13 @@ with tempfile.TemporaryDirectory(prefix="razor-night-flow-", dir=Path.home()) as
 night = time.strftime("%H:%M:%S", time.localtime(time.time() + 120))
 with tempfile.TemporaryDirectory(prefix="razor-partition-", dir=Path.home()) as folder, wall_clock() as (_, env, advance):
     replies = []
-    with flow(replies, config=f'[memory]\nnight = "{night}"', env=env) as f:
+    with flow(replies, model="sol", config=PLAIN + f'[memory]\nnight = "{night}"', env=env) as f:
         a, b = home(f, "a", "Pat", Path(folder)), home(f, "b", "Pat", Path(folder))
         start(a), start(b)
         pair(a, b)
         for where in (a, b):
             call = {"action": "write", "kind": "note", "description": "Shared.", "text": "Shared."} if where is a else {"action": "search", "query": ""}
-            replies.extend([reply((None, "mcp__razor__memory", call)), reply(text="done")])
+            replies.extend([turn(None, "memory", **call), turn(None, "done")])
             where.source = where.ask("Work on this home.")["session"]
         for where in (a, b):
             stop(where)
@@ -253,7 +256,7 @@ with tempfile.TemporaryDirectory(prefix="razor-partition-", dir=Path.home()) as 
                 if device.get("relays"): device["relays"] = ["http://127.0.0.1:1"]
             file.write_text(json.dumps(devices))
             start(where)
-        replies.extend([reply(text="Tidied."), reply(text="Tidied.")])
+        replies.extend([turn(None, "Tidied."), turn(None, "Tidied.")])
         advance(240_000)
         advance(60_000, monotonic=True)
         for where, peer in ((a, b), (b, a)):

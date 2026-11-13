@@ -6,7 +6,13 @@ import subprocess
 import sys
 from urllib.request import urlopen
 
-target = sys.argv[1]
+target, browser, cua = sys.argv[1:]
+def pin(url):
+    repo, path = url.removeprefix('https://github.com/').split('/releases/download/')
+    return repo, path.split('/')[0]
+browser_repo, browser_tag = pin(browser)
+cua_repo, cua_tag = pin(cua)
+browser_version, cua_version = browser_tag.removeprefix('v'), cua_tag.removeprefix('cua-driver-rs-v')
 metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--locked', '--format-version', '1', '--filter-platform', target]))
 tree = subprocess.check_output(['cargo', 'tree', '--locked', '-e', 'normal', '--target', target, '--prefix', 'none', '--format', '{p}'], text=True)
 closure = {tuple(line.split()[:2]) for line in tree.splitlines()[1:]}
@@ -23,9 +29,9 @@ for p in sorted(packages, key=lambda p: (p['name'], p['version'])):
     for file in files:
         text = file.read_text(encoding='utf-8', errors='replace').strip()
         notices.setdefault(text, set()).add(name)
-for url, name in [('vercel-labs/agent-browser/v0.43.0/LICENSE', 'agent-browser 0.43.0 (Apache-2.0)'),
-                  ('trycua/cua/cua-driver-rs-v0.49.1/LICENSE.md', 'Cua Driver 0.49.1 (MIT)'),
-                  ('trycua/cua/cua-driver-rs-v0.49.1/libs/cua-driver/rust/THIRD_PARTY_NOTICES.md', 'Cua Driver 0.49.1, its third-party notices'),
+for url, name in [(f'{browser_repo}/{browser_tag}/LICENSE', f'agent-browser {browser_version} (Apache-2.0)'),
+                  (f'{cua_repo}/{cua_tag}/LICENSE.md', f'Cua Driver {cua_version} (MIT)'),
+                  (f'{cua_repo}/{cua_tag}/libs/cua-driver/rust/THIRD_PARTY_NOTICES.md', f'Cua Driver {cua_version}, its third-party notices'),
                   ('BurntSushi/ripgrep/15.2.0/LICENSE-MIT', 'ripgrep 15.2.0 (MIT or Unlicense)'),
                   ('PCRE2Project/pcre2/pcre2-10.45/LICENCE.md', 'PCRE2 10.45, built into ripgrep 15.2.0 (BSD-3-Clause)'),
                   ('jemalloc/jemalloc/81034ce1f1373e37dc865038e1bc8eeecf559ce8/COPYING', 'jemalloc 5.3.1, built into ripgrep 15.2.0 on Linux (BSD-2-Clause)'),

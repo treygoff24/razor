@@ -379,6 +379,8 @@ A web tool appears only while one of its providers has a key, and never with `pr
 
 ### MCP servers
 
+An MCP tool's result keeps text, resource links and embedded resources in their returned order on every model route. Embedded text is included; a binary resource gives its address and type. Audio gives a notice of its type, without carrying the audio to the model.
+
 `[mcp.<name>]` is one MCP server. `razor mcp add` and `/mcp` write these entries for you; `razor mcp add` writes to the current project's private file, `.razor/config.local.toml`, which Razor keeps out of git ([Where settings live](#where-settings-live)), unless you pass `--scope global` (your file) or `--scope project`, the shared file others who clone the repository get; in a folder whose `.razor` is Razor's own home, which has no project files, every scope writes your file. Any other folder, even an empty one outside git, gets its own `.razor/config.toml` or `config.local.toml`.
 
 ```sh

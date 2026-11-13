@@ -112,8 +112,11 @@ impl Write {
         }
         let ruled = (ruling && fresh).then(|| cite(c, self.cite)).transpose()?;
         if let Some((cited, words)) = ruled {
-            self.source = format!("razor:{}:l-{}", c.session, cited.0);
+            self.source = format!("razor:{}:l-{}", c.session, cited.id.0);
             self.quotes.push((self.source.clone(), words.to_owned()));
+            self.question = cited
+                .ask
+                .map(|ask| format!("razor:{}:l-{}", c.session, ask.0));
         }
         if self.text.len() > 16 * 1024 {
             return Err(refuse(&t.too_long));

@@ -167,12 +167,8 @@ pub async fn run(home: &Path, console: bool) -> Result<bool, Error> {
     }
     let check = (claude && loaded.claude.sign_in.is_empty()).then_some(&[][..]);
     let missing = crate::api::credentials(home, check, None).await;
-    if claude
-        && (console || missing.get("Claude").is_some_and(Option::is_some))
-        && let Err(e) = crate::claude::login(console).await
-    {
-        let again = if console { " --console" } else { "" };
-        eprintln!("{e} Run razor setup{again}.");
+    if claude && (console || missing.get("Claude").is_some_and(Option::is_some)) {
+        ran(Command::new(&razor).args(["login", if console { "console" } else { "claude" }]));
     }
     if chatgpt && missing.get("ChatGPT sign-in").is_some_and(Option::is_some) {
         ran(Command::new(&razor).arg("login"));

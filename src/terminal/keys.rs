@@ -86,6 +86,17 @@ pub fn event(app: &mut App, event: super::tty::Event) -> bool {
         Event::Paste(text) => {
             activity::report(app);
             app.quitting = false;
+            if app.panel.is_some()
+                && let Some(line) = &mut app.panel_search
+            {
+                // A panel's typed line shares the terminal's 8 MiB byte budget.
+                let mut end = text.len().min(super::api::BYTES - line.len());
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                line.push_str(&text[..end]);
+                return false;
+            }
             // Words pasted into the draft leave browsing, as typed ones do.
             if !modal && app.grid.is_none() && app.list.overview.is_none() {
                 app.dismiss_suggestion();
@@ -477,6 +488,10 @@ pub(super) fn replied(a: &Action) -> Option<(&SessionId, EntryId)> {
 fn edit(app: &mut App, k: KeyEvent, context: &str, action: &str) {
     if app.keys != Pane::Conversation {
         app.panel = None;
+        app.panel_search = None;
+        if let Some(task) = app.login.take() {
+            task.abort();
+        }
     }
     app.keys = Pane::Conversation;
     match context {

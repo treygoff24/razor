@@ -295,10 +295,11 @@ pub(super) fn write(folders: &Folders, kind: Kind, mut w: Write) -> Answer {
 /// Keeps every original citation and exact quotation when a rule replaces other rules.
 fn ruling(w: &mut Write, previous: &[Found]) -> Result<(), Error> {
     let mut cites = Vec::new();
+    cites.extend(w.question.iter().cloned());
     for found in previous {
         let body = split(&found.file).1;
-        // Older files embedded the verified words before the agent's reading; this reader and
-        // `rule`'s fallback go once the one-time migration has retired every old-form ruling.
+        // Releases through 0.5.0 embedded verified words before the agent's reading;
+        // their rulings still need this reader and `rule`'s corresponding page line.
         let old = body.rsplit_once("\"\n\nagent's reading:");
         let legacy = old.and_then(|(said, _)| {
             said.strip_prefix("the human said (")

@@ -11,14 +11,15 @@ mod skills;
 mod summary;
 mod text;
 mod transcript;
-pub(crate) use calls::{action, ask, target};
+pub(crate) use calls::{action, ask, options, target};
 pub(crate) use cursor::Summaries;
 pub(crate) use digest::digest;
 pub(crate) use reply::{Hold, reply, shown};
 pub use search::backfill;
 pub(crate) use search::{SEARCH_WORDS, search, words as search_words};
 pub(crate) use summary::{ChildSummary, Meeting, MeetingState, Summary};
-pub(crate) use text::{call_line, calls_left_out, handover, heard, interrupted, length};
+pub(crate) use text::{NOT_RUN, UNANSWERED, not_run};
+pub(crate) use text::{call_line, calls_left_out, handover, heard, interrupted, length, steering};
 pub(crate) use transcript::TranscriptSearch;
 
 use crate::protocol::{

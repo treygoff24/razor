@@ -100,9 +100,11 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ## Git locks
 
-**A task or memory write reports `index.lock`: `File exists`.** After a server or machine crash, or a git that had to be killed, check that no git process is still working in the store named by the error, including one that survived the old server. Only once none is running there, remove that one `index.lock` file and retry the write.
+**A task or memory write reports `index.lock`: `File exists`.** Razor clears that store's `.git/index.lock` when a failed Git step finds it more than ten minutes old, logs the store and the lock's age in `server.log`, and retries that step once. A younger lock is left alone. To clear one sooner, run `ps ax -o pid,command` and check each Git process's working folder with `readlink /proc/PID/cwd` on Linux or `lsof -a -p PID -d cwd` on macOS, including Git left by an old server. Once none works in the store, run the exact `rm -- '<store>/.git/index.lock'` command in the refusal and retry the write. No other lock is cleared automatically.
 
 ## More machines
+
+**A paired request says nothing was sent.** Razor could not establish the connection or the peer refused its key; follow the refusal's advice and retry after fixing it. If the result instead says the request may not have arrived, check the other server's session or result before sending again: the operation may already have run.
 
 **`Settings: server.address is no longer used`** (from `razor doctor`). Servers and apps no longer reach each other at an address. Delete `address` under `[server]` in the file doctor names; nothing else changes.
 

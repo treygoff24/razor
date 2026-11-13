@@ -52,6 +52,8 @@ another client opens with that key.
 
 ```swift
 let client = try NetworkClient(key: secretKey, relays: relays)
+// When the app observes a network change, look for new paths without blocking.
+client.networkChanged()
 // A whole exchange.
 let (head, body) = try await client.send(machine, "GET", "/v1/status", idle: 30)
 // A stream, line by line.
@@ -62,3 +64,9 @@ guard let code = PairingCode(pasted) else { return }
 let serverID = try await client.join(code, keys: publicKeys)
 client.close()
 ```
+
+A request timeout logs its phase, bytes received, outstanding requests, client age,
+time since the last response head and whether a network change was reported, under
+subsystem `com.treygoff.razor`, category `network`, in the system log. It then cancels
+the request. The app supplies network-change observations with `networkChanged()`;
+the package does not install a path monitor.

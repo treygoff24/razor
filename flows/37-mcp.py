@@ -291,7 +291,7 @@ def model_reply(code, name=None, arguments=None, id="call37", text=None):
     if name is None:
         return responses.done()
     source = f'text(await tools.{name}({json.dumps(arguments)}))'
-    return responses.response([{"type": "custom_tool_call", "id": "ct_" + id,
+    return responses.response(([responses.message(text)] if text else []) + [{"type": "custom_tool_call", "id": "ct_" + id,
                                "call_id": id, "name": "exec", "input": source}])
 
 
@@ -364,7 +364,9 @@ def native_case(code):
         steps = [("search37", "mcp_search", {"query": "rich Flow"}), ("rich37", "mcp__remote__rich", {"value": "first"}),
                  ("form37", "mcp__remote__form", {}), ("url37", "mcp__remote__url", {}),
                  ("disable37", shell, command("disable")), ("stale37", "mcp__remote__rich", {})]
-        replies.extend(model_reply(code, name, args, id=id) for id, name, args in steps)
+        replies.extend(model_reply(code, name, args, id=id,
+                                   text="I read your message; I will continue." if id in ("url37", "disable37") else None)
+                       for id, name, args in steps)
         replies.append(model_reply(code, text="done"))
         post(f, f"/sessions/{session}/input", {"text": "Search rich, call immediately, ask both questions, then disable and try the old tool."})
         observed = until(f, session, lambda es: any(e["kind"] == "result" and e["call"] == "rich37" for e in es))
@@ -387,7 +389,6 @@ def native_case(code):
         outputs = {e["call"]: e for e in entries if e["kind"] == "result"}
         search = outputs["search37"]["output"]
         assert "mcp__remote__rich" in search and "schema" not in search.lower() and "properties" not in search, search
-        assert "MCP_STRUCTURED_37" in outputs["rich37"]["output"] and "MCP_RICH_37" in outputs["rich37"]["output"], outputs
         assert outputs["stale37"]["outcome"] == "error" and ("tool" in outputs["stale37"]["output"].lower() or "not a function" in outputs["stale37"]["output"]), outputs["stale37"]
         assert outputs["disable37"]["id"] < outputs["stale37"]["id"] < next(e["id"] for e in entries if e["kind"] == "turn_end"), outputs
         assert next(r for r in operation(f, "list") if r["name"] == "remote")["config"]["enabled"] is False
@@ -404,6 +405,18 @@ def native_case(code):
         requests = [json.loads(body) for body in f.sent()]
         assert len(requests) == 7, len(requests)
         first, found, rich = requests[:3]
+        returned = next(b for b in blocks(rich) if b.get("type") in ("tool_result", "custom_tool_call_output")
+                        and b.get("call_id", b.get("tool_use_id")) == "rich37")
+        shown = returned["output"].splitlines()[-1] if code else next(b["text"] for b in returned["content"] if b["type"] == "text")
+        value = json.loads(shown)
+        assert value["structured"]["marker"] == "MCP_STRUCTURED_37", value
+        expected = ("MCP_RICH_37", "[MCP_LINK_37](https://example.com/mcp)", "MCP_BETWEEN_37", "MCP_EMBEDDED_37",
+                    "audio/wav", "resource://binary/37", "application/octet-stream", "[MCP_NAME_37](resource://name/37)",
+                    "resource://untyped/37", "MCP_END_37")
+        assert all(fragment in value["output"] for fragment in expected), value
+        positions = [value["output"].index(fragment) for fragment in expected]
+        assert positions == sorted(positions), value
+        assert all(data not in shown for data in ("TVBDX0FVRElPXzM3", "TVBDX0JMT0JfMzc=")), value
         assert "mcp__remote__rich" not in json.dumps(first), "searched tool was declared upfront"
         offered = [b for b in blocks(found) if b.get("type") == ("additional_tools" if code else "tool_addition")]
         assert offered and "mcp__remote__rich" in json.dumps(offered) and "Flow rich tool" in json.dumps(offered), "found declaration missed the VERY NEXT request"

@@ -74,9 +74,9 @@ An unknown resident gets 404; an unknown schedule gets 400, "Resident <name> has
 
   The home's fact comes before the admission, so a crash between them loses the run rather than repeating it, which is the scheduler's existing promise. `Fresh` joins the entries `Record::append` syncs to disk (`record/mod.rs:236`), so the marker is durable before the thread runs. Between steps 3 and 4 the row is `starting`: the residents task keeps the threads it is admitting in memory, and a row it is admitting is never cached. Once no admission is in progress and the thread holds no run (the server stopped between the steps, or the admission failed), the row is `failed`, "The run's input never reached its thread.", with `entry` 0 and no range.
 - **The run row.** The home's row for a fresh run is the thread's own run row, which the thread's fold makes from its schedule input like any other, so `session` names the thread. Once that run has closed, the residents list caches the row, so a closed thread is read once, not on every poll. The cache holds only threads the home's runs and configured `latest` still name.
-- **Close when the run ends: yes.** Rule: a thread's schedule input is its last. On admission the controller marks it as `/done` marks its own input (`controller/session/inputs.rs:58`), so the turn that answers it closes the session (`controller/session.rs:528`): no conversation stays open, its jobs stop, and its task unloads unless a question it asked is still open. Loading a job thread restores the same mark from its open run, so a run resumed after a crash still closes (`Session::load` starts with none).
+- **Close when the run ends: yes.** Rule: a thread closes at the end of the turn that answers its schedule only when no other input is unanswered. On admission the controller marks it as `/done` marks its own input (`controller/session/inputs.rs:58`), so that turn closes the session when nothing is waiting (`controller/session.rs:528`): no conversation stays open, its jobs stop, and its task unloads unless a question it asked is still open. Loading a job thread restores the same mark from its open run, so a run resumed after a crash still closes (`Session::load` starts with none).
   - For: on the Claude route an open thread keeps a Claude Code process warm until `sessions.idle` evicts the longest idle, and job threads are always the newest, so they would push your own sessions out.
-  - Against: a run that ends by asking you a question also closes. Your answer reopens the thread for a turn, and it then stays open like any session.
+  - Against: a run that ends by asking you a question also closes. Your answer reopens the thread for a turn, and it then stays open like any session. If an input is still waiting when the turn answers the schedule, the thread stays open in the same way.
 - **Out of the thread list: yes, always.** `record::list` skips a `Start` whose thread names a job (`record/mod.rs:431`, +1 record), so `GET /v1/sessions`, naming and the repository list never see job threads.
   - For: a daily job adds 30 threads a month, and a list of 50 newest could become nothing but job runs. You reach a job's runs through `runs` and each job's `latest`, which is what you asked for.
   - Against: a job run older than 24 hours that is not its job's latest is reachable only by its id. An opt-in `?jobs=true` would cost about 4 lines if you ever want the history.
@@ -229,7 +229,7 @@ impl Controller {
     /// Starts `session`'s task if it is not running.
     pub fn load(&self, session: &SessionId) -> Loaded;
     /// As today, with `thread` written into `Start`. A thread's schedule input is its last:
-    /// the turn that answers it closes the session.
+    /// the turn that answers it closes the session if no other input is unanswered.
     pub async fn create(&self, cwd: PathBuf, model: Option<String>, effort: Option<Effort>,
         id: Option<SessionId>, child: Option<Child>, thread: Option<Thread>)
         -> Result<SessionId, Error>;

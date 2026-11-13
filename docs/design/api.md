@@ -83,7 +83,7 @@ The peer cache keeps an incremental byte total within 8 MiB: changed agent rows,
 
 Design page, 2026-10-27; revised 2026-10-28. Module `src/api/`; `src/main.rs` turns the command line into its calls. Budget row: "API server and configuration", 4,000 lines, shared with `src/config/`, `src/main.rs` and `src/lib.rs`.
 
-The server is the one door every client uses: the terminal app, `--print`, `razor login`, `razor devices`, and later the web app and plugins. It holds client connections; [devices and paired transport](devices.md) owns enrollment and keys. It reaches sessions through the controller, residents and deliveries through the residents module, and sign-in through `Responses::login`.
+The server is the one door every client uses: the terminal app, `--print`, `razor login`, `razor devices`, and later the web app and plugins. It holds client connections; [devices and paired transport](devices.md) owns enrollment and keys. It reaches sessions through the controller, residents and deliveries through the residents module, and sign-in through the selected provider's login operation ([Claude](claude.md#sign-in)).
 
 ## Surface
 
@@ -117,8 +117,8 @@ pub async fn turn(c: &Connection, session: Option<SessionId>, input: &ClientInpu
 /// `razor doctor`: a line for each thing Razor runs on; Ok when the default model can run.
 pub async fn doctor(home: &Path) -> Result<(), Error>;
 
-/// `razor login`: the ChatGPT sign-in runs in the server; each instruction is printed as it comes.
-pub async fn login(client: &reqwest::Client, key: &str) -> Result<(), Error>;
+/// `razor login`: the provider signs in on the server; codes never enter a session.
+pub async fn login(client: &reqwest::Client, key: &str, provider: LoginProvider) -> Result<(), Error>;
 /// `razor devices`, `razor devices add <name>`, `razor devices remove <name>`: the text to print.
 pub async fn devices(client: &reqwest::Client, key: &str) -> Result<String, Error>;
 pub async fn enroll(client: &reqwest::Client, key: &str, name: &str,
@@ -128,12 +128,12 @@ pub async fn revoke(client: &reqwest::Client, key: &str, name: &str) -> Result<S
 
 `connect` builds every local client with reqwest's `unix_socket(home/SOCKET)` and reads `KEY`; `serve` starts the controller, opens `Residents` and `Deliveries`, and listens. The controller opens `crate::devices`, which owns keys, `devices.json` and the shared error type. `api/devices.rs` holds the enrollment routes and authentication middleware.
 
-**Before the model client is wired in**, `serve` takes no `Arc<Responses>` and `POST /login` answers 503 with one sentence. Once it is, `serve` takes `responses`, and `sign_in` (31 lines) runs `Responses::login(show, stop)` on its own task and sends `true` on `stop` when the client leaves.
+The login route runs the chosen provider's sign-in on its own task and stops it when the client leaves. Claude takes codes only from the device that started it and allows one attempt at a time; ChatGPT keeps its existing device sign-in.
 
 ### Routes, under `/v1`
 
 A refusal is a status code and `{"error": "<one sentence>"}`:
-- 400: a malformed body or id; a picture that is not JPEG, PNG or WebP, or past the limits; an ask already answered or settled; an input already taken; a file name that leaves the session's directory.
+- 400: a malformed body or id; a picture that is not JPEG, PNG or WebP, or past the limits; an MCP or sign-in ask already answered or settled; an input already taken; a file name that leaves the session's directory.
 - 401: no key, or a key that no longer works.
 - 404: no such session, resident, device or file.
 - 409: 64 inputs are already waiting, the session is busy, or the device name is taken.
@@ -150,7 +150,7 @@ A refusal is a status code and `{"error": "<one sentence>"}`:
 | `POST /sessions/{id}/done` | | `{entry}` once `/done`'s closing input is admitted; that turn runs on in the server, and when it ends the session closes (docs/design/done.md). |
 | `POST /sessions/{id}/quit` | | `{}` once the session is closed with no closing turn: the turn ending now is its last, as `/done`'s closing turn would be, so a running turn stops, inputs still waiting are Withdrawn, its jobs and children close, and a closed turn end is recorded (an empty one when idle); its next input reopens it (`/quit`, Trey 2026-10-30). |
 | `POST /sessions/{id}/handover` | | `{entry}` once the threshold's continuation-note input is admitted, or `{}` if already requested/rebuilding; never waits for the rebuild. A closed child gets 400 with a sentence. |
-| `POST /sessions/{id}/asks/{entry}` | `Answer` | `{entry}`: the input carrying the answer. Refused once the ask is answered or settled. |
+| `POST /sessions/{id}/asks/{entry}` | `Answer` plus optional `request` | `{entry}`: the input carrying the answer. Message questions accept late answers and reopen closed sessions; a repeated request id returns its original entry. MCP and sign-in questions must still be open. |
 | `GET /sessions/{id}/events?after=N&native=&heartbeat=` | | NDJSON: the session's stream. |
 | `GET /sessions/{id}/entries?before=N&limit=L&native=` | | NDJSON: the stored lines of up to `L` entries before `N` (default: the end), in record order. A page is at most 8 MiB, except that one entry larger than that comes whole and alone; entries are never split. `L` is 256 by default, 1,024 at most. Entry `N` alone is `before=N+1&limit=1`. |
 | `GET /sessions/{id}/project` | | `{"commits": N, "merges": M, "branch": "main"}` from the session folder's git history; absent facts are omitted, including the branch on a detached head; `{}` outside git or after two seconds. |
@@ -168,7 +168,8 @@ A refusal is a status code and `{"error": "<one sentence>"}`:
 | `GET /devices` | | `[Device]`, without keys. |
 | `POST /devices` | `{name}` | `Device` with its key, shown this once and never again. |
 | `DELETE /devices/{name}` | | `{}`. That device's key stops working and its open streams end. No other device is touched. |
-| `POST /login` | | NDJSON: `show {text}` lines, then `done` or `failed {error}`. A client that leaves stops the sign-in. |
+| `POST /login?provider=claude\|console\|chatgpt` | | NDJSON: `show {text}` lines, then `done` or `failed {error}`. Omitted provider means ChatGPT. A client that leaves stops the sign-in. |
+| `PUT /login` | `{code}` | Sends one code to the calling device's running Claude sign-in, outside every record. |
 
 **The session's stream** is the transcript, plus live lines that are never recorded:
 1. `attached {session, last}`.
@@ -213,7 +214,7 @@ Every type this page puts on the wire is in `src/protocol/api.rs`: `ClientInput`
 
 ### What the API calls
 
-From the controller: `create(cwd, model, effort, None, None)`, `admit`, `stop`, `done`, `handover` (the optional admitted entry, not a direct rebuild), `attach`, `list`, `store(session, bytes)` (the type read from the bytes), `page`, `file` (checked and opened in one step), `status() -> mpsc::Receiver<Live>`, `answer`, `withdraw`, `draft` and `set_draft`. From the residents module: `Residents::{list, start, stop}` and `Deliveries::{list, subscribe}`. From the model client: `Responses::login(instructions, stop)`.
+From the controller: `create(cwd, model, effort, None, None)`, `admit`, `stop`, `done`, `handover` (the optional admitted entry, not a direct rebuild), `attach`, `list`, `store(session, bytes)` (the type read from the bytes), `page`, `file` (checked and opened in one step), `status() -> mpsc::Receiver<Live>`, `answer`, `withdraw`, `draft` and `set_draft`. From the residents module: `Residents::{list, start, stop}` and `Deliveries::{list, subscribe}`. From the model clients: `Responses::login(instructions, stop)` and `claude::login(console, instructions, stop, codes)`.
 
 Errors map in one place: `NoSession`, `NoResident` and a named file that is not there are 404; `Full` and `Busy` 409; `Invalid` and `Refused` 400; `Other` 500.
 
@@ -227,7 +228,7 @@ Errors map in one place: `NoSession`, `NoResident` and a named file that is not 
 6. Answering, stopping and steering a child are the session routes, addressed by the child's session id. No client launches a child.
 7. A delivery shows on the status stream and in `/deliveries`. Its file downloads through `files`, which streams the handle the controller opened and never opens a path itself.
 8. A session stream that falls behind sends `attached` and the missed entries; the status stream sends `agents`. A client reconnects to a session with its cursor, and to the status stream with nothing.
-9. `/login` runs `Responses::login` on its own task and streams each instruction, then `done` or `failed`.
+9. `/login` runs the chosen provider's sign-in on its own task and streams each instruction, then `done` or `failed`. Claude reports `done` only when auth status confirms the sign-in.
 10. Removing a device removes its key and ends that device's open streams; its next request gets 401.
 
 ## The hard decision: how the facts no entry carries reach a client

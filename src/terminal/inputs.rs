@@ -256,7 +256,8 @@ pub fn admit_answer(app: &mut App, (id, ask): MailId, answer: Answer) {
     if !words && app.picked.replace(pick.clone()).is_some_and(again) {
         return;
     }
-    let body = serde_json::to_value(answer).unwrap_or_default();
+    let mut body = serde_json::to_value(answer).unwrap_or_default();
+    body["request"] = request().into();
     admit(
         app,
         format!("v1/sessions/{id}/asks/{}", ask.0),
@@ -277,8 +278,7 @@ pub fn admit_answer(app: &mut App, (id, ask): MailId, answer: Answer) {
 // survive, and a draft read here is saved again after and comes into the composer. The words
 // leave the editor meanwhile; refused, they come back ahead of anything typed since. Unanswered,
 // the outcome is unknown, so they stay out of it, and Enter admits the same body again
-// (`App.held`): an input's request id, or an ask's being answered, keeps the server from taking
-// it twice.
+// (`App.held`): the message or answer's request id keeps the server from taking it twice.
 fn admit<F>(app: &mut App, path: String, (body, keep): (Value, bool), then: F)
 where
     F: FnOnce(&mut App, Value) + Send + 'static,

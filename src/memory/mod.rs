@@ -19,10 +19,11 @@ use crate::protocol::{Body, EntryId, Input, Origin, SessionId};
 use crate::record::{Record, Summary};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, LazyLock, Mutex};
 use tasks::{Edit, Listing};
 
 /// A person's task list query; the path's session is its viewer.
@@ -103,6 +104,8 @@ struct Text {
     push_unknown: String,
     paths_incomplete: String,
     git_lock: String,
+    git_lock_other: String,
+    nested_memory: String,
     changed: String,
     settings: String,
     identity: String,
@@ -113,6 +116,7 @@ struct Text {
     set_aside: String,
     restore: String,
     join: String,
+    unjoined: String,
     asks: String,
     asks_more: String,
     asked: String,
@@ -133,11 +137,12 @@ static TEXT: LazyLock<Text> = LazyLock::new(|| {
 });
 
 /// Memory and tasks for one server, under `<home>/memory` and `<home>/tasks`. Between calls it
-/// holds only a lock, which every task change and sync takes; reads take none, since every file
-/// is replaced by one rename.
+/// holds one lock per task store and one for memory, plus a lock preventing overlapping ticks.
+/// File reads take none, since every file is replaced by one rename.
 pub(crate) struct Memory {
     home: PathBuf,
-    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    stores: Mutex<BTreeMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+    tick: tokio::sync::Mutex<()>,
     /// Whether releases may be owed: set at start and when a release fails, so the next tick
     /// looks for claims that a closed or settled session still holds.
     owed: AtomicBool,
@@ -161,17 +166,20 @@ pub(crate) struct Caller<'a> {
 pub(crate) struct Cited {
     id: EntryId,
     said: Option<String>,
+    ask: Option<EntryId>,
 }
 
 /// The entry `id` of `record` as a ruling may cite it.
 pub(crate) async fn cited(record: &Record, id: EntryId) -> Option<Cited> {
-    let said = match record.entry(id).await.ok()?.body {
-        Body::Input(input) if matches!(input.from, Origin::Person | Origin::Answer { .. }) => {
-            Some(input.text)
-        }
-        _ => None,
+    let (said, ask) = match record.entry(id).await.ok()?.body {
+        Body::Input(input) => match input.from {
+            Origin::Person => (Some(input.text), None),
+            Origin::Answer { ask } => (Some(input.text), Some(ask)),
+            _ => (None, None),
+        },
+        _ => (None, None),
     };
-    Some(Cited { id, said })
+    Some(Cited { id, said, ask })
 }
 
 /// One `memory` call's input.
@@ -223,6 +231,8 @@ struct Write {
     dreaming: bool,
     #[serde(skip)]
     quotes: Vec<(String, String)>,
+    #[serde(skip)]
+    question: Option<String>,
 }
 
 #[derive(Clone, Deserialize, serde::Serialize)]
@@ -279,8 +289,22 @@ type Note = (String, String);
 impl Memory {
     /// Memory for the server whose home is `home`. It reads and writes nothing until a call.
     pub(crate) fn new(home: &Path) -> Memory {
-        let (home, lock, owed) = (home.into(), Default::default(), true.into());
-        Memory { home, lock, owed }
+        Memory {
+            home: home.into(),
+            stores: Default::default(),
+            tick: Default::default(),
+            owed: true.into(),
+        }
+    }
+
+    /// One mutex per store touched during this server run; the map is held only for lookup.
+    fn store(&self, dir: &Path) -> Arc<tokio::sync::Mutex<()>> {
+        self.stores
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(dir.into())
+            .or_default()
+            .clone()
     }
 
     /// The home session a resident's thread `s` sends its closing state to; none for any other
@@ -309,6 +333,18 @@ impl Memory {
             Err(e) => return e.to_string(),
         };
         let offered = offered(&p).await.then(|| TEXT.join.clone());
+        let mut unjoined = Vec::new();
+        for (dir, remote) in [
+            (&p.memory.current[0], &p.memory_remote),
+            (&p.tasks, &p.remote),
+        ] {
+            if s.child.is_none()
+                && matches!(remote, Ok(Some(_)))
+                && share::unjoined(dir).await.unwrap_or(false)
+            {
+                unjoined.push(fill(&TEXT.unjoined, &[("dir", &dir.display())]));
+            }
+        }
         let (own, session) = (own(&p, s), s.session.to_string());
         let me = me(&p).await;
         let read = blocking(move || {
@@ -330,7 +366,7 @@ impl Memory {
             Err(e) => return e.to_string(),
         };
         // A helper does not talk with the person, so it is asked nothing.
-        let asks = offered.into_iter().chain(asks);
+        let asks = unjoined.into_iter().chain(offered).chain(asks);
         let (mut asks, more) = files::fit(asks.filter(|_| s.child.is_none()), (5, 2400));
         if more > 0 {
             asks += &format!("\n{}", TEXT.asks_more.replace("{n}", &more.to_string()));
@@ -498,7 +534,7 @@ impl Memory {
             let memory = c.memory();
             let mut refresh = None;
             if matches!(p.remote, Ok(Some(_))) && share::stale(&p.tasks).await {
-                let held = memory.lock.lock().await;
+                let held = memory.store(&p.tasks).lock_owned().await;
                 let (answer, notes) = memory.locked(&c, &p, None).await;
                 refresh = answer.err();
                 drop(held);
@@ -530,8 +566,8 @@ impl Memory {
 
     /// Owns the complete write and its lock; stopping the caller only stops waiting for it.
     async fn editing(&self, c: &Controller, cwd: &Path, by: By<'_>, edit: Edit) -> Answer {
-        let held = self.lock.lock().await;
         let p = self.files(c, cwd, Ok).await?;
+        let held = self.store(&p.tasks).lock_owned().await;
         // A question is for someone who has written to the shared list, as the remote now has
         // it, so none waits on a name no startup page matches.
         let mut owed = Vec::new();
@@ -740,9 +776,9 @@ fn fill(text: &str, with: &[(&str, &dyn fmt::Display)]) -> String {
 }
 
 /// The entry a ruling cites (`ref`, or the person's latest input), with their original words. Refused unless it is an input from the person or an answer to an ask.
-fn cite<'a>(c: &'a Caller, r: Option<EntryId>) -> Result<(EntryId, &'a str), Error> {
+fn cite<'a>(c: &'a Caller, r: Option<EntryId>) -> Result<(&'a Cited, &'a str), Error> {
     match (c.cited.as_ref(), r) {
-        (Some(Cited { id, said: Some(w) }), _) => Ok((*id, w)),
+        (Some(cited @ Cited { said: Some(w), .. }), _) => Ok((cited, w)),
         (Some(&Cited { id, .. }), _) | (None, Some(id)) => Err(refuse(
             &TEXT.not_person.replace("{entry}", &id.0.to_string()),
         )),

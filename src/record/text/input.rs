@@ -23,6 +23,11 @@ fn words(key: &str) -> &'static str {
     WORDS.get(key).map_or("", String::as_str)
 }
 
+/// A person's message joining an open call, which asks for a reply before the next call.
+pub(crate) fn steering(me: &Summary, input: &Input) -> bool {
+    input.from.is_person() && input.voice_call.is_none() && !me.unresolved.is_empty()
+}
+
 /// The input `entry` as a model path takes it in `me`'s session, whose folder is `dir`. Its
 /// words: mail with a sender gets a one-line header naming whose child, parent or channel post
 /// it is, and a question's id, and a mention shows its first 2,000 characters; a child's report
@@ -54,7 +59,7 @@ pub(crate) fn heard(me: &Summary, dir: &Path, entry: EntryId, mut input: Input) 
         name.is_none().then_some(path)
     });
     let mut text = header(me, &input.from, text);
-    if input.from.is_person() && input.voice_call.is_none() && !me.unresolved.is_empty() {
+    if steering(me, &input) {
         text += words("steer");
     }
     for file in &input.files {

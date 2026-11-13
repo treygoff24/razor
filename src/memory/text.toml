@@ -20,6 +20,7 @@ no_person = "This session holds no words of the person's yet, so there is nothin
 no_memory = "There is no memory {id} in this project or for every project; `search` finds ids."
 not_person = "Entry {entry} holds no words of the person's; `ref` names the person's message or answer that the ruling comes from."
 gone = "Another call already replaced or retired that memory; `search` finds what is current."
+nested_memory = "{folder} is not part of this project's memory; move it out of the project's memory folder, or remove `[memory] remote` from `.razor/config.local.toml` to keep this memory local."
 other = "The memory call failed while {context}: {source}."
 
 tasks = "## Tasks: {ready} ready; `task list` shows them, `task get` reads one whole"
@@ -45,7 +46,9 @@ rollback = "Could not undo this write in {dir}; local edits or commits may remai
 not_written = "The write failed and was undone locally, so nothing was written: {why}"
 push_unknown = "The remote's outcome is unknown; read the task before writing it again: {why}"
 paths_incomplete = "Git did not return the whole changed-path list; inspect the folder before retrying."
-git_lock = "\nSee docs/troubleshooting.md#git-locks before removing a lock."
+git_lock = "\nThe index lock clears itself on the next call once ten minutes old; to clear it now, list Git processes with `ps ax -o pid,command`, check their folders with `readlink /proc/PID/cwd` on Linux or `lsof -a -p PID -d cwd` on macOS, and once none works in this folder run `rm -- {lock}` and retry; see docs/troubleshooting.md#git-locks."
+git_lock_other = "\nSee docs/troubleshooting.md#git-locks before removing a lock."
+unjoined = "Files in {dir} are staying local: their history differs from the shared store. Move this folder aside; the next call takes the shared files; then copy back what you want to keep under names not already there (recreate tasks with the task tool)."
 changed = "Task {id} changed since it was read, so it was left as it is."
 settings = "This project's settings do not read, so its tasks were not changed; fix them and try again: {why}"
 
@@ -56,7 +59,7 @@ page_name = "A page needs name: a file stem of at most 100 letters, digits, unde
 dream_ruling = "Dreaming writes a ruling only by replacing existing rulings, using their original words; give replaces and omit ref."
 ruling_line = "A ruling is one short plain rule on one line, citing the person's message."
 ruling_expires = "A ruling is a standing decision; put a one-time approval in a task comment instead of giving it expires."
-ruling_sources = "A ruling needs its verified original words and citations; replace rulings that hold them or cite the person with ref."
+ruling_sources = "A ruling's citations are its verified sources only: give ref for the person's message or answer and leave cites out, or replace rulings that hold their original words."
 replacements = "Give one memory id or at most 32 distinct ruling ids; replace rulings only with a ruling in the same scope."
 project_all = "Use project for one project or all for every project, rather than both."
 project_path = "The project path must name an existing folder; choose its folder and try again."

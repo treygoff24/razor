@@ -103,6 +103,13 @@ async fn evidence(app: &App, s: &Summary, after: EntryId) -> Option<String> {
                 format!("- {name} {}", target(&input)),
                 "Running".into(),
             )),
+            Body::NotRun {
+                call, name, input, ..
+            } => steps.push((
+                call,
+                format!("- {name} {}", target(&input)),
+                crate::record::NOT_RUN.into(),
+            )),
             Body::Result { call, outcome, .. } => {
                 if let Some(step) = steps.iter_mut().rev().find(|s| s.0 == call) {
                     step.2 = format!("{outcome:?}");

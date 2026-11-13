@@ -443,7 +443,9 @@ impl Memory {
 /// `p` as a pass finds it: its stamp, this server's line in it, and its shared memory's name.
 async fn stamped(p: Project) -> Dream {
     let shared = match &p.memory_remote {
-        Ok(Some(_)) => share::first(&p.memory.current[0]).await,
+        Ok(Some(_)) => share::first(&p.memory.current[0], "HEAD")
+            .await
+            .unwrap_or_default(),
         _ => None,
     };
     let stamp = Stamp::read(&p.memory.current[0]);

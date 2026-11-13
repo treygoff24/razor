@@ -14,14 +14,16 @@ use base64::Engine;
 use elicitation::{Handler, elicit};
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, DEFAULT_MRTR_MAX_ROUNDS,
-        InputRequest, PaginatedRequestParams, ProtocolVersion, RequestMetaObject,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+        DEFAULT_MRTR_MAX_ROUNDS, InputRequest, PaginatedRequestParams, ProtocolVersion,
+        RequestMetaObject, ResourceContents,
     },
     service::{ClientLifecycleMode, ClientServiceExt, Peer, RoleClient},
     transport::TokioChildProcess,
 };
 use serde_json::{Value, json};
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     path::{Path, PathBuf},
     process::Stdio,
@@ -534,15 +536,10 @@ pub(super) async fn call(
     refused("The MCP server did not finish within its input rounds; retry when it is ready.")
 }
 
-/// Text through the spill, images saved under the session's `images/`, structured content and
-/// the server's error flag.
+/// Non-image blocks through the spill in order, images saved under the session's `images/`,
+/// structured content and the server's error flag.
 async fn rich(tools: &Tools, at: EntryId, result: CallToolResult) -> Result<Value, Error> {
-    let text: Vec<_> = result
-        .content
-        .iter()
-        .filter_map(|b| b.as_text())
-        .map(|b| b.text.as_str())
-        .collect();
+    let text: Vec<_> = result.content.iter().filter_map(content_text).collect();
     let mut images = Vec::new();
     for image in result.content.iter().filter_map(|b| b.as_image()) {
         let bytes = base64::engine::general_purpose::STANDARD.decode(&image.data);
@@ -570,6 +567,34 @@ async fn rich(tools: &Tools, at: EntryId, result: CallToolResult) -> Result<Valu
     Ok(
         json!({"output": output, "path": path, "images": images, "structured": structured, "is_error": error}),
     )
+}
+
+/// Links and unsupported media remain visible beside text on every model path.
+fn content_text(block: &ContentBlock) -> Option<Cow<'_, str>> {
+    Some(match block {
+        ContentBlock::Text(block) => block.text.as_str().into(),
+        ContentBlock::ResourceLink(link) => format!(
+            "[{}]({})",
+            link.title.as_deref().unwrap_or(&link.name),
+            link.uri
+        )
+        .into(),
+        ContentBlock::Resource(block) => match &block.resource {
+            ResourceContents::TextResourceContents { text, .. } => text.as_str().into(),
+            ResourceContents::BlobResourceContents { uri, mime_type, .. } => format!(
+                "Binary resource: {uri} ({})",
+                mime_type.as_deref().unwrap_or("unknown type")
+            )
+            .into(),
+            _ => return None,
+        },
+        ContentBlock::Audio(audio) => format!(
+            "Audio block ({}) returned; audio is not carried.",
+            audio.mime_type
+        )
+        .into(),
+        _ => return None,
+    })
 }
 
 /// A credential's value: the named variable's, or the file's without its trailing newline.

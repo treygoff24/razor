@@ -2,7 +2,7 @@
 //! instructions, or `/mcp`.
 use super::keys::Pane;
 use super::{App, mcp, text::*, view};
-use crate::protocol::Login;
+use crate::protocol::{Login, LoginProvider};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
@@ -22,6 +22,7 @@ pub enum Panel {
     Login {
         lines: VecDeque<String>,
         running: bool,
+        provider: Option<LoginProvider>,
     },
     /// `/mcp`, which lays out and keys its own views inside the box.
     Mcp(mcp::Mcp),
@@ -44,7 +45,16 @@ pub fn command(app: &mut App, word: &str, args: &str) -> bool {
                 }
             }
         }
-        "/login" => start(app),
+        "/login" => {
+            if args.is_empty() {
+                start(app, None);
+            } else {
+                match serde_json::from_value(serde_json::json!(args)) {
+                    Ok(provider) => start(app, Some(provider)),
+                    Err(_) => app.say("Use /login claude, chatgpt or console."),
+                }
+            }
+        }
         _ => return false,
     }
     true
@@ -61,31 +71,51 @@ fn searchable(app: &App) -> bool {
 }
 
 /// Starts the server's sign-in; Escape cancels it by dropping its stream.
-fn start(app: &mut App) {
-    let (lines, running) = (VecDeque::new(), true);
-    open(app, Panel::Login { lines, running });
+fn start(app: &mut App, provider: Option<LoginProvider>) {
+    if let Some(task) = app.login.take() {
+        task.abort();
+    }
+    open(
+        app,
+        Panel::Login {
+            lines: VecDeque::new(),
+            running: provider.is_some(),
+            provider,
+        },
+    );
+    let Some(provider) = provider else { return };
+    if provider != LoginProvider::Chatgpt {
+        app.panel_search = Some(String::new());
+    }
     let (Some(api), Some(tx), Some(budget)) =
         (app.api.clone(), app.lines.clone(), app.budget.clone())
     else {
         return;
     };
-    let task = tokio::spawn(async move { api.login(tx, budget).await });
+    let task = tokio::spawn(async move { api.login(provider, tx, budget).await });
+    let id = task.id();
     app.login = Some(task.abort_handle());
     app.spawn(|_| async move {
         let ended = task.await;
         // A cancelled sign-in leaves the handle of any later one alone.
-        move |app: &mut App| match ended {
-            Ok(Ok(())) => {
-                app.login = None;
-                if let Some(Panel::Login { running, .. }) = &mut app.panel {
-                    *running = false;
+        move |app: &mut App| {
+            if app.login.as_ref().is_none_or(|task| task.id() != id) {
+                return;
+            }
+            match ended {
+                Ok(Ok(())) => {
+                    app.login = None;
+                    if let Some(Panel::Login { running, .. }) = &mut app.panel {
+                        *running = false;
+                        app.panel_search = None;
+                    }
                 }
+                Ok(Err(e)) => {
+                    app.login = None;
+                    show(app, &e.to_string(), true);
+                }
+                Err(_) => {}
             }
-            Ok(Err(e)) => {
-                app.login = None;
-                show(app, &e.to_string(), true);
-            }
-            Err(_) => {}
         }
     });
 }
@@ -100,10 +130,13 @@ pub fn login(app: &mut App, line: Login) {
 }
 
 fn show(app: &mut App, text: &str, ended: bool) {
-    let Some(Panel::Login { lines, running }) = &mut app.panel else {
+    let Some(Panel::Login { lines, running, .. }) = &mut app.panel else {
         return;
     };
-    *running = !ended;
+    if ended {
+        *running = false;
+        app.panel_search = None;
+    }
     for line in screen_safe(text).lines() {
         lines.push_back(clip(line, 8192));
         while lines.len() > 128 || lines.iter().map(String::len).sum::<usize>() > 64 << 10 {
@@ -112,9 +145,61 @@ fn show(app: &mut App, text: &str, ended: bool) {
     }
 }
 
+const PROVIDERS: [(LoginProvider, &str); 3] = [
+    (LoginProvider::Claude, "Claude"),
+    (LoginProvider::Chatgpt, "ChatGPT"),
+    (LoginProvider::Console, "Anthropic Console (API billing)"),
+];
+
+fn login_key(app: &mut App, key: KeyEvent) -> bool {
+    if !matches!(app.panel, Some(Panel::Login { .. })) {
+        return false;
+    }
+    if matches!(app.panel, Some(Panel::Login { provider: None, .. })) {
+        if key.code == KeyCode::Enter {
+            start(
+                app,
+                Some(PROVIDERS[app.panel_scroll.min(PROVIDERS.len() - 1)].0),
+            );
+            return true;
+        }
+        return false;
+    }
+    if key.code == KeyCode::Enter
+        && let Some(code) = &app.panel_search
+    {
+        let text = code.trim().to_owned();
+        if text.is_empty() {
+            return true;
+        }
+        let started = app.spawn(|api| async move {
+            let sent = api
+                .json(
+                    reqwest::Method::PUT,
+                    "v1/login",
+                    Some(serde_json::json!({"code": text})),
+                )
+                .await;
+            move |app: &mut App| {
+                if let Err(e) = sent {
+                    show(app, &e.to_string(), false);
+                }
+            }
+        });
+        if started {
+            app.panel_search = Some(String::new());
+        }
+        return true;
+    }
+    false
+}
+
 /// One key: an open `/mcp` takes it first, and what it leaves scrolls or closes the panel; while
 /// a search is typed, a character without Ctrl is its word.
 pub fn key(app: &mut App, key: KeyEvent) {
+    if login_key(app, key) {
+        return;
+    }
     if matches!(app.panel, Some(Panel::Search)) && super::search::key(app, key) {
         return;
     }
@@ -128,7 +213,11 @@ pub fn key(app: &mut App, key: KeyEvent) {
     let searching = app.panel_search.is_some();
     app.panel_scroll = match key.code {
         KeyCode::Char(c) if searching && !ctrl => {
-            app.panel_search.get_or_insert_default().push(c);
+            if let Some(text) = &mut app.panel_search
+                && text.len() + c.len_utf8() <= super::api::BYTES
+            {
+                text.push(c);
+            }
             0
         }
         KeyCode::Backspace if searching => {
@@ -139,7 +228,7 @@ pub fn key(app: &mut App, key: KeyEvent) {
             app.panel_search = Some(String::new());
             0
         }
-        KeyCode::Esc if searching => {
+        KeyCode::Esc if searching && !matches!(app.panel, Some(Panel::Login { .. })) => {
             app.panel_search = None;
             0
         }
@@ -151,6 +240,7 @@ pub fn key(app: &mut App, key: KeyEvent) {
                 task.abort();
             }
             app.panel = None;
+            app.panel_search = None;
             0
         }
         KeyCode::Up => app.panel_scroll.saturating_sub(1),
@@ -185,6 +275,21 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<vie
         Some(Panel::Tasks) => return super::tasks::draw(app, b, r, edge, hits),
         Some(Panel::Help) => ("help", found(super::composer::completion::help(width))),
         Some(Panel::Keys) => ("keys", found(super::bindings::rows(app))),
+        Some(Panel::Login { provider: None, .. }) => {
+            app.panel_scroll = app.panel_scroll.min(PROVIDERS.len() - 1);
+            let rows = PROVIDERS
+                .iter()
+                .enumerate()
+                .map(|(i, (_, name))| {
+                    span(
+                        format!("{} {name}", if i == app.panel_scroll { "❯" } else { " " }),
+                        if i == app.panel_scroll { CYAN } else { DATA },
+                    )
+                    .into()
+                })
+                .collect();
+            ("Sign in to", rows)
+        }
         Some(Panel::Login { lines, running, .. }) => {
             let rows = lines
                 .iter()
@@ -200,7 +305,11 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<vie
         height: words.height.saturating_sub(1),
         ..words
     };
-    let selected = matches!(app.panel, Some(Panel::Search)).then_some(app.panel_scroll);
+    let selected = matches!(
+        app.panel,
+        Some(Panel::Search | Panel::Login { provider: None, .. })
+    )
+    .then_some(app.panel_scroll);
     if selected.is_some() {
         app.panel_scroll = 0;
     }
@@ -209,12 +318,23 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<vie
         app.panel_scroll = selected;
     }
     let search = match (&app.panel_search, searchable(app)) {
+        (Some(words), _) if matches!(app.panel, Some(Panel::Login { .. })) => {
+            format!(
+                "Paste Claude code: {}▏ · ",
+                "•".repeat(words.chars().take(width).count())
+            )
+        }
         (Some(words), _) => format!("/{words}▏ · "),
         (None, true) => "<panel.search> search · ".into(),
+        (None, false) if matches!(app.panel, Some(Panel::Search)) => {
+            "<panel.search> refine · ".into()
+        }
         (None, false) => String::new(),
     };
     let keys = if selected.is_some() {
-        "<panel.up>/<panel.down> select · <panel.accept> open · <panel.search> refine · <panel.cancel> back".into()
+        format!(
+            "{search}<panel.up>/<panel.down> select · <panel.accept> open · <panel.cancel> back"
+        )
     } else {
         format!("{search}<panel.up>/<panel.down> scroll · <panel.cancel> back")
     };
@@ -222,7 +342,7 @@ pub fn draw(app: &mut App, b: &mut Buffer, r: Rect, now: u64, hits: &mut Vec<vie
     put(
         b,
         words.x,
-        body.bottom(),
+        words.bottom().saturating_sub(1),
         &keys,
         words.width,
         style(GRAY, GLASS),

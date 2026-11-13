@@ -4,7 +4,7 @@
 //! and releases what a failed release left held.
 
 use super::tasks::{self, Edit};
-use super::{By, Error, Memory, Note, Project, TEXT, blocking, fill, open, send};
+use super::{By, Error, Memory, Note, TEXT, blocking, fill, open, send};
 use crate::controller::Controller;
 use crate::protocol::{Child, Decision, ReportStatus, SessionId};
 use crate::record::{ChildSummary, Summary};
@@ -125,7 +125,7 @@ impl Memory {
     }
 
     /// From the residents' wake, at most once a minute, on a task of its own and not while a
-    /// change or the last tick holds the lock: each shared project with a task held here that
+    /// previous tick is running, skipping busy stores: each shared project with a task held here that
     /// waits on an open task syncs, so a close made on another machine reaches it; each overdue
     /// task reminds its open claimant on this server, else its open creator, once for its due
     /// date; and after a release failed, or first after a start, a closed or settled session's
@@ -134,7 +134,7 @@ impl Memory {
         let c = c.clone();
         tokio::spawn(async move {
             let memory = c.memory();
-            let Ok(held) = memory.lock.try_lock() else {
+            let Ok(held) = memory.tick.try_lock() else {
                 return;
             };
             let (notes, holders) = memory.visit(&c).await;
@@ -146,7 +146,7 @@ impl Memory {
         });
     }
 
-    /// The tick's work, under the lock: the notes, and when releases may be owed, the sessions
+    /// The tick's work, under each store's lock: the notes, and when releases may be owed, the sessions
     /// holding tasks here.
     async fn visit(&self, c: &Controller) -> (Vec<Note>, Vec<String>) {
         let dir = self.home.join("tasks");
@@ -159,8 +159,14 @@ impl Memory {
             self.owed.store(true, Relaxed);
         }
         for project in projects {
-            let read = |p: Project| Ok((tasks::scan(&p.tasks, false)?, p));
-            let Ok((all, p)) = self.files(c, &project, read).await else {
+            let read = async {
+                let p = self.files(c, &project, Ok).await.ok()?;
+                let held = self.store(&p.tasks).try_lock_owned().ok()?;
+                let dir = p.tasks.clone();
+                let all = blocking(move || tasks::scan(&dir, false)).await.ok()?;
+                Some((p, all, held))
+            };
+            let Some((p, all, _held)) = read.await else {
                 if owed {
                     self.owed.store(true, Relaxed);
                 }

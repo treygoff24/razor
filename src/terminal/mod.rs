@@ -400,7 +400,7 @@ struct App {
     goto: Option<goto::Goto>,
     search: Option<search::Search>,
     panel_scroll: usize,
-    // The words typed after `/` in the key list, commands or tasks, until Esc ends the search.
+    /// The panel's search words or transient sign-in code, capped at api::BYTES.
     panel_search: Option<String>,
     login: Option<tokio::task::AbortHandle>,
     pane_open: Option<bool>,

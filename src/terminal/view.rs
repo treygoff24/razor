@@ -258,6 +258,8 @@ pub(super) fn normal(
     let start = hits.len();
     if let Some(id) = app.focus.clone() {
         self::transcript(app, b, transcript, &id, now, hits);
+    } else if app.panel.is_some() {
+        panel::draw(app, b, transcript, now, hits);
     }
     let band = hits.len();
     self::stack(app, b, stack, now, hits);

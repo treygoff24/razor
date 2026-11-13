@@ -2,6 +2,46 @@
 
 What changed in each Razor release. [Configuration](docs/configuration.md) and the other pages in [docs](docs/README.md) describe each feature in full.
 
+## 0.8.0 (13 November 2026)
+
+### New
+
+- **For scripts and apps starting a sign-in:** `POST /v1/login` accepts `provider=claude`, `console` or `chatgpt`; `PUT /v1/login` sends a pasted code to the calling device's Claude sign-in. Omitting the provider keeps ChatGPT sign-in; older apps keep that behavior ([API design](docs/design/api.md#routes-under-v1)).
+- `/login` offers Claude, ChatGPT and Anthropic Console. Claude sign-in stays in the terminal app, with a browser link and a field for its code; `razor login claude` or `razor login console` signs in from a shell without running setup again ([Models and sign-in](docs/models.md#claude)).
+
+### Changed
+
+- When an agent continues without answering your mid-work message, Razor holds one step of calls and asks it to reply first; the held attempts stay in the record without appearing as failed calls. Scripts already running finish their work, and a direct handover can proceed ([Concepts](docs/concepts.md#sessions-turns-and-states)).
+- Sol's default context window now matches the 500,000 tokens advertised by its ChatGPT sign-in; Razor hands over at 90%. A manual `window = 500000` or `threshold = 0.9` for Sol now matches the defaults and can be removed ([Models and sign-in](docs/models.md#gpt)).
+- Releases ship Cua Driver 0.49.5, Cua's newest, in place of 0.49.1: Mac screenshots release their memory, typing works in a minimized Screen Sharing window, Linux browser preparation works across languages, and a failed policy load exposes no tools ([Browser and desktop control](docs/browser-voice-search.md#desktop-apps)).
+- **For scripts and apps reading the record:** `not_run` records an attempt withheld by the unanswered-message rule, with `call`, `name` and `input`, without counting it as a call or failure. A session holding one cannot be opened by a server on 0.7.0 or earlier; older terminals skip the entry and show their newer-server warning ([Using Razor from scripts](docs/scripting.md#withheld-calls-in-the-record)).
+- **For scripts and apps reading the status stream:** the custom-avatar contract now documents image cells, owning-server names, helper inheritance, reloads and missing pictures. Older apps continue to draw their usual creatures ([Using Razor from scripts](docs/scripting.md#custom-avatars-on-the-status-stream)).
+- **For apps using the Apple network package:** `NetworkClient.networkChanged()` looks for new paths after an app observes a network change; request timeouts log the phase and client activity in the system log ([Network design](docs/design/network.md#in-a-swift-app)).
+
+### Fixed
+
+- MCP resource links, embedded text and binary resource addresses now reach every model in the result's order; audio blocks report their type instead of disappearing ([MCP servers](docs/configuration.md#mcp-servers)).
+- Answers to an agent's question still reach it after the question clears, and reopen a closed session ([Concepts](docs/concepts.md#questions-notes-and-deliveries)).
+- Terminal retries deliver each answer once, even if the connection drops after the server accepted it ([Using Razor from scripts](docs/scripting.md#the-local-api)).
+- An automatic close waits for all inputs to be answered, so a message or answer arriving as a turn ends is kept ([Concepts](docs/concepts.md#closing-a-session)).
+- A fresh scheduled run someone wrote to stays open after answering them ([Always-on agents](docs/always-on-agents.md#what-it-is-made-of)).
+- A repeated Stop within five seconds leaves the first stop to finish and keeps the reply's words. If the turn still has not stopped after five seconds, another Stop forces it to end and may lose words not yet recorded ([Concepts](docs/concepts.md#sessions-turns-and-states)).
+- `razor devices add` waits up to five seconds for the relay to answer and warns alongside the code when this server is not connected, so you know another device may not reach it ([More machines](docs/machines.md#1-pair-two-servers)).
+- A paired request whose connection must be re-established has five seconds to connect, so a dead relay path no longer holds it for thirty seconds ([More machines](docs/machines.md#what-pairing-gives-you)).
+- A paired request that could not reach its server says nothing was sent; an uncertain result asks you to check before sending again ([Troubleshooting](docs/troubleshooting.md#more-machines)).
+- A task or memory store clears its own Git index lock when a failed step finds it more than ten minutes old, then retries that step once; a younger lock's refusal gives the exact command to clear it after checking no Git process is using the store ([Git locks](docs/troubleshooting.md#git-locks)).
+- Each task store has its own write lock, so a slow write to one project's tasks no longer blocks writes to another's ([Memory](docs/memory.md#tasks)).
+- A home whose memory or tasks already have a different history keeps them local and gives a startup warning with migration steps, instead of failing to join a shared store ([Memory](docs/memory.md#several-machines)).
+- Shared memory refuses folders outside its defined structure before refreshing or pushing, so a nested project's directory cannot be swept into the parent's next shared write. Nested projects under `state`, `wiki` or `residents` remain a limit; anything already pushed stays on the remote ([Memory](docs/memory.md#sharing-with-other-people)).
+- A ruling written from your answer keeps both your words and the question you answered, so its source can be read later ([Memory](docs/memory.md#how-your-decisions-become-rulings)).
+- Helper rows follow a continuation, stop or report on their owning server, including after a restart, instead of keeping an old state ([Concepts](docs/concepts.md#helpers-and-merging-or-discarding-their-work)).
+- Discarding a helper refuses to remove detached commits that no branch keeps and tells the agent how to recover them; a clean worktree on another branch can be discarded ([Concepts](docs/concepts.md#helpers-and-merging-or-discarding-their-work)).
+- Retrying a helper's merge still merges its branch if its worktree is already gone ([Concepts](docs/concepts.md#helpers-and-merging-or-discarding-their-work)).
+- Discarding a paired helper whose record is gone clears the parent's remaining row ([Concepts](docs/concepts.md#helpers-and-merging-or-discarding-their-work)).
+- An avatar install for a resident name that does not exist, including one containing a dot, refuses before writing a picture or settings ([Configuration](docs/configuration.md#the-terminal-app)).
+- A failed helper Git command with no error text now says how it failed and asks you to inspect its folder before retrying ([Concepts](docs/concepts.md#helpers-and-merging-or-discarding-their-work)).
+- Background release checks keep a held release's action notice through failed checks and clear it once that release is already installed ([Update Razor](docs/quickstart.md#update-razor)).
+
 ## 0.7.0 (13 November 2026)
 
 ### New

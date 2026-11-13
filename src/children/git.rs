@@ -48,7 +48,15 @@ impl Git {
     fn success(self) -> Result<Vec<u8>, Error> {
         match self.code {
             Some(0) => Ok(self.out),
-            _ => Err(Error::Refused(self.text)),
+            code => Err(Error::Refused(if self.text.trim().is_empty() {
+                let end =
+                    code.map_or_else(|| "after a signal".into(), |n| format!("with status {n}"));
+                format!(
+                    "Git failed {end} without an explanation; inspect the folder it ran in before retrying."
+                )
+            } else {
+                self.text
+            })),
         }
     }
 }
@@ -196,14 +204,9 @@ pub(super) async fn merge(origin: &Path, branch: &str) -> Result<String, Error> 
     Ok(String::from_utf8_lossy(&merged.success()?).into_owned())
 }
 
-/// Preserves a Razor helper's working copy on its own branch, without completing a merge or
-/// bypassing commit hooks. A failed command leaves the worktree for the parent to recover.
+/// Preserves a helper's working copy and detached commits, without completing a merge or
+/// bypassing commit hooks. A refusal leaves the worktree for the parent to recover.
 pub(super) async fn preserve(path: &Path, branch: &str) -> Result<(), Error> {
-    if timed(path, 10, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await? != branch {
-        return super::refuse(
-            "The helper's worktree changed branches; recover it before settling.",
-        );
-    }
     let merging = timed(path, 10, &["rev-parse", "--git-path", "MERGE_HEAD"]).await?;
     if fs::try_exists(path.join(merging))
         .await
@@ -211,10 +214,22 @@ pub(super) async fn preserve(path: &Path, branch: &str) -> Result<(), Error> {
     {
         return super::refuse("The helper has an unfinished merge; resolve it before settling.");
     }
+    let current = timed(path, 10, &["branch", "--show-current"]).await?;
+    let containing = ["for-each-ref", "--count=1", "--contains=HEAD", "refs/heads"];
+    if current.is_empty() && timed(path, 10, &containing).await?.is_empty() {
+        return super::refuse(
+            "The helper has detached commits that no branch keeps; create a branch in its worktree before discarding.",
+        );
+    }
     if !timed(path, 10, &["status", "--porcelain", "-unormal"])
         .await?
         .is_empty()
     {
+        if current != branch {
+            return super::refuse(format!(
+                "The helper has uncommitted work on another branch; commit it there or switch back to {branch} before settling."
+            ));
+        }
         timed(path, 10, &["add", "--all"]).await?;
         timed(
             path,

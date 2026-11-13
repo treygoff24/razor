@@ -88,7 +88,14 @@ impl Children {
                 {
                     return refuse("A task's closer must be one line.");
                 }
-                let (_, child) = owned(controller, &session, server).await?;
+                let (_, child) = match owned(controller, &session, server).await {
+                    Err(Error::Missing(_)) if decision == Decision::Discard => {
+                        return Ok(
+                            json!({"text":"The helper is already absent from this server."}),
+                        );
+                    }
+                    result => result?,
+                };
                 let text = self
                     .settle_git(controller, &session, &child, decision, report.as_ref())
                     .await?;
@@ -190,6 +197,7 @@ impl Children {
         report: Option<&(String, Option<u32>, String)>,
     ) -> Result<String, Error> {
         self.retire(controller, session).await?;
+        let branch = branch(session);
         let dir = self.dir(session);
         let path = dir.join("worktree");
         let exists = child.worktree.is_some()
@@ -198,11 +206,22 @@ impl Children {
                 .map_err(other("finding the helper's worktree"))?;
         let merge = decision == Decision::Merge;
         let mut text = String::new();
+        if exists && merge && git::timed(&path, 10, &["branch", "--show-current"]).await? != branch
+        {
+            return refuse(format!(
+                "The helper's worktree changed branches; switch it back to {branch} before merging."
+            ));
+        }
+        if exists && decision == Decision::Discard {
+            git::preserve(&path, &branch).await?;
+        }
         if let Some(worktree) = &child.worktree
             && merge
-            && exists
+            && git::revision(&worktree.origin, 10, &format!("refs/heads/{branch}"))
+                .await?
+                .is_some()
         {
-            text = git::merge(&worktree.origin, &branch(session)).await?;
+            text = git::merge(&worktree.origin, &branch).await?;
         }
         if child.parent.address().is_some() {
             let summary = controller.summary(session).await?;
@@ -221,10 +240,6 @@ impl Children {
         if let Some(worktree) = &child.worktree
             && exists
         {
-            let branch = branch(session);
-            if decision == Decision::Discard {
-                git::preserve(&path, &branch).await?;
-            }
             let delete = (decision != Decision::Discard).then_some(branch.as_str());
             let removed =
                 git::remove(&worktree.origin, &path, &dir.join("uncommitted"), delete).await;
@@ -312,6 +327,8 @@ pub(crate) fn child_row(parent: &SessionId, fact: &ChildSummary, row: &mut Agent
     row.settled = fact.settled;
     if !fact.working() {
         row.state = State::Done;
+    } else if row.state == State::Done {
+        row.state = State::NeedsYou;
     }
 }
 

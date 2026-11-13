@@ -17,12 +17,53 @@ impl Session {
     /// and one that showed its job's end drops that job's notice.
     pub(super) async fn entry(&mut self, body: Body, native: Option<Native>) -> Result<(), Error> {
         let (mut admitted, mut shown, mut body) = (None, None, body);
+        if let Body::Result { call, .. } = &body
+            && let Some(c) = &mut self.conversation
+            && let Some(at) = c.reply.calls.iter().position(|(id, ..)| id == call)
+        {
+            let (call, name, input) = c.reply.calls.remove(at);
+            body = Body::NotRun { call, name, input };
+        }
         let error = matches!(&body, Body::Result { outcome, .. } if *outcome == Outcome::Error);
         // A failed cell's Result is an error that still showed the cell, so it answers its news.
         let error =
             error && !matches!(&body, Body::Result { output, .. } if output.starts_with(FAILED));
+        let pending = self
+            .conversation
+            .as_ref()
+            .and_then(|c| c.reply.pending)
+            .is_some_and(|id| !self.sent.contains(&id));
+        if let Some(c) = &mut self.conversation
+            && matches!(&body, Body::Text { text } if !text.trim().is_empty())
+            && pending
+        {
+            c.reply.pending = None;
+        }
         match &mut body {
             Body::Call { call, name, input } => {
+                if let Some(c) = &mut self.conversation
+                    && (pending || c.reply.refused)
+                    && record::action(name) != "handover"
+                    && self.record.summary().nested(&call.0).is_none()
+                {
+                    c.reply.pending = None;
+                    c.reply.refused = true;
+                    c.reply
+                        .calls
+                        .push((call.clone(), name.clone(), input.clone()));
+                    let call = call.clone();
+                    self.boundary().await?;
+                    return self
+                        .say(|session| ToBridge::Result {
+                            session,
+                            call,
+                            output: record::UNANSWERED.into(),
+                            error: true,
+                            settle: false,
+                            images: Vec::new(),
+                        })
+                        .await;
+                }
                 let cwd = &self.record.summary().cwd;
                 let event = Before::Call { call, name, input };
                 let ran = self.plugins.before(&self.id, cwd, event).await;
@@ -80,7 +121,7 @@ impl Session {
     ) -> Result<(), Error> {
         let s = self.record.summary();
         // After Escape, nothing more runs: the turn's end records its open calls unknown.
-        let stopped = self.conversation.as_ref().is_some_and(|c| c.interrupted);
+        let stopped = matches!(&self.conversation, Some(c) if c.interrupted.is_some());
         let Some(&(_, at, _)) = s.unresolved.iter().find(|(id, ..)| *id == call && !stopped) else {
             return Ok(());
         };

@@ -364,11 +364,22 @@ impl Api {
     /// The server's sign-in: its instruction lines arrive on `tx` until it is done or fails.
     pub async fn login(
         &self,
+        provider: crate::protocol::LoginProvider,
         tx: mpsc::Sender<Incoming>,
         budget: Arc<Semaphore>,
     ) -> Result<(), Error> {
-        self.lines(Method::POST, "v1/login", &None, &mut 0, &tx, &budget)
-            .await
+        self.lines(
+            Method::POST,
+            &format!(
+                "v1/login?provider={}",
+                serde_json::json!(provider).as_str().unwrap_or_default()
+            ),
+            &None,
+            &mut 0,
+            &tx,
+            &budget,
+        )
+        .await
     }
 
     async fn lines(

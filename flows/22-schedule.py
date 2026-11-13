@@ -1,7 +1,7 @@
 """A schedule runs on the model and effort it names, and only for its own turn; its result reaches
 the person as a note through the notify command, or as an ask the status stream lists; a failed
 model turn sends a note without a model tool call; the person's message settles a question, whose
-late answer from the ask command is refused; a fresh run's thread is a root whose row names its
+late answer from the ask command is delivered; a fresh run's thread is a root whose row names its
 resident, listed only among its resident's sessions; a resident's projects (one per request,
 renamed in place, never through a link) and its `sky` file, passed through on its row unless bad
 (docs/design/residents.md). A fresh run's row is read directly outside the live feed. Schedules
@@ -33,7 +33,8 @@ replies += [claude.reply((None, "mcp__razor__message", question), match="Ask me 
             sse("done", "Ask me about the review."), sse("resident-ask-second", "Yes, ship it."),
             sse("done", "Yes, ship it."), sse("done", "From the client."),
             claude.reply((None, "mcp__razor__message", dict(question, text="A third question?")), match="Ask a third."),
-            sse("done", "Ask a third."), sse("done", "Never mind.")]
+            sse("done", "Ask a third."), sse("done", "Never mind."),
+            sse("done", "Yes, ship it."), sse("done", "Too late.")]
 with tempfile.TemporaryDirectory() as scratch:
     gate, asked, tardy, log, record = (Path(scratch) / name for name in ("gate", "asked", "tardy", "sent.jsonl", "record"))
     # Both commands log their arguments and the four variables Razor sets, None when unset.
@@ -57,7 +58,10 @@ with tempfile.TemporaryDirectory() as scratch:
     # documented shell form, which gets the text as $1; `$RAZOR_NAME` in ask's arguments stays literal.
     stale = dict.fromkeys(("RAZOR_SESSION", "RAZOR_NAME", "RAZOR_PROJECT", "RAZOR_ASK"), "stale")
     notify = json.dumps(f'exec "{record}" "$1"')
-    with flow(replies + [failure("Fail."), failure("Fresh run.")], env=stale,
+    with flow(replies + [failure("Fail."), failure("Fresh run."),
+              claude.reply(text="The scheduled work is done.", thinking=["Checking the schedule.", "Finishing."],
+                           gap=2, match="Hold this fresh run."),
+              claude.reply(text="I will keep this thread open.", match="Keep working here.")], env=stale,
               config=f'notify = ["sh", "-c", {notify}, "sh"]\n'
                      f'ask = [{json.dumps(str(command))}, "$RAZOR_NAME"]\n') as f:
         (f.cwd / "persona.md").write_text("You are Ember.")
@@ -72,7 +76,8 @@ with tempfile.TemporaryDirectory() as scratch:
                          '[residents.ember.schedules.broken]\nat = []\ntext = "Fail."\n'
                          'model = "gpt-6.1-sol"\n'
                          '[residents.ember.schedules.fresh]\nat = []\ntext = "Fresh run."\nfresh = true\n'
-                         'model = "gpt-6.1-sol"\n')
+                         'model = "gpt-6.1-sol"\n'
+                         '[residents.ember.schedules.joined]\nat = []\ntext = "Hold this fresh run."\nfresh = true\n')
         f.ask("Start the server.")
         until(f, "ember", lambda es: es and es[0]["kind"] == "start")
         for n, schedule in enumerate(("brief", "review"), 1):
@@ -109,6 +114,18 @@ with tempfile.TemporaryDirectory() as scratch:
         ask = lambda method, path, body=None: ((a := send(f, method, path, body)).status, json.loads(a.read()))
         assert thread not in [s["session"] for s in ask("GET", "/sessions")[1]], "a fresh run is listed"
         assert [s["job"] for s in ask("GET", "/sessions?resident=ember")[1] if s["session"] == thread] == ["fresh"]
+        # Admit the person's input while the fresh run's final response is still streaming.
+        # The scheduled turn must leave that input for its own turn instead of withdrawing it.
+        run = post(f, "/residents/ember/run/joined", {})["entry"]
+        thread = next(e for e in f.record("ember") if e["id"] == run)["session"]
+        wait(lambda: any("Hold this fresh run." in body for body in f.sent()))
+        person = post(f, f"/sessions/{thread}/input", {"text": "Keep working here."})["entry"]
+        entries = until(f, thread, lambda es: any(e["kind"] == "withdrawn" or
+                        e["kind"] == "turn_end" and person in e["inputs"] for e in es))
+        assert person < next(e["id"] for e in entries if e["kind"] == "turn_end"), "input missed the held turn"
+        assert not any(e["kind"] == "withdrawn" for e in entries), entries
+        assert [e["end"] for e in entries if e["kind"] == "turn_end" and person in e["inputs"]] == ["done"], entries
+        assert not any(e.get("closed") for e in entries), "joined fresh run closed"
         # A project made twice by one request is one project; a rename keeps its folder; a link is none.
         made = ask("POST", "/residents/ember/projects", {"name": "Alpha", "request": "make-22"})
         assert made[0] == 201 and ask("POST", "/residents/ember/projects", {"name": "Alpha", "request": "make-22"}) == made
@@ -125,8 +142,8 @@ with tempfile.TemporaryDirectory() as scratch:
             row = json.load(send(f, "GET", "/residents"))[0]
             assert row["session"] == "ember" and row.get("sky") == shown, (text[:60], row.get("sky"))
         # A resident's question to the person returns once recorded as an open ask; the ask
-        # command's answer reaches the resident's next request; an ask answered first through the
-        # API is not answered again by its command.
+        # command's answer reaches the resident's next request; request ids deduplicate API
+        # retries, and the command's separate late answers still reach the model.
         mark, base = len(list(f.record("ember"))), len(f.sent())
         f.ask("--resume", "ember", "Ask me about the review.")
         ends = lambda n: lambda es: sum(e["kind"] == "turn_end" for e in es[mark:]) >= n
@@ -143,22 +160,23 @@ with tempfile.TemporaryDirectory() as scratch:
         second = [e for e in entries if e["kind"] == "call"][-1]
         # A script answers through the session and entry its ask command was given.
         _, session, _, _, entry = sender("second")
-        answer = lambda: send(f, "POST", f"/sessions/{session}/asks/{entry}", {"text": "From the client."}).status
+        answer = lambda: send(f, "POST", f"/sessions/{session}/asks/{entry}", {"text": "From the client.", "request": "review-answer-22"}).status
         assert answer() == 200
-        assert answer() == 400, "a second answer to one ask was admitted"
+        assert answer() == 200, "the answer retry was refused"
         # The person's next message settles a third question; the command's late answer to it is
-        # not recorded and starts no turn.
+        # delivered as another message from the person.
         until(f, "ember", ends(3))
         f.ask("--resume", "ember", "Ask a third.")
         f.ask("--resume", "ember", "Never mind.")
         settled = len(list(f.record("ember")))
         gate.touch()  # The command's own answers to the second and third asks come now.
         wait(lambda: asked.exists() and tardy.exists(), 10, "the ask command never answered the later questions")
-        time.sleep(1)
-        assert not [e for e in list(f.record("ember"))[settled:] if e["kind"] == "input"], "a settled ask took a late answer"
-        answers = [e for e in until(f, "ember", ends(3))[mark:] if e["kind"] == "input" and answered(e)]
+        entries = until(f, "ember", lambda es: sum(e["kind"] == "input" for e in es[settled:]) == 2)
+        later = [e["id"] for e in entries[settled:] if e["kind"] == "input"]
+        entries = until(f, "ember", lambda es: all(any(e["kind"] == "turn_end" and i in e["inputs"] for e in es) for i in later))
+        answers = [e for e in entries[mark:] if e["kind"] == "input" and answered(e)]
         late = [e for e in answers if e["from"]["answer"]["ask"] == second["id"]]
-        assert [e["text"] for e in late] == ["From the client."], late
+        assert [e["text"] for e in late] == ["From the client.", "Yes, ship it."], late
         # Replay closed runs older than a day: a refreshed old name and a new weekly name
         # survive churn even when name order and first insertion disagree with run age.
         stop(f)

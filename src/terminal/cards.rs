@@ -99,7 +99,9 @@ pub fn look(agent: &AgentView) -> (&'static str, &'static str, Color) {
         (State::Working, _) => ("●", "working", GREEN),
         (State::NeedsYou, _) => ("○", "idle", GRAY),
         (State::Stuck, _) => ("!", "stuck", RED),
-        (State::Done, Some(_)) if agent.branch.is_some() && agent.settled.is_none() => {
+        (State::Done, Some(report))
+            if !report.no_changes && agent.branch.is_some() && agent.settled.is_none() =>
+        {
             ("◆", "awaiting merge", CYAN)
         }
         (State::Done, Some(_)) => ("✓", "finished", GRAY),

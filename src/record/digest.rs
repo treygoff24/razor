@@ -55,7 +55,7 @@ pub(crate) async fn digest(
             next += 1;
             if !matches!(
                 header.kind,
-                "input" | "text" | "call" | "result" | "changed_files"
+                "input" | "text" | "call" | "result" | "not_run" | "changed_files"
             ) {
                 continue;
             }
@@ -91,6 +91,7 @@ fn describe(body: &Body, calls: &mut BTreeMap<String, (String, String)>) -> Opti
         }
     );
     let text = match body {
+        Body::NotRun { name, input, .. } => super::not_run(name, input),
         Body::Call { call, name, input } => {
             calls.insert(call.0.clone(), (name.clone(), super::target(input)));
             let name = super::action(name);

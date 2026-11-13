@@ -7,7 +7,8 @@ Every child uses the destination server's `[children] startup`, default `["proje
 ```rust
 /// Schedules discard of every unsettled helper after the parent's last turn releases its task.
 pub(crate) fn closed(&self, controller: &Controller, parent: &Summary);
-/// Commits the helper's working copy on its own branch; refuses an unfinished merge.
+/// Keeps a clean working copy on any branch, or commits edits on the helper's own branch;
+/// refuses an unfinished merge, edits on another branch, or detached commits no branch keeps.
 pub(super) async fn preserve(path: &Path, branch: &str) -> Result<(), Error>;
 ```
 
@@ -17,9 +18,9 @@ pub(super) async fn preserve(path: &Path, branch: &str) -> Result<(), Error>;
 4. A working helper is closed through the existing stop path before settlement. Its jobs and descendants stop before git changes.
 5. Every discard, whether requested by the parent or scheduled at close, preserves uncommitted work as commits on `child/<session>` before removing its worktree. The branch stays.
 6. One commit keeps the helper's last working copy: tracked edits, deletions and untracked files that git does not ignore, using `git add --all`. A separately staged version is replaced by the working copy.
-7. Only the worktree recorded for a Razor helper, under its session folder and still on its expected branch, qualifies. In-place work and worktrees made by other programs are untouched.
+7. Only the worktree recorded for a Razor helper, under its session folder, qualifies. Discard removes a clean worktree on any branch, retaining every branch. A detached HEAD is removed only when a branch contains its commits; otherwise the refusal asks the caller to create a branch first. It commits edits only on the helper's own branch; edits on another branch or detached HEAD refuse with recovery instructions. Merge requires the helper's own branch. In-place work and worktrees made by other programs are untouched.
 8. An unfinished merge, failed commit or refused removal leaves the helper unsettled and its worktree intact, with the error in the server log. A worktree already removed needs no preservation or removal.
-9. Paired helpers use the existing close and settle requests. An unreachable owner leaves the helper unsettled, with its branch and worktree on that owner; sibling cleanup continues.
+9. Paired helpers use the existing close and settle requests. An unreachable owner leaves the helper unsettled, with its branch and worktree on that owner; sibling cleanup continues. Discard of a helper whose owner no longer has its record clears the parent's fact. A missing worktree folder never proves a merge completed: merging is retried while the helper's branch exists.
 10. A closing root schedules cleanup after its final calls end; a helper's settlement stops its tree, retires only that helper, then awaits the same cleanup routine for its own direct helpers. Cleanup works from grandchildren upward before removing a parent checkout they may use as their git origin. No second cleanup job or lifecycle is introduced.
 
 **Hard decision: preserve every discard on its existing branch.** Committing only at automatic close would require a second settlement mode across paired servers. Moving files out, as merge settlement does, loses deletion intent and stores the work apart from its branch. Every discard already keeps the branch, so committing the working copy there makes one preservation rule. Commit hooks and an unfinished merge may refuse it; leaving the worktree and decision open preserves the work rather than forcing removal. Merge and manually merged settlement continue to move uncommitted files aside before removal.

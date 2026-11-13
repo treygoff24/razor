@@ -223,7 +223,7 @@ async fn seed(
                 Some(("user", i.text))
             }
             Ok(Body::Text { text }) => Some(("assistant", crate::record::reply(&text).text.into())),
-            Ok(Body::Call { name, input, .. }) => crate::record::ask(&name, &input)
+            Ok(Body::Call { name, input, .. }) => crate::record::ask(false, &name, &input)
                 .map(|ask| ("assistant", ask["text"].as_str().unwrap_or("").into())),
             _ => None,
         };
@@ -519,7 +519,7 @@ impl Call {
             }
             Body::Call { name, input, .. } => {
                 self.set_working(true).await;
-                if let Some(ask) = crate::record::ask(&name, &input) {
+                if let Some(ask) = crate::record::ask(false, &name, &input) {
                     return self.say(ask["text"].as_str().unwrap_or_default()).await;
                 }
                 if let Some(step) = input["description"].as_str() {

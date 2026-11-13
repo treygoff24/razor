@@ -120,13 +120,11 @@ async fn update(config: Option<&Config>) -> Result<String, Error> {
         )
     })?;
     let pending = root.join("release-action");
-    if release_action().await.is_none() {
-        let _ = fs::remove_file(&pending).await;
-    }
     let (latest, base, mark) = latest().await?;
     let selected = selected(&root).await;
     let floor = version(&running).max(selected.as_deref().and_then(version));
     if version(&latest) <= floor {
+        let _ = fs::remove_file(&pending).await;
         let installed = selected.as_deref().unwrap_or(&running);
         return Ok(format!(
             "Razor {installed}, the latest release, is installed; run razor restart if your server started before it."
@@ -140,7 +138,11 @@ async fn update(config: Option<&Config>) -> Result<String, Error> {
     {
         let notice = held(mark);
         let previous = fs::read_to_string(&pending).await.ok();
-        fs::write(&pending, mark)
+        let temp = pending.with_extension("tmp");
+        fs::write(&temp, mark)
+            .await
+            .map_err(other("saving the release action"))?;
+        fs::rename(&temp, &pending)
             .await
             .map_err(other("saving the release action"))?;
         if previous.as_deref().map(held).as_ref() != Some(&notice) {

@@ -3,6 +3,7 @@ resident's private layer, task visibility and dream input, and a project session
 `/done` closeout in a resident's folder, through the real server and git refs."""
 import json
 import os
+from datetime import date, timedelta
 from claude import reply
 from driver import flow
 from server import post, start, stop, until, wait
@@ -97,6 +98,27 @@ with flow(replies) as f:
         saved = write(alice, kind="note", text=text, description="Ordinary reference.")
         found = use(alice, action="get", id=saved)
         assert found["outcome"] == "success" and text in json.loads(found["output"])["file"], "ordinary text lost"
+    # A home with memory of its own stays writable locally when it cannot join this history.
+    shared_folder = next((alice.home / ".razor/memory").rglob(saved + ".md")).parent
+    (shared_folder / "state.md").write_text("Their shared state.\n")
+    write(alice, kind="note", text="Shared before joining.", description="Shared.")
+    for name, collision in (("existing", True), ("nonconflicting", False)):
+        existing = checkout(name, shared=False)
+        kept = write(existing, kind="note", text="Local before joining.", description="Local.")
+        folder = next((existing.home / ".razor/memory").rglob(kept + ".md")).parent
+        if collision:
+            (folder / "state.md").write_text("My local state.\n")
+            existing.git("-C", str(folder), "init", "-q")
+            existing.git("-C", str(folder), "add", "-A")
+            existing.git("-C", str(folder), "-c", "user.name=Existing", "-c", "user.email=existing@example.invalid", "commit", "-qm", "Private memory")
+        before = {p.name: p.read_bytes() for p in folder.glob("*.md")}
+        tip = git("rev-parse", "refs/razor/memory")
+        (existing.cwd / ".razor/config.local.toml").write_text('[memory]\nremote = "origin"\n')
+        new = write(existing, kind="note", text="Local after joining.", description="Local.")
+        after = {p.name: p.read_bytes() for p in folder.glob("*.md")}
+        assert all(after.get(p) == text for p, text in before.items()) and set(after) == set(before) | {new + ".md"}, "joining lost or duplicated local memory"
+        assert git("rev-parse", "refs/razor/memory") == tip and "staying local" in page(existing), "unrelated memory was shared without a warning"
+        stop(existing)
     for other in (alice, bob, unknown):
         stop(other)
 
@@ -141,9 +163,12 @@ with flow(replies) as f:
     turn("ember", "memory", action="write", kind="note", text="Ember keeps its own work.",
          description="EMBER_LAYER_NOTE", resident=True)
     assert result("ember")["outcome"] == "success", result("ember")
-    turn("ember", "task", action="write", title="EMBER_TASK", resident="ember", due="2000-01-01")
+    # Due this week puts tasks on the page without an overdue reminder starting another turn
+    # in the home session and consuming a reply meant for this scene's next request.
+    due = (date.today() + timedelta(days=1)).isoformat()
+    turn("ember", "task", action="write", title="EMBER_TASK", resident="ember", due=due)
     assert result("ember")["outcome"] == "success", result("ember")
-    turn("ember", "task", action="write", title="PROJECT_TASK", due="2000-01-01")
+    turn("ember", "task", action="write", title="PROJECT_TASK", due=due)
     # A relative project that leaves the resident's folder is that folder's project, not the caller's.
     other = f.cwd.parent / "other87"
     other.mkdir()
