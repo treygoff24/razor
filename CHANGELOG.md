@@ -2,6 +2,98 @@
 
 What changed in each Razor release. Configuration and the other pages in docs describe each feature in full.
 
+## 0.9.0 (20 November 2026)
+
+On a Mac, run `razor install` once for each Razor home after updating, so macOS stops slowing the server (see Changed).
+
+What most people will notice: sessions hand over to a fresh context, rebuilt from the session's record, much sooner than before, at a size set for each model and role from November 2026 research on how much context agents work well with; you or an agent can change it. Always-on agents can watch for a time or a change and wake only when there is news. A turn stopped by a Claude or ChatGPT plan limit carries on by itself at the reset, and an always-on agent can move to a fallback model instead of waiting. Helpers interrupt their parents less, and `/broadcast` and agents' notices reach other sessions without starting a turn. Overnight, the phone holds notes and questions and sends one summary when quiet hours end. New models: GPT-6.2 Sol and Astra, and Google's Gemini 4 models Carbon, Argon, Hydrogen and Neon.
+
+### New
+
+- Always-on agents can watch: for a date and time, a command whose output changed, a program that keeps printing lines, or text another program posts. The news goes to you as a note, to a fresh or lasting thread, or to the agent's home session. `razor watch add`, `try`, `list` and `remove` manage watches; one that repeats ends after 30 days unless you give it another end (Always-on agents).
+- A turn stopped by a Claude or ChatGPT plan limit continues by itself after the reset the provider reported; until then its agent shows as working, with the time it will try again, and Stop cancels the wait. With no known reset, it waits for your next message. Before waiting, Razor can ask a configured `[claude] sign_in` command for another account, passing the refused account labels in `RAZOR_EXCLUDE_ACCOUNTS`. A named person's own sign-in never borrows another account.
+- An always-on agent whose model a plan limit refuses on every account can move to a fallback model and carry on: set `fallback = ["opus", "sol"]` in your settings or the agent's. It says so in its conversation and stays on the fallback until you switch back with `/model`. Off unless you set it (Always-on agents).
+- `/broadcast <text>` sends a dated notice to every open agent on the terminal's server and on directly paired servers, without starting a turn; each reads it at its next step or message. Agents use `message` with `announce` to reach up to sixteen named sessions the same way, and a top-level agent can reach all (Using Razor from scripts).
+- Several people can share one server. Name them under `[people]` and pair each person's phone or Mac with `razor devices add <name> --person <id>`. Their messages and answers carry their names, each keeps their own draft, and a session started from their device runs on their own Claude or ChatGPT subscription once they sign in with `/login` there. `razor --key-file <path>` opens the terminal with a person's own key (Configuration, More machines).
+- An agent's question to you can carry a web page, which the iPhone and Mac apps open; a tap in the page answers the question, and its text and options still answer it anywhere else. The new starter skill `web-page` teaches agents to make such a page, on a question or as a delivered file.
+- An agent can take back a question it asked you once it no longer needs the answer; the transcript keeps both (Using Razor from scripts).
+- `/new from here`, then a first message, starts a separate session holding a copy of the conversation so far, on the source's model unless you pick another; the original keeps its work. An agent can do the same with `source` on `agent start` (a helper) or `start_top` (a session for you), copying itself or a direct helper on this server.
+- Quiet hours are on by default, 22:00 to 07:00 by the server's clock. Non-urgent alerts for notes, deliveries and questions wait for one summary when the hours end, and spoken notes stay silent. Agents can mark a note or question urgent; alerts for finished or stuck turns and plan limits are never held. `razor config set voice.quiet '{"from": "23:00", "to": "06:00"}'` changes the hours; equal times turn them off.
+- In the terminal, each message waiting behind a running step shows how long it has waited, and the first says what it waits for, such as the command still running.
+- Each reply's name line in the terminal ends with when it was sent, such as `16 Nov 2026 · 7:41pm`.
+- `[memory] remote = false` or `[tasks] remote = false` in your own settings keeps every project's memory or tasks on this machine, whatever a project's settings name: for a demo or throwaway server (Memory).
+- A fresh schedule can name its own `startup` list, so a small job opens with only what it needs. A schedule named `status` writes the line the phone and Mac apps show under the agent's home (Always-on agents).
+- Windows: running Razor inside WSL 2, keeping it running after a restart, and letting agents run Windows programs.
+- Gemini API key users can choose Carbon, Argon, Hydrogen or Neon in every model picker, with `--model` or in settings. All take images and video and offer Fast; Hydrogen and Neon also offer xhigh effort (Models).
+- The startup page names the running Razor version, its release notes when they ship beside it, and the servers paired with it.
+- An agent waiting on a background job hears once when the job's command has exited but processes it started keep running, instead of waiting as long as they run.
+- **For scripts and apps managing watches:** routes under `/v1/residents/<name>/watches`, `POST /v1/residents/<name>/try`, and each resident's `watches` in `GET /v1/residents` (Using Razor from scripts).
+- **For scripts and apps running rooms:** a room is a chat on one server whose member sessions hear each other, with an open log and a private log for named people, under `/v1/rooms`. The updated iPhone and Mac apps open a room as a chat with several agent sessions (Rooms design).
+- **For apps signing in a named person:** `POST /v1/device/login?provider=claude` or `chatgpt` streams that person's own sign-in on a shared server. Older apps keep telling the person to sign in on the computer (API design).
+- **For scripts and apps reading the inbox and questions:** `deliver` may carry `result`, the agent's account of finished work (`in_short`, `checked`, `not_checked`), and a delivery names its `root` session; `GET /v1/sessions/<id>/deliveries/<entry>` reads one delivery. A question to the person may carry `why`, `recommended`, `meanwhile`, `if_unanswered`, `page` and `urgent`, and `message_question` marks one your next message settles. Older apps show these deliveries and questions as before, without the new parts.
+- **For scripts and apps reading the status stream:** each row adds `reason` (such as `asking`, `idle`, `limited`, `helper` or `job`) and, for a turn waiting at a limit, `retry_at`; a helper's row adds `helper_kind`, and a session's row adds `mailed`, the last session it mailed and when. A server's entry adds `active_calls`, and `GET /v1/sessions/<id>/agent` adds `copyable`, whether `/new from here` can copy it. Older apps ignore them (Using Razor from scripts).
+- **For scripts and apps reading the server's own events:** `GET /v1/server/entries` and `/v1/server/events` list what the server observed (a stuck session, an account's usage, a paired server's reach, an MCP sign-in, its own starts and stops), and `GET /v1/records` pages through the session records it holds.
+
+### Changed
+
+- Sessions hand over to a fresh context much sooner. A session that talks with you or runs helpers hands over at 150,000 tokens on Opus, Fable and Astra, 128,000 on Sonnet, Terra and Gemini, 96,000 on Sol, Luna, DeepSeek and GLM, and 80,000 on Haiku; a helper that has started none, at 64,000 on Opus, Fable and Astra and 48,000 on the rest. Before, most handed over at 80% of their window, or at 450,000 tokens on the largest (Concepts).
+- `window`, `threshold`, `helper_window` and `helper_threshold` under `[models.<name>]` change those sizes. An agent can change its own session's with `agent`'s `context` action from its next request, so you can ask it to (Configuration).
+- `sol` and `astra` now mean GPT-6.2 Sol and GPT-6.2 Astra; the GPT-6.1 ids still work when typed.
+- The old name `gemini` now means `hydrogen`, and the helper that describes a video for a model that cannot watch it now runs on Hydrogen. Set `watcher = "gemini-3.8-flash"` under `[children]` to keep Flash there. For Gemini API key users, at Google's standard prices read on 16 November 2026, Hydrogen costs $1.50/$7.50 per million input/output tokens against Flash's $0.75/$3.75 until 31 December 2026; from 1 January 2027 they match. Neon costs twice Hydrogen ([Google pricing](https://aistudio.google.com/docs/pricing)).
+- Claude and GPT family names use a configured sign-in first, otherwise their maker's API key; Razor never moves from a subscription to a key by itself (Models and sign-in).
+- On macOS the background service runs as an interactive program, so macOS no longer slows the server and the commands agents run under it; a one-line Claude message took a minute or more before. To update on a Mac: after `razor update`, run `razor install` once for each Razor home; it rewrites the service file and starts the server again from it.
+- A helper that reports with nothing to merge (no checkout or an empty one), nothing left to answer and no helpers of its own completes by itself and frees its claims. Discarding a working helper stops it first; merging one is refused until it reports or is stopped (Concepts).
+- A note from a helper still at work no longer starts its parent's turn; the parent reads it at its next one. Parents use `agent tell`, in place of `agent`'s `continue`, to give a helper more work or a note in any state. A wait has no default time limit, and a rebuilt context lists only helpers not yet settled.
+- Sessions waiting on helpers stay working between turns, including helpers on another machine, and notify you after the reports are handled.
+- Helpers may save new facts and notes in their project's memory. Dreaming turns a real contradiction between your rulings into a task for you instead of a question (Memory).
+- The `task` tool pages long lists with `offset`, and closing a task names its parts still open (Memory).
+- On Claude, a note an agent writes to you before a step is shown as a reply marked "summary" instead of sitting among its Thoughts; its reasoning stays visible as Thoughts.
+- Claude's code mode, still off unless you set `[profiles.claude] code_mode`, now takes the shape of Claude Code's own and shows Razor's tools to Claude whole; with it on, Claude cannot look at a PDF, only read its text through a command (Configuration).
+- Output over 30,000 characters that goes to a file keeps a preview of 8,192 characters beside the path: the end of a command's output, or the start of a web page or an MCP tool's text. A skill over 30,000 characters shows its start and the path to the whole file.
+- A session's opening is lighter: a helper's leaves out the project's state note and the tasks it does not hold, and a skill whose text is already in the system prompt is not listed again (Memory).
+- Agents' `status` and `message list` say why an agent needs you (`asking`, `limited`, `idle`) instead of `needs_you`, and a helper sees its current headline when its parent mails it, so it can change one that no longer fits.
+- When Razor's own tools refuse a call, such as an unknown recipient, a bad memory id or a task field out of range, the refusal says what was wrong and what to do next.
+- Live calls from the phone run on GPT-Live 1.1. The voice stays quiet while you talk and through a pause while you are still thinking, says in one line what you asked for when it hands a request on, holds the agent's replies until you pause, and says where the work stands after 25 quiet seconds; the phone shows each call's own cost (Live voice design).
+- The installer shows its progress and repeats the `PATH` command at the end. Setup stops when a sign-in fails or is cancelled, and prints the command to try again (Quickstart).
+- Most settings saved with `razor config set` take effect on the next turn (Configuration).
+- The notice about the old `~/.razor/key` file says to change any `transcribe` or `speech` program that reads it before deleting the file (Configuration).
+- Releases ship Cua Driver 0.55.0, Cua's newest, in place of 0.49.5: it handles overlapping Mac windows, Chrome pages and menus in background apps better, targets windows better on Linux GNOME and Wayland, and asks before attaching to an existing Chrome profile. agent-browser stays at 0.43.0, its newest, and now ships with its own instructions for agents, matched to that version; the starter skills `agent-browser` and `cua-driver` keep only what Razor sets up and send agents to those instructions (Browser and desktop control).
+- **For scripts calling `razor --print` from an agent's shell:** the message is recorded as that session's, from `RAZOR_SESSION`, not as yours. Unset it to speak as the person (Using Razor from scripts).
+- **For scripts and apps reading the record:** new entry kinds `limits` (an agent's own context size), `watch_fresh`, `watch_note` and `watch_end`, `heard` (a notice or room line), `question_withdrawn`, `checkout` and `limited`; a turn's end may carry `{"limited":"sentence"}` and adds `account` and `usage_complete`; a reply may carry `summary`; inputs may carry `person`, `room` and a watch origin. A server on 0.8.1 or earlier cannot open a session holding them; older terminals skip the line and show their newer-server warning (Using Razor from scripts).
+
+### Fixed
+
+- The token count of a GPT turn that a server restart cut into includes the requests made before the restart.
+- A session no longer stalls when its model sends many lines at once, a GPT command polling a job no longer holds the session's other calls for up to five minutes, and a GPT command run without a terminal reads an empty input instead of waiting for one.
+- A restarted session recovers its unanswered messages before taking new work, so none are left unanswered in the record.
+- A question an agent asked you, and which entries you have seen, survive a server restart.
+- A settled helper on another machine stays settled when its server restarts, instead of running again on later mail.
+- A finished helper's own helpers stay listed under it while its report waits.
+- Claude no longer stops when a message holds the characters U+2028 or U+2029.
+- Interrupting `razor devices add` with Ctrl-C while its code shows withdraws the code.
+- On a Mac, `razor install` keeps Razor.app in the service however you start it, and a slow restart of the old service no longer stalls it.
+- Scrolling a long transcript with the mouse wheel or page keys no longer falls behind.
+- Opening a delivered file that is gone says why.
+- A `/broadcast` or notice that timed out before it was sent to a paired server is counted as missed, since it never left this server.
+- A ChatGPT sign-in whose renewal is refused now says the sign-in ended and how to sign in again (`razor login`, or `/login` for a named person), instead of advice about device codes.
+- One MCP server that never answers no longer blocks every other MCP sign-in and sign-out: its sign-in gives up after 15 seconds with a sentence saying to retry.
+- Choosing Fast on a Gemini model named by its family name no longer sends a conflicting service tier.
+- A session written by a newer Razor and read after a downgrade is reported as needing an update, not as damaged.
+- A resident's first message sent while its record was being created no longer fails with "record is damaged".
+- `razor --continue` picks the newer of two sessions started in the same second.
+- The terminal reaps a server it started and that later stopped, instead of keeping it as a defunct process.
+- In the terminal: an arrow, Home, End, Delete, Page or Shift-Tab key whose bytes arrive split is no longer dropped; the mouse wheel scrolls the status pane while it has the keys; a long paragraph full of links renders quickly; a reply cut and retried shows only the retried words; the new-agent picker names a project by its repository, not its newest folder; and recording without a microphone program says it needs Razor open on the machine with the microphone.
+- On Claude, an empty piece of text before a tool call no longer makes the terminal and apps treat the reply as cut.
+- A phone's Live Activity no longer keeps an older Working over a newer question sent in the same second, and a meeting's lock screen shows the agent's latest reply since the meeting started, not one from before it.
+- In a room, a quoted line (one starting with `>`) holds someone else's words, so the names and tags in it address no one.
+
+### Removed
+
+- The shared channel of a session and its helpers: helpers use direct mail, and `message` no longer posts to or reads a channel. Existing channel files stay on disk untouched; old recorded mentions read as ordinary mail.
+- The separate list of ready tasks: task lists default to all open work, including claimed, blocked and parent tasks (Memory).
+- A tell to a busy helper on a paired server no longer turns into mail when that server refuses it; the refusal reaches the parent, which can send mail. Until both servers run this release, a tell to a busy helper on a server running 0.8 fails with that server's refusal.
+- **For scripts listing tasks:** `GET /v1/sessions/<id>/tasks` refuses `filter=ready`; use `open`, the default. A page now holds up to 1,000.
+
 ## 0.8.1 (18 November 2026)
 
 ### Fixed
