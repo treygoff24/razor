@@ -2,6 +2,14 @@
 
 What changed in each Razor release. Configuration and the other pages in docs describe each feature in full.
 
+## 0.9.1 (21 November 2026)
+
+On a Mac, run `razor install` once for each Razor home after updating, if you skipped it for 0.9.0.
+
+### Fixed
+
+- On a Mac, `razor install` run from a background job or any program with a bare PATH wrote that PATH into the service, so Claude sessions failed with "Node is not on PATH", and it could leave the server stopped. It now takes PATH from your login shell, keeping the tools of the program that ran it, checks that Claude's Node is found, then starts the service and waits for it to answer.
+
 ## 0.9.0 (20 November 2026)
 
 On a Mac, run `razor install` once for each Razor home after updating, so macOS stops slowing the server (see Changed).
