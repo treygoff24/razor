@@ -2,6 +2,35 @@
 
 What changed in each Razor release. Configuration and the other pages in docs describe each feature in full.
 
+## 0.10.0 (25 November 2026)
+
+On a Mac, run `razor install` once for each Razor home after updating, if you skipped it for 0.9.0.
+
+### New
+
+- Goals and their parts replace the flat task list. The updated phone and Mac apps can file a goal or a part, hand work to a session, add a note, edit a task, and reopen it. Agents can comment on a person's words but cannot rewrite them. Older apps need an update for the new task controls.
+- Gemini can run on your Google AI subscription through Antigravity's `agy`, including in helpers and always-on agents. Razor shows subscription quota when Antigravity reports it and does not switch a signed-in session to a paid API key on its own. (Models and sign-in)
+- **For scripts and apps calling the server:** `POST /v1/capture` sends your words to a configured always-on agent, or to Router in the starter pack, to file or route them. The server is ready for capture; this TestFlight build does not yet include its capture button or bar. (Scripting)
+- **For scripts and apps reading tasks:** Rows include counts of open, claimed and blocked parts. Due dates are gone. The task list advertises the caller's allowed writes, which clients send to `POST /v1/sessions/<id>/tasks`. (Scripting)
+- **For scripts and apps reading entries:** Conversation history pages support opt-in deflate compression. A client that does not request compression still gets plain JSON lines. (Scripting)
+- An agent can give you a question with a web page that you can open and answer in the phone and Mac apps.
+
+### Changed
+
+- Session lists get to their first page faster: the server reads summaries in order, a few at a time, and stops when it has enough. It also reuses saved summaries when reopening records.
+- Calls hold the voice back while you speak. In the updated apps, you can pause it with the hold button. The voice acknowledges work before going quiet and can read a multi-part reply as one answer.
+- Helpers and top-level sessions share the same model-family defaults for context and handover. Your explicit settings still win. (Concepts)
+- `/done` runs a closeout before closing a session. The starter pack and startup text are shorter, and the capability guide helps agents find what Razor already does.
+- The terminal no longer shows the animated workshop, the Earlier agent list, suggested next messages, or the emoji picker and shortcodes.
+- Releases ship agent-browser 0.44.0, with mouse buttons and modifiers for clicks, Cua Driver 0.62.1, and Claude Agent SDK 0.3.332.
+
+### Fixed
+
+- A response nobody reads no longer holds up every other request on its connection. Clients can also ask for heartbeats on quiet chat streams. A Mac server keeps its machine awake on mains power, and paired machines report when an announced sleep did not happen.
+- A finished notification waits for any background job that the turn started. When a helper reports, Razor keeps its checkout if another session might still be using it.
+- An explicit install refreshes the Mac launcher without dropping its signing identity. Updating alone does not replace it.
+- An MCP sign-in can be completed only by answering its own question.
+
 ## 0.9.1 (21 November 2026)
 
 On a Mac, run `razor install` once for each Razor home after updating, if you skipped it for 0.9.0.
