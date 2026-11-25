@@ -22,7 +22,7 @@ On a Mac, run `razor install` once for each Razor home after updating, if you sk
 - Helpers and top-level sessions share the same model-family defaults for context and handover. Your explicit settings still win. (Concepts)
 - `/done` runs a closeout before closing a session. The starter pack and startup text are shorter, and the capability guide helps agents find what Razor already does.
 - The terminal no longer shows the animated workshop, the Earlier agent list, suggested next messages, or the emoji picker and shortcodes.
-- Releases ship agent-browser 0.44.0, with mouse buttons and modifiers for clicks, Cua Driver 0.62.1, and Claude Agent SDK 0.3.332.
+- Releases ship agent-browser 0.45.0, with Firefox support, additional mouse buttons and modifiers for clicks, Cua Driver 0.62.1, and Claude Agent SDK 0.3.332.
 
 ### Fixed
 
